@@ -3046,6 +3046,13 @@ int CGameClient::OnSnapInput(int *pData, bool Dummy, bool Force)
 
 			static int s_aBlatantHookLockTicks[NUM_DUMMIES] = {0, 0};
 			static int s_aBlatantJumpCooldown[NUM_DUMMIES] = {0, 0};
+			static int s_aBlatantRiskState[NUM_DUMMIES] = {0, 0}; // 0=safe, 1=warning, 2=critical
+			static int s_aBlatantRiskSafeTicks[NUM_DUMMIES] = {0, 0};
+			static int s_aBlatantStickyTicks[NUM_DUMMIES] = {0, 0};
+			static int s_aBlatantStickyDir[NUM_DUMMIES] = {0, 0};
+			static int s_aBlatantStickyHook[NUM_DUMMIES] = {0, 0};
+			static int s_aBlatantStickyTargetX[NUM_DUMMIES] = {0, 0};
+			static int s_aBlatantStickyTargetY[NUM_DUMMIES] = {-1, -1};
 			if(g_Config.m_ClZzAvoidEnabled && !ZzFentBotOverridesInput)
 			{
 				auto IsTeleTile = [&](int Tile) {
@@ -3090,6 +3097,9 @@ int CGameClient::OnSnapInput(int *pData, bool Dummy, bool Force)
 				{
 					s_aBlatantHookLockTicks[DummyIndex] = 0;
 					s_aBlatantJumpCooldown[DummyIndex] = 0;
+					s_aBlatantRiskState[DummyIndex] = 0;
+					s_aBlatantRiskSafeTicks[DummyIndex] = 0;
+					s_aBlatantStickyTicks[DummyIndex] = 0;
 
 					const float Look = (float)std::clamp(g_Config.m_ClZzAvoidLookahead, 4, 128);
 					const float FreezeLook = minimum(Look, 32.0f);
@@ -3244,8 +3254,8 @@ int CGameClient::OnSnapInput(int *pData, bool Dummy, bool Force)
 						s_aBlatantJumpCooldown[DummyIndex]--;
 
 					const int PredTicks = std::clamp(g_Config.m_ClZzAvoidPredTicks, 1, 30);
-					const int WarningHazardTick = 5;
-					const int CriticalHazardTick = 3;
+					const int CriticalHazardTick = std::min(3, PredTicks);
+					const int WarningHazardTickBase = std::min(5, PredTicks);
 					const CCharacterCore CoreState = m_aClients[LocalId].m_RegularPredicted;
 
 					auto IsFreezeStrictAt = [&](const vec2 &Pos) {
@@ -3328,17 +3338,54 @@ int CGameClient::OnSnapInput(int *pData, bool Dummy, bool Force)
 					CNetObj_PlayerInput BaseInput = BuildInput(OrigDir, OrigHook, false, nullptr);
 					vec2 BaseVel(0.0f, 0.0f);
 					const int HazardTick = SimulateHazardTick(CoreState, BaseInput, PredTicks, Collision(), &BaseVel);
+					const float FallSpeed = maximum(Vel.y, 0.0f);
+					const int EarlyAssistTicks = std::clamp((int)floor((FallSpeed - 2.0f) / 1.25f + 1e-6f), 0, 4);
+					const int WarningHazardTickLow = std::min(CriticalHazardTick + 1, PredTicks);
+					const int WarningHazardTick = std::clamp(WarningHazardTickBase + EarlyAssistTicks, WarningHazardTickLow, PredTicks);
 					if(HazardTick >= PredTicks)
 					{
 						s_aBlatantHookLockTicks[DummyIndex] = 0;
+						s_aBlatantRiskState[DummyIndex] = 0;
+						s_aBlatantRiskSafeTicks[DummyIndex] = 0;
+						s_aBlatantStickyTicks[DummyIndex] = 0;
 					}
 					else
 					{
+						int RawRiskState = 0;
+						if(HazardTick < CriticalHazardTick)
+							RawRiskState = 2;
+						else if(HazardTick < WarningHazardTick)
+							RawRiskState = 1;
+
+						int &RiskState = s_aBlatantRiskState[DummyIndex];
+						int &RiskSafeTicks = s_aBlatantRiskSafeTicks[DummyIndex];
+						if(RawRiskState == 0)
+						{
+							RiskSafeTicks++;
+							if(RiskSafeTicks >= 3)
+								RiskState = 0;
+						}
+						else
+						{
+							RiskSafeTicks = 0;
+							if(RawRiskState == 2)
+							{
+								RiskState = 2;
+							}
+							else
+							{
+								// Keep critical one extra tick to avoid rapid warning<->critical flapping.
+								if(!(RiskState == 2 && HazardTick <= CriticalHazardTick + 1))
+									RiskState = 1;
+							}
+						}
+
 						const bool IdleInput = OrigDir == 0 && OrigHook == 0 && !OrigJumpHeld;
 						const bool RescueMode = IdleInput && HazardTick < WarningHazardTick;
-						const bool LightHookAssistOnly = HazardTick >= WarningHazardTick && !RescueMode;
-						const bool CriticalHazard = HazardTick < CriticalHazardTick;
-						const bool TunnelAssistAllowed = (HazardTick < WarningHazardTick && OrigHook == 0 && Vel.y > 1.5f) || RescueMode;
+						const bool WarningOrHigherRisk = RiskState >= 1;
+						const bool LightHookAssistOnly = RiskState == 1 && !RescueMode;
+						const bool CriticalHazard = RiskState >= 2;
+						const bool TunnelAssistAllowed = ((WarningOrHigherRisk && OrigHook == 0 && Vel.y > 1.5f) || RescueMode);
 						const bool HookLockActive = s_aBlatantHookLockTicks[DummyIndex] > 0 && OrigHook == 0;
 
 						bool UserEscaping = false;
@@ -3461,6 +3508,9 @@ int CGameClient::OnSnapInput(int *pData, bool Dummy, bool Force)
 								Score -= 10.0f;
 							if(Cand.m_Hook != 0)
 								Score -= 5.0f;
+							// In fast downward motion, prefer earlier hook options slightly.
+							if(Cand.m_Hook != 0 && WarningOrHigherRisk)
+								Score += maximum(FallSpeed - 2.0f, 0.0f) * 8.0f;
 							Cand.m_Score = Score;
 						}
 
@@ -3490,7 +3540,48 @@ int CGameClient::OnSnapInput(int *pData, bool Dummy, bool Force)
 
 						const float BaseScore = pBase ? pBase->m_Score : -1e9f;
 						bool Applied = false;
-						if(pBest && pBest->m_Score > BaseScore)
+						bool UsedSticky = false;
+						if(!HookLockActive && !RescueMode && WarningOrHigherRisk && s_aBlatantStickyTicks[DummyIndex] > 0)
+						{
+							CNetObj_PlayerInput StickyInput = BuildInput(s_aBlatantStickyDir[DummyIndex], s_aBlatantStickyHook[DummyIndex], false, nullptr);
+							StickyInput.m_TargetX = s_aBlatantStickyTargetX[DummyIndex];
+							StickyInput.m_TargetY = s_aBlatantStickyTargetY[DummyIndex];
+							if(StickyInput.m_TargetX == 0 && StickyInput.m_TargetY == 0)
+								StickyInput.m_TargetY = -1;
+							vec2 StickyVel(0.0f, 0.0f);
+							const int StickyHazardTick = SimulateHazardTick(CoreState, StickyInput, PredTicks, Collision(), &StickyVel);
+							float StickyScore = (float)StickyHazardTick * 100.0f;
+							if(StickyVel.y > 0.0f)
+								StickyScore -= StickyVel.y * 5.0f;
+							if(s_aBlatantStickyDir[DummyIndex] != 0)
+							{
+								const float ForwardSpeed = (float)s_aBlatantStickyDir[DummyIndex] * StickyVel.x;
+								if(ForwardSpeed > 0.0f)
+									StickyScore += ForwardSpeed * 2.0f;
+							}
+							if(s_aBlatantStickyDir[DummyIndex] != OrigDir)
+								StickyScore -= 10.0f;
+							if(s_aBlatantStickyHook[DummyIndex] != 0)
+								StickyScore -= 5.0f;
+							if(s_aBlatantStickyHook[DummyIndex] != 0 && WarningOrHigherRisk)
+								StickyScore += maximum(FallSpeed - 2.0f, 0.0f) * 8.0f;
+
+							const float StickyGainNeeded = RiskState >= 2 ? 4.0f : 8.0f;
+							const float BestAllowance = pBest ? (pBest->m_Score - 8.0f) : -1e9f;
+							if(StickyScore > BaseScore + StickyGainNeeded && StickyScore >= BestAllowance)
+							{
+								*pInput = StickyInput;
+								Applied = true;
+								UsedSticky = true;
+								s_aBlatantStickyTicks[DummyIndex]--;
+							}
+							else
+							{
+								s_aBlatantStickyTicks[DummyIndex] = 0;
+							}
+						}
+
+						if(!Applied && pBest && pBest->m_Score > BaseScore)
 						{
 							*pInput = pBest->m_Input;
 							Applied = true;
@@ -3513,6 +3604,20 @@ int CGameClient::OnSnapInput(int *pData, bool Dummy, bool Force)
 							s_aBlatantHookLockTicks[DummyIndex] = 0;
 						}
 
+						if(!UsedSticky && Applied && pBest && !pBest->m_Jump && pBest->m_Id != 0)
+						{
+							s_aBlatantStickyDir[DummyIndex] = pBest->m_Direction;
+							s_aBlatantStickyHook[DummyIndex] = pBest->m_Hook;
+							s_aBlatantStickyTargetX[DummyIndex] = pBest->m_Input.m_TargetX;
+							s_aBlatantStickyTargetY[DummyIndex] = pBest->m_Input.m_TargetY;
+							const bool TunnelStyle = pBest->m_Id >= 5 && pBest->m_Id <= 7;
+							s_aBlatantStickyTicks[DummyIndex] = TunnelStyle ? 5 : 4;
+						}
+						else if(!Applied || (pBest && pBest->m_Jump))
+						{
+							s_aBlatantStickyTicks[DummyIndex] = 0;
+						}
+
 						if(Applied && (pInput->m_Jump & 1) != 0)
 							s_aBlatantJumpCooldown[DummyIndex] = 20;
 					}
@@ -3522,6 +3627,9 @@ int CGameClient::OnSnapInput(int *pData, bool Dummy, bool Force)
 			{
 				s_aBlatantHookLockTicks[DummyIndex] = 0;
 				s_aBlatantJumpCooldown[DummyIndex] = 0;
+				s_aBlatantRiskState[DummyIndex] = 0;
+				s_aBlatantRiskSafeTicks[DummyIndex] = 0;
+				s_aBlatantStickyTicks[DummyIndex] = 0;
 			}
 
 			// ZZetClient: auto-shotgun bounce-to-self on fire.
