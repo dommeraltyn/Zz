@@ -574,6 +574,68 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 			Inner.HSplitTop(LineSize * 1.8f, &Label, &Inner);
 			Ui()->DoLabel(&Label, Localize("Задерживает пакеты и создает намеренно пинг."), 14.0f, TEXTALIGN_ML);
 		}
+		{
+			CUIRect Inner;
+			DoFeaturePanel(RightView, 182.0f, Inner);
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzHookRide, Localize("HookRide"), &g_Config.m_ClZzHookRide, &Inner, LineSize);
+			Inner.HSplitTop(4.0f, nullptr, &Inner);
+			Inner.HSplitTop(LineSize, &Button, &Inner);
+			Ui()->DoScrollbarOption(&g_Config.m_ClZzHookRideMoveSpeed, &g_Config.m_ClZzHookRideMoveSpeed, &Button, Localize("Target move speed"), 1, 32);
+			Inner.HSplitTop(4.0f, nullptr, &Inner);
+			Inner.HSplitTop(LineSize, &Label, &Inner);
+			Ui()->DoLabel(&Label, Localize("HookRide keybind"), 14.0f, TEXTALIGN_ML);
+			Inner.HSplitTop(LineSize, &Button, &Inner);
+			static CButtonContainer s_HookRideKeyReader;
+			static CButtonContainer s_HookRideKeyClear;
+			CBindSlot CurrentBindHookRide((int)g_Config.m_ClZzHookRideKey, (int)g_Config.m_ClZzHookRideMod);
+			const auto ResHookRide = GameClient()->m_KeyBinder.DoKeyReader(&s_HookRideKeyReader, &s_HookRideKeyClear, &Button, CurrentBindHookRide, false);
+			if(!ResHookRide.m_Aborted && (ResHookRide.m_Bind.m_Key != CurrentBindHookRide.m_Key || ResHookRide.m_Bind.m_ModifierMask != CurrentBindHookRide.m_ModifierMask))
+			{
+				if(CurrentBindHookRide.m_Key >= KEY_FIRST && CurrentBindHookRide.m_Key < KEY_LAST)
+					GameClient()->m_Binds.Bind(CurrentBindHookRide.m_Key, "", false, CurrentBindHookRide.m_ModifierMask);
+				g_Config.m_ClZzHookRideKey = ResHookRide.m_Bind.m_Key;
+				g_Config.m_ClZzHookRideMod = ResHookRide.m_Bind.m_ModifierMask;
+				if(ResHookRide.m_Bind.m_Key >= KEY_FIRST && ResHookRide.m_Bind.m_Key < KEY_LAST)
+					GameClient()->m_Binds.Bind(ResHookRide.m_Bind.m_Key, "+zz_hook_ride_toggle", false, ResHookRide.m_Bind.m_ModifierMask);
+			}
+			Inner.HSplitTop(4.0f, nullptr, &Inner);
+			Inner.HSplitTop(LineSize * 2.0f, &Label, &Inner);
+			Ui()->DoLabel(&Label, Localize("Держит игрока возле целевой точки. Точка двигается клавишами W/A/S/D."), 14.0f, TEXTALIGN_ML);
+		}
+		{
+			CUIRect Inner;
+			DoFeaturePanel(RightView, 190.0f, Inner);
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzVisualPredict, Localize("Visual predict"), &g_Config.m_ClZzVisualPredict, &Inner, LineSize);
+			Inner.HSplitTop(4.0f, nullptr, &Inner);
+			Inner.HSplitTop(LineSize, &Button, &Inner);
+			Ui()->DoScrollbarOption(&g_Config.m_ClZzVisualPredictTicks, &g_Config.m_ClZzVisualPredictTicks, &Button, Localize("Predict ticks"), 2, 30);
+			Inner.HSplitTop(4.0f, nullptr, &Inner);
+			Inner.HSplitTop(LineSize, &Button, &Inner);
+			Ui()->DoScrollbarOption(&g_Config.m_ClZzVisualPredictThickness, &g_Config.m_ClZzVisualPredictThickness, &Button, Localize("Line thickness"), 1, 6);
+			Inner.HSplitTop(4.0f, nullptr, &Inner);
+			Inner.HSplitTop(LineSize, &Button, &Inner);
+			Ui()->DoScrollbarOption(&g_Config.m_ClZzVisualPredictStyle, &g_Config.m_ClZzVisualPredictStyle, &Button, Localize("Line style (0 solid, 1 dash, 2 dots)"), 0, 2);
+			Inner.HSplitTop(4.0f, nullptr, &Inner);
+			Inner.HSplitTop(LineSize, &Label, &Inner);
+			Ui()->DoLabel(&Label, Localize("Visual predict keybind"), 14.0f, TEXTALIGN_ML);
+			Inner.HSplitTop(LineSize, &Button, &Inner);
+			static CButtonContainer s_VisualPredictKeyReader;
+			static CButtonContainer s_VisualPredictKeyClear;
+			CBindSlot CurrentBindVisualPredict((int)g_Config.m_ClZzVisualPredictKey, (int)g_Config.m_ClZzVisualPredictMod);
+			const auto ResVisualPredict = GameClient()->m_KeyBinder.DoKeyReader(&s_VisualPredictKeyReader, &s_VisualPredictKeyClear, &Button, CurrentBindVisualPredict, false);
+			if(!ResVisualPredict.m_Aborted && (ResVisualPredict.m_Bind.m_Key != CurrentBindVisualPredict.m_Key || ResVisualPredict.m_Bind.m_ModifierMask != CurrentBindVisualPredict.m_ModifierMask))
+			{
+				if(CurrentBindVisualPredict.m_Key >= KEY_FIRST && CurrentBindVisualPredict.m_Key < KEY_LAST)
+					GameClient()->m_Binds.Bind(CurrentBindVisualPredict.m_Key, "", false, CurrentBindVisualPredict.m_ModifierMask);
+				g_Config.m_ClZzVisualPredictKey = ResVisualPredict.m_Bind.m_Key;
+				g_Config.m_ClZzVisualPredictMod = ResVisualPredict.m_Bind.m_ModifierMask;
+				if(ResVisualPredict.m_Bind.m_Key >= KEY_FIRST && ResVisualPredict.m_Bind.m_Key < KEY_LAST)
+					GameClient()->m_Binds.Bind(ResVisualPredict.m_Bind.m_Key, "+zz_visual_predict_toggle", false, ResVisualPredict.m_Bind.m_ModifierMask);
+			}
+			Inner.HSplitTop(4.0f, nullptr, &Inner);
+			Inner.HSplitTop(LineSize * 1.8f, &Label, &Inner);
+			Ui()->DoLabel(&Label, Localize("Показывает линию предикта; опасный участок подсвечивается красным."), 14.0f, TEXTALIGN_ML);
+		}
 		pFeatureScrollRegion = nullptr;
 		s_MiscScrollRegion.End();
 	}

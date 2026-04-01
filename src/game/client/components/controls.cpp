@@ -488,6 +488,18 @@ void CControls::OnConsoleInit()
 		Console()->Register("zz_fake_lag_toggle", "", CFGFLAG_CLIENT, ConKeyToggle, &s_ToggleLegacy, "ZZetClient: toggle fake lag (legacy)");
 	}
 	{
+		static CInputToggleOnce s_Toggle = {&g_Config.m_ClZzHookRide, false};
+		static CInputToggle s_ToggleLegacy = {&g_Config.m_ClZzHookRide};
+		Console()->Register("+zz_hook_ride_toggle", "", CFGFLAG_CLIENT, ConKeyToggleOnce, &s_Toggle, "ZZetClient: toggle hook ride");
+		Console()->Register("zz_hook_ride_toggle", "", CFGFLAG_CLIENT, ConKeyToggle, &s_ToggleLegacy, "ZZetClient: toggle hook ride (legacy)");
+	}
+	{
+		static CInputToggleOnce s_Toggle = {&g_Config.m_ClZzVisualPredict, false};
+		static CInputToggle s_ToggleLegacy = {&g_Config.m_ClZzVisualPredict};
+		Console()->Register("+zz_visual_predict_toggle", "", CFGFLAG_CLIENT, ConKeyToggleOnce, &s_Toggle, "ZZetClient: toggle visual predict");
+		Console()->Register("zz_visual_predict_toggle", "", CFGFLAG_CLIENT, ConKeyToggle, &s_ToggleLegacy, "ZZetClient: toggle visual predict (legacy)");
+	}
+	{
 		static CFentBotWaypointKey s_Key = {this, GameClient(), false};
 		Console()->Register("+zz_fentbot_waypoint", "", CFGFLAG_CLIENT, ConKeyFentBotWaypoint, &s_Key, "ZZetClient: set/clear FentBot waypoint");
 	}
@@ -506,6 +518,10 @@ void CControls::OnConsoleInit()
 		GameClient()->m_Binds.Bind(g_Config.m_ClZzBalanceBotKey, "+zz_balance_bot_toggle", false, g_Config.m_ClZzBalanceBotMod);
 	if(g_Config.m_ClZzFakeLagKey >= KEY_FIRST && g_Config.m_ClZzFakeLagKey < KEY_LAST)
 		GameClient()->m_Binds.Bind(g_Config.m_ClZzFakeLagKey, "+zz_fake_lag_toggle", false, g_Config.m_ClZzFakeLagMod);
+	if(g_Config.m_ClZzHookRideKey >= KEY_FIRST && g_Config.m_ClZzHookRideKey < KEY_LAST)
+		GameClient()->m_Binds.Bind(g_Config.m_ClZzHookRideKey, "+zz_hook_ride_toggle", false, g_Config.m_ClZzHookRideMod);
+	if(g_Config.m_ClZzVisualPredictKey >= KEY_FIRST && g_Config.m_ClZzVisualPredictKey < KEY_LAST)
+		GameClient()->m_Binds.Bind(g_Config.m_ClZzVisualPredictKey, "+zz_visual_predict_toggle", false, g_Config.m_ClZzVisualPredictMod);
 	if(g_Config.m_ClZzFentBotWaypointKey >= KEY_FIRST && g_Config.m_ClZzFentBotWaypointKey < KEY_LAST)
 		GameClient()->m_Binds.Bind(g_Config.m_ClZzFentBotWaypointKey, "+zz_fentbot_waypoint", false, g_Config.m_ClZzFentBotWaypointMod);
 }
