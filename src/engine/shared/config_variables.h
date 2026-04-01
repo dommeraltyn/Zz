@@ -273,7 +273,7 @@ MACRO_CONFIG_INT(ClZzHookRideMoveSpeed, cl_zz_hook_ride_move_speed, 8, 1, 32, CF
 MACRO_CONFIG_INT(ClZzVisualPredict, cl_zz_visual_predict, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "ZZetClient visual movement prediction enabled")
 MACRO_CONFIG_INT(ClZzVisualPredictKey, cl_zz_visual_predict_key, 0, 0, 512, CFGFLAG_CLIENT | CFGFLAG_SAVE, "ZZetClient visual prediction bind key (internal)")
 MACRO_CONFIG_INT(ClZzVisualPredictMod, cl_zz_visual_predict_mod, 0, 0, 7, CFGFLAG_CLIENT | CFGFLAG_SAVE, "ZZetClient visual prediction bind modifier mask (internal)")
-MACRO_CONFIG_INT(ClZzVisualPredictTicks, cl_zz_visual_predict_ticks, 10, 2, 30, CFGFLAG_CLIENT | CFGFLAG_SAVE, "ZZetClient visual prediction horizon in ticks")
+MACRO_CONFIG_INT(ClZzVisualPredictTicks, cl_zz_visual_predict_ticks, 10, 2, 50, CFGFLAG_CLIENT | CFGFLAG_SAVE, "ZZetClient visual prediction horizon in ticks")
 MACRO_CONFIG_INT(ClZzVisualPredictStyle, cl_zz_visual_predict_style, 0, 0, 2, CFGFLAG_CLIENT | CFGFLAG_SAVE, "ZZetClient visual prediction line style: 0=solid, 1=dashed, 2=dots")
 MACRO_CONFIG_INT(ClZzVisualPredictThickness, cl_zz_visual_predict_thickness, 2, 1, 6, CFGFLAG_CLIENT | CFGFLAG_SAVE, "ZZetClient visual prediction thickness")
 MACRO_CONFIG_INT(ClZzFakePing, cl_zz_fake_ping, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "ZZetClient fake ping: delay ping replies and input packets by configured ms")

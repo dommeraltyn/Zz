@@ -2278,6 +2278,7 @@ void CHud::OnRender()
 				{
 					const int HazardIndex = GameClient()->VisualPredictHazardIndex();
 					const bool HazardIsDeath = GameClient()->VisualPredictHazardIsDeath();
+					const int DrawNum = HazardIndex >= 0 ? minimum(Num, HazardIndex + 1) : Num;
 					const int Style = std::clamp(g_Config.m_ClZzVisualPredictStyle, 0, 2);
 					const int Thickness = std::clamp(g_Config.m_ClZzVisualPredictThickness, 1, 6);
 					const float HalfWidth = 0.75f + (float)Thickness * 0.85f;
@@ -2337,7 +2338,7 @@ void CHud::OnRender()
 							}
 						}
 					};
-					for(int i = 0; i + 1 < Num; i++)
+					for(int i = 0; i + 1 < DrawNum; i++)
 					{
 						const vec2 A = GameClient()->VisualPredictPathPoint(i);
 						const vec2 B = GameClient()->VisualPredictPathPoint(i + 1);
@@ -2351,7 +2352,7 @@ void CHud::OnRender()
 						Graphics()->QuadsBegin();
 						if(!vSafeRibbon.empty())
 						{
-							Graphics()->SetColor(0.98f, 0.70f, 0.12f, 0.90f);
+							Graphics()->SetColor(1.0f, 1.0f, 1.0f, 0.92f);
 							Graphics()->QuadsDrawFreeform(vSafeRibbon.data(), vSafeRibbon.size());
 						}
 						if(!vHazardRibbon.empty())

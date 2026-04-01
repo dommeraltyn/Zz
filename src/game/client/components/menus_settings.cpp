@@ -608,7 +608,7 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzVisualPredict, Localize("Visual predict"), &g_Config.m_ClZzVisualPredict, &Inner, LineSize);
 			Inner.HSplitTop(4.0f, nullptr, &Inner);
 			Inner.HSplitTop(LineSize, &Button, &Inner);
-			Ui()->DoScrollbarOption(&g_Config.m_ClZzVisualPredictTicks, &g_Config.m_ClZzVisualPredictTicks, &Button, Localize("Predict ticks"), 2, 30);
+			Ui()->DoScrollbarOption(&g_Config.m_ClZzVisualPredictTicks, &g_Config.m_ClZzVisualPredictTicks, &Button, Localize("Predict ticks"), 2, 50);
 			Inner.HSplitTop(4.0f, nullptr, &Inner);
 			Inner.HSplitTop(LineSize, &Button, &Inner);
 			Ui()->DoScrollbarOption(&g_Config.m_ClZzVisualPredictThickness, &g_Config.m_ClZzVisualPredictThickness, &Button, Localize("Line thickness"), 1, 6);
