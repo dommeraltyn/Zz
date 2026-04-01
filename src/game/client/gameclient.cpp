@@ -3309,6 +3309,65 @@ int CGameClient::OnSnapInput(int *pData, bool Dummy, bool Force)
 							*pOutVel = pSimChar->Core()->m_Vel;
 						return MaxTicks;
 					};
+					struct SAvoidTrace
+					{
+						bool m_HasFrozenPoint = false;
+						int m_FirstFrozenTick = -1;
+						vec2 m_FirstFrozenPoint = vec2(0.0f, 0.0f);
+						int m_FrozenTickCount = 0;
+					};
+					auto PredictCandidateTrace = [&](const CCharacterCore &State, CNetObj_PlayerInput In, int MaxTicks, const CCollision *pCol) -> SAvoidTrace {
+						auto IsFreezeAtPos = [&](const vec2 &Pos) {
+							const CCollision *pCollision = pCol ? pCol : Collision();
+							const int PureIndex = pCollision->GetPureMapIndex(Pos);
+							if(PureIndex < 0)
+								return false;
+							const int Tile = pCollision->GetTileIndex(PureIndex);
+							const int FTile = pCollision->GetFrontTileIndex(PureIndex);
+							return Tile == TILE_FREEZE || FTile == TILE_FREEZE;
+						};
+
+						SAvoidTrace Trace;
+						CGameWorld FutureWorld;
+						FutureWorld.CopyWorldClean(&m_RegularPredictedWorld);
+						FutureWorld.m_GameTick = Client()->GameTick(g_Config.m_ClDummy);
+						CCharacter *pCharacter = FutureWorld.GetCharacterById(LocalId);
+						if(!pCharacter)
+							return Trace;
+
+						pCharacter->SetCore(State);
+						if(In.m_TargetX == 0 && In.m_TargetY == 0)
+							In.m_TargetY = -1;
+
+						if(IsFreezeAtPos(pCharacter->GetPos()))
+						{
+							Trace.m_HasFrozenPoint = true;
+							Trace.m_FirstFrozenTick = 0;
+							Trace.m_FirstFrozenPoint = pCharacter->GetPos();
+							Trace.m_FrozenTickCount = 1;
+						}
+
+						for(int Tick = 0; Tick < MaxTicks; Tick++)
+						{
+							pCharacter->OnPredictedInput(&In);
+							FutureWorld.Tick();
+							pCharacter = FutureWorld.GetCharacterById(LocalId);
+							if(!pCharacter)
+								break;
+							const vec2 CurrentPos = pCharacter->GetPos();
+							const bool Frozen = IsFreezeAtPos(CurrentPos);
+							if(!Frozen)
+								continue;
+							if(!Trace.m_HasFrozenPoint)
+							{
+								Trace.m_HasFrozenPoint = true;
+								Trace.m_FirstFrozenTick = Tick + 1;
+								Trace.m_FirstFrozenPoint = CurrentPos;
+							}
+							Trace.m_FrozenTickCount++;
+						}
+						return Trace;
+					};
 
 					const int OrigDir = std::clamp(OrigInput.m_Direction, -1, 1);
 					const int OrigHook = OrigInput.m_Hook ? 1 : 0;
@@ -3412,6 +3471,9 @@ int CGameClient::OnSnapInput(int *pData, bool Dummy, bool Force)
 							int m_HazardTick;
 							vec2 m_EndVel;
 							float m_Score;
+							bool m_TraceHasFrozen;
+							int m_TraceFirstFrozenTick;
+							int m_TraceFrozenTickCount;
 							bool m_Valid;
 						};
 
@@ -3435,6 +3497,9 @@ int CGameClient::OnSnapInput(int *pData, bool Dummy, bool Force)
 							Cand.m_HazardTick = PredTicks;
 							Cand.m_EndVel = vec2(0.0f, 0.0f);
 							Cand.m_Score = -1e9f;
+							Cand.m_TraceHasFrozen = false;
+							Cand.m_TraceFirstFrozenTick = -1;
+							Cand.m_TraceFrozenTickCount = 0;
 							Cand.m_Valid = true;
 							vCandidates.push_back(Cand);
 						};
@@ -3519,6 +3584,39 @@ int CGameClient::OnSnapInput(int *pData, bool Dummy, bool Force)
 							if(!pBaseCand || Cand.m_Score < pBaseCand->m_Score + 20.0f)
 								Cand.m_Valid = false;
 						}
+						for(auto &Cand : vCandidates)
+						{
+							if(!Cand.m_Valid)
+								continue;
+							const SAvoidTrace Trace = PredictCandidateTrace(CoreState, Cand.m_Input, PredTicks, Collision());
+							Cand.m_TraceHasFrozen = Trace.m_HasFrozenPoint;
+							Cand.m_TraceFirstFrozenTick = Trace.m_FirstFrozenTick;
+							Cand.m_TraceFrozenTickCount = Trace.m_FrozenTickCount;
+							if(Trace.m_HasFrozenPoint)
+							{
+								Cand.m_Score -= 3000.0f + (float)Trace.m_FrozenTickCount * 400.0f;
+								if(Trace.m_FirstFrozenTick >= 0)
+									Cand.m_Score -= (float)std::max(0, PredTicks - Trace.m_FirstFrozenTick) * 60.0f;
+							}
+						}
+						auto CompareCandidates = [&](const SAvoidCandidate *pA, const SAvoidCandidate *pB) {
+							if(pA == pB)
+								return 0;
+							if(pA->m_HazardTick != pB->m_HazardTick)
+								return pA->m_HazardTick > pB->m_HazardTick ? 1 : -1;
+							if(pA->m_TraceHasFrozen != pB->m_TraceHasFrozen)
+								return !pA->m_TraceHasFrozen ? 1 : -1;
+							if(pA->m_TraceHasFrozen && pB->m_TraceHasFrozen)
+							{
+								if(pA->m_TraceFrozenTickCount != pB->m_TraceFrozenTickCount)
+									return pA->m_TraceFrozenTickCount < pB->m_TraceFrozenTickCount ? 1 : -1;
+								if(pA->m_TraceFirstFrozenTick != pB->m_TraceFirstFrozenTick)
+									return pA->m_TraceFirstFrozenTick > pB->m_TraceFirstFrozenTick ? 1 : -1;
+							}
+							if(fabsf(pA->m_Score - pB->m_Score) > 0.001f)
+								return pA->m_Score > pB->m_Score ? 1 : -1;
+							return 0;
+						};
 
 						SAvoidCandidate *pBase = FindCandidateById(0);
 						SAvoidCandidate *pBest = nullptr;
@@ -3526,18 +3624,17 @@ int CGameClient::OnSnapInput(int *pData, bool Dummy, bool Force)
 						{
 							if(!Cand.m_Valid)
 								continue;
-							if(!pBest || Cand.m_Score > pBest->m_Score)
+							if(!pBest || CompareCandidates(&Cand, pBest) > 0)
 								pBest = &Cand;
 						}
 
 						SAvoidCandidate *pHookOn = FindCandidateById(0);
 						SAvoidCandidate *pHookOff = FindCandidateById(4);
-						if(OrigHook == 1 && pHookOn && pHookOff && pHookOff->m_Score > pHookOn->m_Score)
+						if(OrigHook == 1 && pHookOn && pHookOff && CompareCandidates(pHookOff, pHookOn) > 0)
 							pBest = pHookOff;
 
-						const float BaseScore = pBase ? pBase->m_Score : -1e9f;
 						bool Applied = false;
-						if(pBest && pBest->m_Score > BaseScore)
+						if(pBest && pBase && CompareCandidates(pBest, pBase) > 0)
 						{
 							*pInput = pBest->m_Input;
 							Applied = true;
