@@ -249,12 +249,10 @@ MACRO_CONFIG_INT(ClZzAvoidKill, cl_zz_avoid_kill, 1, 0, 1, CFGFLAG_CLIENT | CFGF
 MACRO_CONFIG_INT(ClZzAvoidLookahead, cl_zz_avoid_lookahead, 24, 4, 128, CFGFLAG_CLIENT | CFGFLAG_SAVE, "ZZetClient avoid lookahead distance (pixels)")
 MACRO_CONFIG_INT(ClZzAvoidHookAssist, cl_zz_avoid_hook_assist, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "ZZetClient avoid hook assist enabled")
 MACRO_CONFIG_INT(ClZzAvoidHookAssistRange, cl_zz_avoid_hook_assist_range, 96, 16, 512, CFGFLAG_CLIENT | CFGFLAG_SAVE, "ZZetClient avoid hook assist hazard scan range (pixels)")
-MACRO_CONFIG_INT(ClZzAvoidMode, cl_zz_avoid_mode, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "ZZetClient avoid mode: 0=old(for block) 1=blatant")
-MACRO_CONFIG_INT(ClZzAvoidPredTicks, cl_zz_avoid_pred_ticks, 10, 4, 30, CFGFLAG_CLIENT | CFGFLAG_SAVE, "ZZetClient avoid blatant mode prediction ticks")
-MACRO_CONFIG_INT(ClZzAvoidBlatantJump, cl_zz_avoid_blatant_jump, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "ZZetClient avoid blatant: allow emergency jump")
+MACRO_CONFIG_INT(ClZzAvoidMode, cl_zz_avoid_mode, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Avoid mode: 0=old, 1=blatant")
+MACRO_CONFIG_INT(ClZzAvoidPredTicks, cl_zz_avoid_pred_ticks, 10, 1, 30, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Blatant: prediction horizon in ticks")
+MACRO_CONFIG_INT(ClZzAvoidJump, cl_zz_avoid_jump, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Blatant: allow jump only at 100% freeze risk")
 MACRO_CONFIG_INT(ClZzAvoidDebugLog, cl_zz_avoid_debug_log, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "ZZetClient avoid debug log to save/avoid/avoid_trace_*.log")
-
-MACRO_CONFIG_INT(ClZzAvoidJump, cl_zz_avoid_jump, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "ZZetClient avoid freeze by jumping (independent toggle)")
 
 MACRO_CONFIG_INT(ClZzAutoUnfreeze, cl_zz_auto_unfreeze, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "ZZetClient auto-unfreeze: predict freeze exit, switch to laser and fire wallshot before unfreeze")
 MACRO_CONFIG_INT(ClZzAutoUnfreezeFov, cl_zz_auto_unfreeze_fov, 360, 1, 360, CFGFLAG_CLIENT | CFGFLAG_SAVE, "ZZetClient auto-unfreeze FOV")

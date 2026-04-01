@@ -675,56 +675,60 @@ int CControls::SnapInput(int *pData)
 		static int s_aFakeLagTick[NUM_DUMMIES] = {0, 0};
 		const int DummyIndex = g_Config.m_ClDummy;
 		const int LocalId = GameClient()->m_Snap.m_LocalClientId;
+		const bool LocalSpectating = LocalId >= 0 && LocalId < MAX_CLIENTS && GameClient()->m_aClients[LocalId].m_Spec;
 		const bool LocalPaused = LocalId >= 0 && LocalId < MAX_CLIENTS && GameClient()->m_aClients[LocalId].m_Paused;
 		const bool GamePaused = GameClient()->m_Snap.m_pGameInfoObj && (GameClient()->m_Snap.m_pGameInfoObj->m_GameStateFlags & GAMESTATEFLAG_PAUSED);
 		const bool EscapePressed = Input()->KeyPress(KEY_ESCAPE);
-		const bool FakeLagBlocked = EscapePressed || GameClient()->m_Menus.IsActive() || GameClient()->m_Snap.m_SpecInfo.m_Active || LocalPaused || GamePaused;
-		if(g_Config.m_ClZzFakeLag && !FakeLagBlocked)
+		const bool FakeLagBlocked = EscapePressed || GameClient()->m_Menus.IsActive() || GameClient()->m_Snap.m_SpecInfo.m_Active || LocalSpectating || LocalPaused || GamePaused;
+		if(g_Config.m_ClZzFakeLag)
 		{
-			const int BaseDir = m_aInputData[DummyIndex].m_Direction;
-			const bool DriftMode = g_Config.m_ClZzFakeLagDrift != 0;
-			bool OnGround = false;
-			if(GameClient()->m_Snap.m_pLocalCharacter)
+			// Hard stop fake-lag carryover before any fake-lag input is injected.
+			if(FakeLagBlocked)
 			{
-				const vec2 ProbePos = GameClient()->m_LocalCharacterPos + vec2(0.0f, CCharacterCore::PhysicalSize() + 6.0f);
-				OnGround = GameClient()->Collision()->CheckPoint(ProbePos);
-			}
-			const int Tick = s_aFakeLagTick[DummyIndex]++;
-			if(BaseDir != 0)
-			{
-				// Preserve movement most of the time and inject occasional opposite ticks.
-				// In air we inject less often to avoid breaking control.
-				const int Phase = OnGround ? (Tick % 4) : (Tick % 6);
-				const bool InjectOpposite = OnGround ? (Phase == 1) : (Phase == 2);
-				m_aInputData[DummyIndex].m_Direction = InjectOpposite ? -BaseDir : BaseDir;
+				s_aFakeLagTick[DummyIndex] = 0;
+				m_aInputData[DummyIndex].m_Direction = 0;
 			}
 			else
 			{
-				if(DriftMode)
+				const int BaseDir = m_aInputData[DummyIndex].m_Direction;
+				const bool DriftMode = g_Config.m_ClZzFakeLagDrift != 0;
+				bool OnGround = false;
+				if(GameClient()->m_Snap.m_pLocalCharacter)
 				{
-					m_aInputData[DummyIndex].m_Direction = (Tick & 1) ? 1 : -1;
+					const vec2 ProbePos = GameClient()->m_LocalCharacterPos + vec2(0.0f, CCharacterCore::PhysicalSize() + 6.0f);
+					OnGround = GameClient()->Collision()->CheckPoint(ProbePos);
+				}
+				const int Tick = s_aFakeLagTick[DummyIndex]++;
+				if(BaseDir != 0)
+				{
+					// Preserve movement most of the time and inject occasional opposite ticks.
+					// In air we inject less often to avoid breaking control.
+					const int Phase = OnGround ? (Tick % 4) : (Tick % 6);
+					const bool InjectOpposite = OnGround ? (Phase == 1) : (Phase == 2);
+					m_aInputData[DummyIndex].m_Direction = InjectOpposite ? -BaseDir : BaseDir;
 				}
 				else
 				{
-					// Standing still: short left burst, pause, short right burst, pause.
-					// Keeps fake-lag wobble while staying close to the same coordinates.
-					const int StandPhase = Tick % 8;
-					if(StandPhase < 2)
-						m_aInputData[DummyIndex].m_Direction = -1;
-					else if(StandPhase < 4)
-						m_aInputData[DummyIndex].m_Direction = 0;
-					else if(StandPhase < 6)
-						m_aInputData[DummyIndex].m_Direction = 1;
+					if(DriftMode)
+					{
+						m_aInputData[DummyIndex].m_Direction = (Tick & 1) ? 1 : -1;
+					}
 					else
-						m_aInputData[DummyIndex].m_Direction = 0;
+					{
+						// Standing still: short left burst, pause, short right burst, pause.
+						// Keeps fake-lag wobble while staying close to the same coordinates.
+						const int StandPhase = Tick % 8;
+						if(StandPhase < 2)
+							m_aInputData[DummyIndex].m_Direction = -1;
+						else if(StandPhase < 4)
+							m_aInputData[DummyIndex].m_Direction = 0;
+						else if(StandPhase < 6)
+							m_aInputData[DummyIndex].m_Direction = 1;
+						else
+							m_aInputData[DummyIndex].m_Direction = 0;
+					}
 				}
 			}
-		}
-		else if(g_Config.m_ClZzFakeLag)
-		{
-			// Hard stop fake-lag carryover when menu/spec/pause is entered.
-			s_aFakeLagTick[DummyIndex] = 0;
-			m_aInputData[DummyIndex].m_Direction = 0;
 		}
 
 		static bool s_aTriggerLaserReleasePending[NUM_DUMMIES] = {false, false};
