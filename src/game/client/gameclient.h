@@ -359,6 +359,7 @@ public:
 	const vec2 &FentBotSubgoal() const { return m_FentBotSubgoal; }
 	bool HookRideIsActive() const { return m_ZzHookRideActive; }
 	const vec2 &HookRideTarget() const { return m_ZzHookRideTarget; }
+	void UpdateVisualPredictPath();
 	static constexpr int ZZ_VISUAL_PREDICT_MAX_POINTS_PUBLIC = 51;
 	int VisualPredictPathLen() const { return m_ZzVisualPredictPathLen; }
 	const vec2 &VisualPredictPathPoint(int Index) const { return m_aZzVisualPredictPath[Index]; }

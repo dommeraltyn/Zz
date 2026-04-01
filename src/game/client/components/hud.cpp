@@ -2262,6 +2262,7 @@ void CHud::OnRender()
 				Graphics()->MapScreen(0.0f, 0.0f, m_Width, m_Height);
 			}
 
+			GameClient()->UpdateVisualPredictPath();
 			if(g_Config.m_ClZzVisualPredict && GameClient()->VisualPredictPathLen() >= 2)
 			{
 				float WorldW = 0.0f;
