@@ -3430,9 +3430,19 @@ int CGameClient::OnSnapInput(int *pData, bool Dummy, bool Force)
 						const bool CriticalHazard = RiskState >= 2;
 						const bool TunnelAssistAllowed = ((WarningOrHigherRisk && OrigHook == 0 && Vel.y > 1.5f) || RescueMode);
 						const bool HookLockActive = s_aBlatantHookLockTicks[DummyIndex] > 0 && OrigHook == 0;
+						int CorridorSideBlocks = 0;
+						for(float SampleY : {-10.0f, 0.0f, 10.0f})
+						{
+							const bool LeftBlocked = Collision()->CheckPoint(LocalPos.x - 18.0f, LocalPos.y + SampleY);
+							const bool RightBlocked = Collision()->CheckPoint(LocalPos.x + 18.0f, LocalPos.y + SampleY);
+							if(LeftBlocked && RightBlocked)
+								CorridorSideBlocks++;
+						}
+						const bool NarrowOneTileCorridor = CorridorSideBlocks >= 2;
+						const bool CorridorFullControl = NarrowOneTileCorridor;
 
 						bool UserEscaping = false;
-						if(!RescueMode && OrigDir != 0)
+						if(!RescueMode && OrigDir != 0 && !CorridorFullControl)
 						{
 							CNetObj_PlayerInput EscapeProbe = BuildInput(0, OrigHook, false, nullptr);
 							const int NeutralHazardTick = SimulateHazardTick(CoreState, EscapeProbe, PredTicks, Collision(), nullptr);
@@ -3478,14 +3488,30 @@ int CGameClient::OnSnapInput(int *pData, bool Dummy, bool Force)
 						};
 
 						std::vector<SAvoidCandidate> vCandidates;
-						vCandidates.reserve(11);
+						vCandidates.reserve(32);
 
 						const vec2 AimUpLeft = normalize(vec2(-1.0f, -1.0f)) * 250.0f;
 						const vec2 AimUpRight = normalize(vec2(1.0f, -1.0f)) * 250.0f;
 						const vec2 AimUp = vec2(0.0f, -250.0f);
+						const float HookLen = (float)m_aTuning[DummyIndex].m_HookLength;
+						auto IsHookAimHookable = [&](const vec2 &AimVec) {
+							vec2 Dir = AimVec;
+							if(length(Dir) < 0.001f)
+								return false;
+							Dir = normalize(Dir);
+							vec2 HitPos;
+							int TeleNr = 0;
+							const int Hit = Collision()->IntersectLineTeleHook(LocalPos, LocalPos + Dir * (HookLen + 6.0f), &HitPos, nullptr, &TeleNr);
+							if(Hit == 0 || Hit == TILE_NOHOOK || Hit == TILE_TELEINHOOK)
+								return false;
+							if(RayHitsAnyPlayer(LocalPos, HitPos))
+								return false;
+							return true;
+						};
+						int NextDynamicCandId = 20;
 
 						auto AddCandidate = [&](int Id, int Direction, int Hook, bool Jump, int JumpBaseId, const vec2 *pAimOverride) {
-							if(UserEscaping && !RescueMode && Direction != OrigDir)
+							if(UserEscaping && !RescueMode && !CorridorFullControl && Direction != OrigDir)
 								return;
 							SAvoidCandidate Cand;
 							Cand.m_Id = Id;
@@ -3503,6 +3529,19 @@ int CGameClient::OnSnapInput(int *pData, bool Dummy, bool Force)
 							Cand.m_Valid = true;
 							vCandidates.push_back(Cand);
 						};
+						auto AddCorridorHookFan = [&](int Direction) {
+							const int Dir = std::clamp(Direction, -1, 1);
+							if(Dir == 0)
+								return;
+							static const float s_aRise[] = {0.20f, 0.30f, 0.42f, 0.56f, 0.72f, 0.90f, 1.05f};
+							for(float Rise : s_aRise)
+							{
+								const vec2 Aim = normalize(vec2((float)Dir, -Rise)) * 250.0f;
+								if(!IsHookAimHookable(Aim))
+									continue;
+								AddCandidate(NextDynamicCandId++, Dir, 1, false, -1, &Aim);
+							}
+						};
 
 						AddCandidate(0, OrigDir, OrigHook, false, -1, nullptr);
 						if(!LightHookAssistOnly || RescueMode)
@@ -3511,14 +3550,24 @@ int CGameClient::OnSnapInput(int *pData, bool Dummy, bool Force)
 							AddCandidate(2, 1, OrigHook, false, -1, nullptr);
 						}
 						if(OrigHook == 0)
+						{
 							AddCandidate(3, OrigDir, 1, false, -1, nullptr);
+							if(CorridorFullControl)
+							{
+								const int PreferredDir = OrigDir != 0 ? OrigDir : (Vel.x >= 0.0f ? 1 : -1);
+								AddCorridorHookFan(PreferredDir);
+								if(!LightHookAssistOnly || RescueMode)
+									AddCorridorHookFan(-PreferredDir);
+							}
+						}
 						if(OrigHook == 1 && !HookLockActive)
 							AddCandidate(4, OrigDir, 0, false, -1, nullptr);
 						if(TunnelAssistAllowed)
 						{
 							AddCandidate(5, -1, 1, false, -1, &AimUpLeft);
 							AddCandidate(6, 1, 1, false, -1, &AimUpRight);
-							AddCandidate(7, OrigDir, 1, false, -1, &AimUp);
+							if(!CorridorFullControl)
+								AddCandidate(7, OrigDir, 1, false, -1, &AimUp);
 						}
 
 						const bool CanAutoJump = g_Config.m_ClZzAvoidJump && CriticalHazard && (Grounded || HasAirJump) && !FreezeCeilingNearby && s_aBlatantJumpCooldown[DummyIndex] <= 0;
@@ -3561,12 +3610,24 @@ int CGameClient::OnSnapInput(int *pData, bool Dummy, bool Force)
 									Score += ForwardSpeed * 2.0f;
 							}
 							if(Cand.m_Direction != OrigDir)
-								Score -= 10.0f;
+								Score -= CorridorFullControl ? 0.0f : 10.0f;
 							if(Cand.m_Hook != 0)
-								Score -= 5.0f;
+								Score -= CorridorFullControl ? 1.0f : 5.0f;
 							// In fast downward motion, prefer earlier hook options slightly.
 							if(Cand.m_Hook != 0 && WarningOrHigherRisk)
 								Score += maximum(FallSpeed - 2.0f, 0.0f) * 8.0f;
+							if(CorridorFullControl && Cand.m_Hook != 0)
+							{
+								vec2 Aim((float)Cand.m_Input.m_TargetX, (float)Cand.m_Input.m_TargetY);
+								if(length(Aim) > 0.001f)
+								{
+									Aim = normalize(Aim);
+									if(Aim.y < -0.15f && fabsf(Aim.x) > 0.15f)
+										Score += 14.0f;
+									if(Aim.y < -0.85f && fabsf(Aim.x) < 0.15f)
+										Score -= 18.0f;
+								}
+							}
 							Cand.m_Score = Score;
 						}
 
@@ -3624,7 +3685,8 @@ int CGameClient::OnSnapInput(int *pData, bool Dummy, bool Force)
 						{
 							if(!Cand.m_Valid)
 								continue;
-							if(!pBest || CompareCandidates(&Cand, pBest) > 0)
+							const int Cmp = pBest ? CompareCandidates(&Cand, pBest) : 1;
+							if(!pBest || Cmp > 0 || (CorridorFullControl && Cmp == 0 && Cand.m_Id != 0 && pBest->m_Id == 0))
 								pBest = &Cand;
 						}
 
@@ -3634,7 +3696,9 @@ int CGameClient::OnSnapInput(int *pData, bool Dummy, bool Force)
 							pBest = pHookOff;
 
 						bool Applied = false;
-						if(pBest && pBase && CompareCandidates(pBest, pBase) > 0)
+						const bool BetterThanBase = pBest && pBase && CompareCandidates(pBest, pBase) > 0;
+						const bool EqualSafetyAndCorridorControl = pBest && pBase && CorridorFullControl && pBest->m_Id != 0 && CompareCandidates(pBest, pBase) == 0;
+						if(BetterThanBase || EqualSafetyAndCorridorControl)
 						{
 							*pInput = pBest->m_Input;
 							Applied = true;
@@ -3642,11 +3706,50 @@ int CGameClient::OnSnapInput(int *pData, bool Dummy, bool Force)
 
 						if(HookLockActive)
 						{
-							pInput->m_Hook = 1;
-							if(pInput->m_TargetX == 0 && pInput->m_TargetY == 0)
-								pInput->m_TargetY = -1;
-							Applied = true;
-							s_aBlatantHookLockTicks[DummyIndex] = std::max(s_aBlatantHookLockTicks[DummyIndex] - 1, 0);
+							CNetObj_PlayerInput KeepHookInput = *pInput;
+							KeepHookInput.m_Hook = 1;
+							if(KeepHookInput.m_TargetX == 0 && KeepHookInput.m_TargetY == 0)
+								KeepHookInput.m_TargetY = -1;
+							CNetObj_PlayerInput ReleaseHookInput = KeepHookInput;
+							ReleaseHookInput.m_Hook = 0;
+							vec2 KeepVel(0.0f, 0.0f);
+							vec2 ReleaseVel(0.0f, 0.0f);
+							const int KeepHazardTick = SimulateHazardTick(CoreState, KeepHookInput, PredTicks, Collision(), &KeepVel);
+							const int ReleaseHazardTick = SimulateHazardTick(CoreState, ReleaseHookInput, PredTicks, Collision(), &ReleaseVel);
+							const SAvoidTrace KeepTrace = PredictCandidateTrace(CoreState, KeepHookInput, PredTicks, Collision());
+							const SAvoidTrace ReleaseTrace = PredictCandidateTrace(CoreState, ReleaseHookInput, PredTicks, Collision());
+
+							bool KeepBetter = false;
+							if(KeepHazardTick != ReleaseHazardTick)
+								KeepBetter = KeepHazardTick > ReleaseHazardTick;
+							else if(KeepTrace.m_HasFrozenPoint != ReleaseTrace.m_HasFrozenPoint)
+								KeepBetter = !KeepTrace.m_HasFrozenPoint;
+							else if(KeepTrace.m_HasFrozenPoint && ReleaseTrace.m_HasFrozenPoint)
+							{
+								if(KeepTrace.m_FrozenTickCount != ReleaseTrace.m_FrozenTickCount)
+									KeepBetter = KeepTrace.m_FrozenTickCount < ReleaseTrace.m_FrozenTickCount;
+								else if(KeepTrace.m_FirstFrozenTick != ReleaseTrace.m_FirstFrozenTick)
+									KeepBetter = KeepTrace.m_FirstFrozenTick > ReleaseTrace.m_FirstFrozenTick;
+								else
+									KeepBetter = KeepVel.y <= ReleaseVel.y + 0.25f;
+							}
+							else
+							{
+								KeepBetter = KeepVel.y <= ReleaseVel.y + 0.25f;
+							}
+
+							if(KeepBetter)
+							{
+								*pInput = KeepHookInput;
+								Applied = true;
+								s_aBlatantHookLockTicks[DummyIndex] = std::max(s_aBlatantHookLockTicks[DummyIndex] - 1, 0);
+							}
+							else
+							{
+								*pInput = ReleaseHookInput;
+								Applied = true;
+								s_aBlatantHookLockTicks[DummyIndex] = 0;
+							}
 						}
 						else if(Applied && OrigHook == 0 && pInput->m_Hook != 0)
 						{
