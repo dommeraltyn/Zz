@@ -2228,22 +2228,12 @@ int CGameClient::OnSnapInput(int *pData, bool Dummy, bool Force)
 
 		auto *pInput = (CNetObj_PlayerInput *)pData;
 		const CNetObj_PlayerInput OrigInput = *pInput;
-		if(!m_Snap.m_pLocalCharacter)
-		{
-			m_ZzHookRideActive = false;
-			m_ZzHookRideTargetVel = vec2(0.0f, 0.0f);
-			m_ZzVisualPredictPathLen = 0;
-			m_ZzVisualPredictHazardIndex = -1;
-			m_ZzVisualPredictHazardIsDeath = false;
-			m_ZzVisualPredictLastValid = false;
-		}
 		if(m_Snap.m_pLocalCharacter)
 		{
 			const int LocalId = m_Snap.m_LocalClientId;
 			const vec2 LocalPos = m_aClients[LocalId].m_RegularPredicted.m_Pos;
 			bool ZzAutoUnfreezeOverridesInput = false;
 			bool ZzFentBotOverridesInput = false;
-			bool ZzHookRideOverridesInput = false;
 			vec2 CurAim((float)pInput->m_TargetX, (float)pInput->m_TargetY);
 			if(length(CurAim) < 0.001f)
 				CurAim = vec2(1.0f, 0.0f);
@@ -2273,105 +2263,6 @@ int CGameClient::OnSnapInput(int *pData, bool Dummy, bool Force)
 						return true;
 				}
 				return false;
-			};
-			auto IsFreezeStrictAt = [&](const vec2 &Pos) -> bool {
-				const int PureIndex = Collision()->GetPureMapIndex(Pos);
-				if(PureIndex < 0)
-					return false;
-				const int Tile = Collision()->GetTileIndex(PureIndex);
-				const int FTile = Collision()->GetFrontTileIndex(PureIndex);
-				return Tile == TILE_FREEZE || Tile == TILE_DFREEZE || Tile == TILE_LFREEZE ||
-					FTile == TILE_FREEZE || FTile == TILE_DFREEZE || FTile == TILE_LFREEZE;
-			};
-			auto IsDeathAt = [&](const vec2 &Pos) -> bool {
-				const float R = CCharacterCore::PhysicalSize() / 3.0f;
-				const vec2 aPts[4] = {
-					vec2(Pos.x + R, Pos.y - R),
-					vec2(Pos.x + R, Pos.y + R),
-					vec2(Pos.x - R, Pos.y - R),
-					vec2(Pos.x - R, Pos.y + R)};
-				for(const vec2 &P : aPts)
-				{
-					if(Collision()->GetCollisionAt(P.x, P.y) == TILE_DEATH || Collision()->GetFrontCollisionAt(P.x, P.y) == TILE_DEATH)
-						return true;
-				}
-				return false;
-			};
-			auto IsFreezeOrDeathAt = [&](const vec2 &Pos, bool *pOutIsDeath) -> bool {
-				if(IsFreezeStrictAt(Pos))
-				{
-					if(pOutIsDeath)
-						*pOutIsDeath = false;
-					return true;
-				}
-				if(IsDeathAt(Pos))
-				{
-					if(pOutIsDeath)
-						*pOutIsDeath = true;
-					return true;
-				}
-				return false;
-			};
-			auto DistSq = [](const vec2 &A, const vec2 &B) {
-				const vec2 D = A - B;
-				return dot(D, D);
-			};
-			auto SimulateInputToTarget = [&](const CCharacterCore &State, CNetObj_PlayerInput In, int MaxTicks, const vec2 &TargetPos, int *pOutHazardTick, float *pOutMinDistSq, float *pOutMaxDistSq, float *pOutEndDistSq, vec2 *pOutEndPos, vec2 *pOutEndVel) {
-				CGameWorld SimWorld;
-				SimWorld.CopyWorldClean(&m_RegularPredictedWorld);
-				SimWorld.m_GameTick = Client()->GameTick(DummyIndex);
-				CCharacter *pSimChar = SimWorld.GetCharacterById(LocalId);
-				if(!pSimChar)
-				{
-					if(pOutHazardTick)
-						*pOutHazardTick = MaxTicks;
-					if(pOutMinDistSq)
-						*pOutMinDistSq = DistSq(State.m_Pos, TargetPos);
-					if(pOutMaxDistSq)
-						*pOutMaxDistSq = DistSq(State.m_Pos, TargetPos);
-					if(pOutEndDistSq)
-						*pOutEndDistSq = DistSq(State.m_Pos, TargetPos);
-					if(pOutEndPos)
-						*pOutEndPos = State.m_Pos;
-					if(pOutEndVel)
-						*pOutEndVel = State.m_Vel;
-					return;
-				}
-				pSimChar->SetCore(State);
-				if(In.m_TargetX == 0 && In.m_TargetY == 0)
-					In.m_TargetY = -1;
-
-				float MinDistSq = DistSq(pSimChar->Core()->m_Pos, TargetPos);
-				float MaxDistSq = MinDistSq;
-				int HazardTick = IsFreezeOrDeathAt(pSimChar->Core()->m_Pos, nullptr) ? 0 : MaxTicks;
-				for(int Tick = 1; Tick <= MaxTicks; Tick++)
-				{
-					pSimChar->OnPredictedInput(&In);
-					SimWorld.Tick();
-					pSimChar = SimWorld.GetCharacterById(LocalId);
-					if(!pSimChar)
-						break;
-					const vec2 Pos = pSimChar->Core()->m_Pos;
-					MinDistSq = std::min(MinDistSq, DistSq(Pos, TargetPos));
-					MaxDistSq = std::max(MaxDistSq, DistSq(Pos, TargetPos));
-					if(HazardTick == MaxTicks && IsFreezeOrDeathAt(Pos, nullptr))
-						HazardTick = Tick;
-				}
-
-				const vec2 EndPos = pSimChar ? pSimChar->Core()->m_Pos : State.m_Pos;
-				const vec2 EndVel = pSimChar ? pSimChar->Core()->m_Vel : State.m_Vel;
-				if(pOutHazardTick)
-					*pOutHazardTick = HazardTick;
-				if(pOutMinDistSq)
-					*pOutMinDistSq = MinDistSq;
-				if(pOutMaxDistSq)
-					*pOutMaxDistSq = MaxDistSq;
-				if(pOutEndDistSq)
-					*pOutEndDistSq = DistSq(EndPos, TargetPos);
-				if(pOutEndPos)
-					*pOutEndPos = EndPos;
-				if(pOutEndVel)
-					*pOutEndVel = EndVel;
 			};
 
 			m_FentBotActive = false;
@@ -3153,269 +3044,11 @@ int CGameClient::OnSnapInput(int *pData, bool Dummy, bool Force)
 				s_aTileAimWasActive[DummyIndex] = false;
 			}
 
-			// ZZetClient: HookRide (keep player near a movable target point).
-			{
-				static int s_aHookRideWasEnabled[NUM_DUMMIES] = {0, 0};
-				const bool HookRideEnabled = g_Config.m_ClZzHookRide != 0;
-				if(HookRideEnabled && !s_aHookRideWasEnabled[DummyIndex])
-				{
-					m_ZzHookRideTarget = LocalPos;
-					m_ZzHookRideTargetVel = vec2(0.0f, 0.0f);
-					m_ZzHookRideActive = true;
-				}
-				else if(!HookRideEnabled)
-				{
-					m_ZzHookRideActive = false;
-					m_ZzHookRideTargetVel = vec2(0.0f, 0.0f);
-				}
-				s_aHookRideWasEnabled[DummyIndex] = HookRideEnabled ? 1 : 0;
-
-				if(m_ZzHookRideActive && HookRideEnabled && !ZzFentBotOverridesInput && !SaveInBlockActive)
-				{
-					vec2 MoveTargetInput(0.0f, 0.0f);
-					if(Input()->KeyIsPressed(KEY_A))
-						MoveTargetInput.x -= 1.0f;
-					if(Input()->KeyIsPressed(KEY_D))
-						MoveTargetInput.x += 1.0f;
-					if(Input()->KeyIsPressed(KEY_W))
-						MoveTargetInput.y -= 1.0f;
-					if(Input()->KeyIsPressed(KEY_S))
-						MoveTargetInput.y += 1.0f;
-					const float MoveSpeedCfg = (float)std::clamp(g_Config.m_ClZzHookRideMoveSpeed, 1, 32);
-					const float TargetStep = MoveSpeedCfg * 0.24f;
-					if(length(MoveTargetInput) > 0.001f)
-						m_ZzHookRideTarget += normalize(MoveTargetInput) * TargetStep;
-					m_ZzHookRideTargetVel = vec2(0.0f, 0.0f);
-					if(distance(LocalPos, m_ZzHookRideTarget) > 8.0f * 32.0f)
-						m_ZzHookRideTarget = LocalPos;
-
-					const CCharacterCore CoreState = m_aClients[LocalId].m_RegularPredicted;
-					const vec2 Vel = CoreState.m_Vel;
-					const vec2 ToTarget = m_ZzHookRideTarget - LocalPos;
-					const float DistToTarget = length(ToTarget);
-					int DesiredDir = 0;
-					if(LocalPos.x + Vel.x - m_ZzHookRideTarget.x > 1.0f)
-						DesiredDir = -1;
-					else if(m_ZzHookRideTarget.x - LocalPos.x + Vel.x > 1.0f)
-						DesiredDir = 1;
-
-					float Priority = fabsf(LocalPos.y - m_ZzHookRideTarget.y) / (0.5f * 13.37f);
-					if(Priority < 1.0f)
-						Priority = 1.0f;
-					float VMod = 0.0f;
-					if(m_ZzHookRideTarget.y < LocalPos.y)
-						VMod = -0.55f * Priority;
-					else if(m_ZzHookRideTarget.y > LocalPos.y)
-						VMod = 0.55f * Priority;
-					const bool NeedHookAssist = Vel.y > VMod || DistToTarget > 4.0f || fabsf(Vel.x) > 2.2f;
-					const int RidePredTicks = 24;
-					const float HookLen = (float)m_aTuning[DummyIndex].m_HookLength;
-
-					auto IsHookAimHookable = [&](const vec2 &AimVec) -> bool {
-						vec2 Dir = AimVec;
-						if(length(Dir) < 0.001f)
-							return false;
-						Dir = normalize(Dir);
-						vec2 HitPos;
-						int TeleNr = 0;
-						const int Hit = Collision()->IntersectLineTeleHook(LocalPos, LocalPos + Dir * (HookLen + 6.0f), &HitPos, nullptr, &TeleNr);
-						if(Hit == 0 || Hit == TILE_NOHOOK || Hit == TILE_TELEINHOOK)
-							return false;
-						if(RayHitsAnyPlayer(LocalPos, HitPos))
-							return false;
-						return true;
-					};
-					auto BuildRideInput = [&](int Direction, int Hook, bool Jump, const vec2 *pAimOverride) {
-						CNetObj_PlayerInput In = OrigInput;
-						In.m_Direction = std::clamp(Direction, -1, 1);
-						In.m_Hook = Hook ? 1 : 0;
-						In.m_Jump = Jump ? ((OrigInput.m_Jump + 2) | 1) : 0;
-						if(pAimOverride)
-						{
-							In.m_TargetX = (int)round_to_int(pAimOverride->x);
-							In.m_TargetY = (int)round_to_int(pAimOverride->y);
-						}
-						if(In.m_TargetX == 0 && In.m_TargetY == 0)
-							In.m_TargetY = -1;
-						return In;
-					};
-
-					struct SHookRideCandidate
-					{
-						CNetObj_PlayerInput m_Input;
-						int m_Direction;
-						int m_Hook;
-						bool m_Jump;
-						int m_HazardTick;
-						float m_MinDistSq;
-						float m_MaxDistSq;
-						float m_EndDistSq;
-						float m_Score;
-					};
-
-					std::vector<SHookRideCandidate> vRideCandidates;
-					vRideCandidates.reserve(128);
-					auto AddRideCandidate = [&](int Direction, int Hook, bool Jump, const vec2 *pAimOverride) {
-						SHookRideCandidate Cand;
-						Cand.m_Input = BuildRideInput(Direction, Hook, Jump, pAimOverride);
-						Cand.m_Direction = std::clamp(Direction, -1, 1);
-						Cand.m_Hook = Hook ? 1 : 0;
-						Cand.m_Jump = false;
-						Cand.m_HazardTick = RidePredTicks;
-						Cand.m_MinDistSq = 1e18f;
-						Cand.m_MaxDistSq = 1e18f;
-						Cand.m_EndDistSq = 1e18f;
-						Cand.m_Score = -1e18f;
-						vec2 EndVel(0.0f, 0.0f);
-						SimulateInputToTarget(CoreState, Cand.m_Input, RidePredTicks, m_ZzHookRideTarget, &Cand.m_HazardTick, &Cand.m_MinDistSq, &Cand.m_MaxDistSq, &Cand.m_EndDistSq, nullptr, &EndVel);
-						const float EndDist = sqrtf(Cand.m_EndDistSq);
-						const float MaxDist = sqrtf(Cand.m_MaxDistSq);
-						float Penalty = Cand.m_EndDistSq * Cand.m_EndDistSq * 4.0f;
-						Penalty += Cand.m_MaxDistSq * Cand.m_MaxDistSq * 1.25f;
-						Penalty += Cand.m_MinDistSq * 60.0f;
-						Penalty *= (1.0f + EndDist * 0.25f);
-						if(MaxDist > 8.0f)
-							Penalty += (MaxDist - 8.0f) * (MaxDist - 8.0f) * 2200.0f;
-						if(Cand.m_Direction != DesiredDir)
-							Penalty += 500.0f * (1.0f + EndDist * 0.15f);
-						if(Cand.m_Hook != 0)
-						{
-							if(!NeedHookAssist)
-								Penalty += 9000.0f;
-							if(fabsf((float)Cand.m_Input.m_TargetX) < 35.0f && DistToTarget < 40.0f)
-								Penalty += 2500.0f;
-						}
-						if(Cand.m_HazardTick < RidePredTicks)
-						{
-							const float Deficit = (float)(RidePredTicks - Cand.m_HazardTick);
-							Penalty += 50000.0f + Deficit * 8000.0f;
-						}
-						Penalty += fabsf(EndVel.x) * 30.0f;
-						Cand.m_Score = -Penalty;
-						vRideCandidates.push_back(Cand);
-					};
-
-					bool aDirAdded[3] = {false, false, false};
-					auto AddNoHookDir = [&](int Dir) {
-						Dir = std::clamp(Dir, -1, 1);
-						const int Idx = Dir + 1;
-						if(aDirAdded[Idx])
-							return;
-						aDirAdded[Idx] = true;
-						AddRideCandidate(Dir, 0, false, nullptr);
-					};
-					AddNoHookDir(0);
-					AddNoHookDir(DesiredDir);
-					AddNoHookDir(-1);
-					AddNoHookDir(1);
-
-					std::vector<vec2> vHookAims;
-					vHookAims.reserve(96);
-					auto TryAddHookAim = [&](vec2 Aim) {
-						if(length(Aim) < 0.001f)
-							return;
-						Aim = normalize(Aim) * 250.0f;
-						if(!IsHookAimHookable(Aim))
-							return;
-						for(const vec2 &Existing : vHookAims)
-						{
-							if(dot(normalize(Existing), normalize(Aim)) > 0.995f)
-								return;
-						}
-						vHookAims.push_back(Aim);
-					};
-
-					const vec2 CurAimVec((float)OrigInput.m_TargetX, (float)OrigInput.m_TargetY);
-					int ForwardDir = 1;
-					if(fabsf(ToTarget.x) > 2.0f)
-						ForwardDir = ToTarget.x > 0.0f ? 1 : -1;
-					else if(fabsf(Vel.x) > 0.2f)
-						ForwardDir = Vel.x >= 0.0f ? 1 : -1;
-					if(NeedHookAssist)
-					{
-						if(length(CurAimVec) > 0.001f && IsHookAimHookable(CurAimVec))
-							TryAddHookAim(CurAimVec);
-						// nones-twave Flybot_Gores style: dense scan across upward hemisphere.
-						for(int Deg = -175; Deg <= -5; Deg += 8)
-							TryAddHookAim(vec2(cosf(Deg * pi / 180.0f), sinf(Deg * pi / 180.0f)));
-						static const float s_aForwardRises[] = {0.08f, 0.12f, 0.16f, 0.22f, 0.30f, 0.40f, 0.54f, 0.70f, 0.88f, 1.10f, 1.36f, 1.64f};
-						for(float Rise : s_aForwardRises)
-							TryAddHookAim(vec2((float)ForwardDir, -Rise));
-						for(float Rise : {0.22f, 0.34f, 0.50f, 0.70f, 0.92f, 1.18f})
-							TryAddHookAim(vec2(-(float)ForwardDir, -Rise));
-						if(ToTarget.y < -4.0f || DistToTarget > 16.0f)
-							TryAddHookAim(vec2(0.0f, -1.0f));
-						if(length(ToTarget) > 0.001f)
-						{
-							const vec2 ToTargetAim = normalize(ToTarget + vec2((float)ForwardDir * 8.0f, -24.0f)) * 250.0f;
-							TryAddHookAim(ToTargetAim);
-						}
-					}
-					for(const vec2 &Aim : vHookAims)
-					{
-						AddRideCandidate(DesiredDir, 1, false, &Aim);
-						AddRideCandidate(0, 1, false, &Aim);
-						if(DistToTarget > 2.0f)
-						{
-							AddRideCandidate(-1, 1, false, &Aim);
-							AddRideCandidate(1, 1, false, &Aim);
-						}
-					}
-
-					auto IsCandidateBetter = [&](const SHookRideCandidate &A, const SHookRideCandidate &B) -> bool {
-						if(fabsf(A.m_Score - B.m_Score) > 0.01f)
-							return A.m_Score > B.m_Score;
-						if(fabsf(A.m_EndDistSq - B.m_EndDistSq) > 0.01f)
-							return A.m_EndDistSq < B.m_EndDistSq;
-						if(fabsf(A.m_MaxDistSq - B.m_MaxDistSq) > 0.01f)
-							return A.m_MaxDistSq < B.m_MaxDistSq;
-						if(A.m_HazardTick != B.m_HazardTick)
-							return A.m_HazardTick > B.m_HazardTick;
-						if(A.m_Hook != B.m_Hook)
-							return A.m_Hook < B.m_Hook;
-						return abs(A.m_Direction - DesiredDir) < abs(B.m_Direction - DesiredDir);
-					};
-
-					const SHookRideCandidate *pBest = nullptr;
-					for(const auto &Cand : vRideCandidates)
-					{
-						if(!pBest || IsCandidateBetter(Cand, *pBest))
-							pBest = &Cand;
-					}
-					if(DistToTarget <= 0.75f && length(Vel) <= 0.45f)
-					{
-						CNetObj_PlayerInput HoldInput = BuildRideInput(0, 0, false, nullptr);
-						*pInput = HoldInput;
-						ZzHookRideOverridesInput = true;
-					}
-					else if(pBest)
-					{
-						*pInput = pBest->m_Input;
-						ZzHookRideOverridesInput = true;
-					}
-					if(ZzHookRideOverridesInput)
-					{
-						m_Controls.m_aInputData[DummyIndex].m_Direction = pInput->m_Direction;
-						m_Controls.m_aInputData[DummyIndex].m_Hook = pInput->m_Hook;
-						m_Controls.m_aInputData[DummyIndex].m_Jump = pInput->m_Jump;
-						m_Controls.m_aInputData[DummyIndex].m_TargetX = pInput->m_TargetX;
-						m_Controls.m_aInputData[DummyIndex].m_TargetY = pInput->m_TargetY;
-						m_Controls.m_aFastInput[DummyIndex].m_Direction = pInput->m_Direction;
-						m_Controls.m_aFastInput[DummyIndex].m_Hook = pInput->m_Hook;
-						m_Controls.m_aFastInput[DummyIndex].m_Jump = pInput->m_Jump;
-						m_Controls.m_aFastInput[DummyIndex].m_TargetX = pInput->m_TargetX;
-						m_Controls.m_aFastInput[DummyIndex].m_TargetY = pInput->m_TargetY;
-						if(pInput->m_Hook != 0)
-							m_Controls.m_aMousePos[DummyIndex] = vec2((float)pInput->m_TargetX, (float)pInput->m_TargetY);
-					}
-				}
-			}
-
 			static int s_aBlatantHookLockTicks[NUM_DUMMIES] = {0, 0};
 			static int s_aBlatantJumpCooldown[NUM_DUMMIES] = {0, 0};
 			static int s_aBlatantRiskState[NUM_DUMMIES] = {0, 0}; // 0=safe, 1=warning, 2=critical
 			static int s_aBlatantRiskSafeTicks[NUM_DUMMIES] = {0, 0};
-			if(g_Config.m_ClZzAvoidEnabled && !ZzFentBotOverridesInput && !ZzHookRideOverridesInput)
+			if(g_Config.m_ClZzAvoidEnabled && !ZzFentBotOverridesInput)
 			{
 				auto IsTeleTile = [&](int Tile) {
 					return Tile == TILE_TELEIN || Tile == TILE_TELEINEVIL || Tile == TILE_TELEINHOOK || Tile == TILE_TELEINWEAPON;
@@ -3619,6 +3252,15 @@ int CGameClient::OnSnapInput(int *pData, bool Dummy, bool Force)
 					const int WarningHazardTickBase = std::min(5, PredTicks);
 					const CCharacterCore CoreState = m_aClients[LocalId].m_RegularPredicted;
 
+					auto IsFreezeStrictAt = [&](const vec2 &Pos) {
+						const int PureIndex = Collision()->GetPureMapIndex(Pos);
+						if(PureIndex < 0)
+							return false;
+						const int Tile = Collision()->GetTileIndex(PureIndex);
+						const int FTile = Collision()->GetFrontTileIndex(PureIndex);
+						return Tile == TILE_FREEZE || FTile == TILE_FREEZE;
+					};
+
 					auto SimulateHazardTick = [&](const CCharacterCore &State, CNetObj_PlayerInput In, int MaxTicks, const CCollision *pCol, vec2 *pOutVel) -> int {
 						auto IsFreezeAtPos = [&](const vec2 &Pos) {
 							const CCollision *pCollision = pCol ? pCol : Collision();
@@ -3788,8 +3430,19 @@ int CGameClient::OnSnapInput(int *pData, bool Dummy, bool Force)
 						const bool CriticalHazard = RiskState >= 2;
 						const bool TunnelAssistAllowed = ((WarningOrHigherRisk && OrigHook == 0 && Vel.y > 1.5f) || RescueMode);
 						const bool HookLockActive = s_aBlatantHookLockTicks[DummyIndex] > 0 && OrigHook == 0;
+						int CorridorSideBlocks = 0;
+						for(float SampleY : {-10.0f, 0.0f, 10.0f})
+						{
+							const bool LeftBlocked = Collision()->CheckPoint(LocalPos.x - 18.0f, LocalPos.y + SampleY);
+							const bool RightBlocked = Collision()->CheckPoint(LocalPos.x + 18.0f, LocalPos.y + SampleY);
+							if(LeftBlocked && RightBlocked)
+								CorridorSideBlocks++;
+						}
+						const bool NarrowOneTileCorridor = CorridorSideBlocks >= 2;
+						const bool CorridorFullControl = NarrowOneTileCorridor;
+
 						bool UserEscaping = false;
-						if(!RescueMode && OrigDir != 0)
+						if(!RescueMode && OrigDir != 0 && !CorridorFullControl)
 						{
 							CNetObj_PlayerInput EscapeProbe = BuildInput(0, OrigHook, false, nullptr);
 							const int NeutralHazardTick = SimulateHazardTick(CoreState, EscapeProbe, PredTicks, Collision(), nullptr);
@@ -3840,9 +3493,25 @@ int CGameClient::OnSnapInput(int *pData, bool Dummy, bool Force)
 						const vec2 AimUpLeft = normalize(vec2(-1.0f, -1.0f)) * 250.0f;
 						const vec2 AimUpRight = normalize(vec2(1.0f, -1.0f)) * 250.0f;
 						const vec2 AimUp = vec2(0.0f, -250.0f);
+						const float HookLen = (float)m_aTuning[DummyIndex].m_HookLength;
+						auto IsHookAimHookable = [&](const vec2 &AimVec) {
+							vec2 Dir = AimVec;
+							if(length(Dir) < 0.001f)
+								return false;
+							Dir = normalize(Dir);
+							vec2 HitPos;
+							int TeleNr = 0;
+							const int Hit = Collision()->IntersectLineTeleHook(LocalPos, LocalPos + Dir * (HookLen + 6.0f), &HitPos, nullptr, &TeleNr);
+							if(Hit == 0 || Hit == TILE_NOHOOK || Hit == TILE_TELEINHOOK)
+								return false;
+							if(RayHitsAnyPlayer(LocalPos, HitPos))
+								return false;
+							return true;
+						};
+						int NextDynamicCandId = 20;
 
 						auto AddCandidate = [&](int Id, int Direction, int Hook, bool Jump, int JumpBaseId, const vec2 *pAimOverride) {
-							if(UserEscaping && !RescueMode && Direction != OrigDir)
+							if(UserEscaping && !RescueMode && !CorridorFullControl && Direction != OrigDir)
 								return;
 							SAvoidCandidate Cand;
 							Cand.m_Id = Id;
@@ -3860,6 +3529,20 @@ int CGameClient::OnSnapInput(int *pData, bool Dummy, bool Force)
 							Cand.m_Valid = true;
 							vCandidates.push_back(Cand);
 						};
+						auto AddCorridorHookFan = [&](int Direction) {
+							const int Dir = std::clamp(Direction, -1, 1);
+							if(Dir == 0)
+								return;
+							static const float s_aRise[] = {0.20f, 0.30f, 0.42f, 0.56f, 0.72f, 0.90f, 1.05f};
+							for(float Rise : s_aRise)
+							{
+								const vec2 Aim = normalize(vec2((float)Dir, -Rise)) * 250.0f;
+								if(!IsHookAimHookable(Aim))
+									continue;
+								AddCandidate(NextDynamicCandId++, Dir, 1, false, -1, &Aim);
+							}
+						};
+
 						AddCandidate(0, OrigDir, OrigHook, false, -1, nullptr);
 						if(!LightHookAssistOnly || RescueMode)
 						{
@@ -3867,14 +3550,24 @@ int CGameClient::OnSnapInput(int *pData, bool Dummy, bool Force)
 							AddCandidate(2, 1, OrigHook, false, -1, nullptr);
 						}
 						if(OrigHook == 0)
+						{
 							AddCandidate(3, OrigDir, 1, false, -1, nullptr);
+							if(CorridorFullControl)
+							{
+								const int PreferredDir = OrigDir != 0 ? OrigDir : (Vel.x >= 0.0f ? 1 : -1);
+								AddCorridorHookFan(PreferredDir);
+								if(!LightHookAssistOnly || RescueMode)
+									AddCorridorHookFan(-PreferredDir);
+							}
+						}
 						if(OrigHook == 1 && !HookLockActive)
 							AddCandidate(4, OrigDir, 0, false, -1, nullptr);
 						if(TunnelAssistAllowed)
 						{
 							AddCandidate(5, -1, 1, false, -1, &AimUpLeft);
 							AddCandidate(6, 1, 1, false, -1, &AimUpRight);
-							AddCandidate(7, OrigDir, 1, false, -1, &AimUp);
+							if(!CorridorFullControl)
+								AddCandidate(7, OrigDir, 1, false, -1, &AimUp);
 						}
 
 						const bool CanAutoJump = g_Config.m_ClZzAvoidJump && CriticalHazard && (Grounded || HasAirJump) && !FreezeCeilingNearby && s_aBlatantJumpCooldown[DummyIndex] <= 0;
@@ -3917,12 +3610,24 @@ int CGameClient::OnSnapInput(int *pData, bool Dummy, bool Force)
 									Score += ForwardSpeed * 2.0f;
 							}
 							if(Cand.m_Direction != OrigDir)
-								Score -= 10.0f;
+								Score -= CorridorFullControl ? 0.0f : 10.0f;
 							if(Cand.m_Hook != 0)
-								Score -= 5.0f;
+								Score -= CorridorFullControl ? 1.0f : 5.0f;
 							// In fast downward motion, prefer earlier hook options slightly.
 							if(Cand.m_Hook != 0 && WarningOrHigherRisk)
 								Score += maximum(FallSpeed - 2.0f, 0.0f) * 8.0f;
+							if(CorridorFullControl && Cand.m_Hook != 0)
+							{
+								vec2 Aim((float)Cand.m_Input.m_TargetX, (float)Cand.m_Input.m_TargetY);
+								if(length(Aim) > 0.001f)
+								{
+									Aim = normalize(Aim);
+									if(Aim.y < -0.15f && fabsf(Aim.x) > 0.15f)
+										Score += 14.0f;
+									if(Aim.y < -0.85f && fabsf(Aim.x) < 0.15f)
+										Score -= 18.0f;
+								}
+							}
 							Cand.m_Score = Score;
 						}
 
@@ -3981,7 +3686,7 @@ int CGameClient::OnSnapInput(int *pData, bool Dummy, bool Force)
 							if(!Cand.m_Valid)
 								continue;
 							const int Cmp = pBest ? CompareCandidates(&Cand, pBest) : 1;
-							if(!pBest || Cmp > 0)
+							if(!pBest || Cmp > 0 || (CorridorFullControl && Cmp == 0 && Cand.m_Id != 0 && pBest->m_Id == 0))
 								pBest = &Cand;
 						}
 
@@ -3992,7 +3697,8 @@ int CGameClient::OnSnapInput(int *pData, bool Dummy, bool Force)
 
 						bool Applied = false;
 						const bool BetterThanBase = pBest && pBase && CompareCandidates(pBest, pBase) > 0;
-						if(BetterThanBase)
+						const bool EqualSafetyAndCorridorControl = pBest && pBase && CorridorFullControl && pBest->m_Id != 0 && CompareCandidates(pBest, pBase) == 0;
+						if(BetterThanBase || EqualSafetyAndCorridorControl)
 						{
 							*pInput = pBest->m_Input;
 							Applied = true;
@@ -4712,7 +4418,6 @@ int CGameClient::OnSnapInput(int *pData, bool Dummy, bool Force)
 				}
 			}
 		}
-
 		return Size;
 	}
 	if(m_aLocalIds[!g_Config.m_ClDummy] < 0)
@@ -5264,116 +4969,6 @@ void CGameClient::UpdatePositions()
 		ResetMultiView();
 
 	UpdateRenderedCharacters();
-}
-
-void CGameClient::UpdateVisualPredictPath()
-{
-	if(!g_Config.m_ClZzVisualPredict || !m_Snap.m_pLocalCharacter)
-	{
-		m_ZzVisualPredictPathLen = 0;
-		m_ZzVisualPredictHazardIndex = -1;
-		m_ZzVisualPredictHazardIsDeath = false;
-		m_ZzVisualPredictLastValid = false;
-		return;
-	}
-
-	const int LocalId = m_Snap.m_LocalClientId;
-	if(LocalId < 0 || LocalId >= MAX_CLIENTS)
-	{
-		m_ZzVisualPredictPathLen = 0;
-		m_ZzVisualPredictHazardIndex = -1;
-		m_ZzVisualPredictHazardIsDeath = false;
-		m_ZzVisualPredictLastValid = false;
-		return;
-	}
-
-	const int DummyIndex = g_Config.m_ClDummy;
-	CCharacterCore StartCore = m_aClients[LocalId].m_RegularPredicted;
-	StartCore.m_Pos = m_LocalCharacterPos;
-	StartCore.m_Vel = mix(m_PredictedPrevChar.m_Vel, m_PredictedChar.m_Vel, Client()->PredIntraGameTick(DummyIndex));
-
-	CNetObj_PlayerInput SimIn = m_Controls.m_aInputData[DummyIndex];
-	if(SimIn.m_TargetX == 0 && SimIn.m_TargetY == 0)
-		SimIn.m_TargetY = -1;
-
-	auto IsVisualHazardAt = [&](const vec2 &Pos, bool *pOutIsDeath) {
-		const int PureIndex = Collision()->GetPureMapIndex(Pos);
-		bool Freeze = false;
-		if(PureIndex >= 0)
-		{
-			const int Tile = Collision()->GetTileIndex(PureIndex);
-			const int FTile = Collision()->GetFrontTileIndex(PureIndex);
-			Freeze = Tile == TILE_FREEZE || Tile == TILE_DFREEZE || Tile == TILE_LFREEZE ||
-				FTile == TILE_FREEZE || FTile == TILE_DFREEZE || FTile == TILE_LFREEZE;
-		}
-		if(Freeze)
-		{
-			if(pOutIsDeath)
-				*pOutIsDeath = false;
-			return true;
-		}
-		const float R = CCharacterCore::PhysicalSize() / 3.0f;
-		const vec2 aPts[4] = {
-			vec2(Pos.x + R, Pos.y - R),
-			vec2(Pos.x + R, Pos.y + R),
-			vec2(Pos.x - R, Pos.y - R),
-			vec2(Pos.x - R, Pos.y + R)};
-		for(const vec2 &P : aPts)
-		{
-			if(Collision()->GetCollisionAt(P.x, P.y) == TILE_DEATH || Collision()->GetFrontCollisionAt(P.x, P.y) == TILE_DEATH)
-			{
-				if(pOutIsDeath)
-					*pOutIsDeath = true;
-				return true;
-			}
-		}
-		return false;
-	};
-
-	m_ZzVisualPredictPathLen = 0;
-	m_ZzVisualPredictHazardIndex = -1;
-	m_ZzVisualPredictHazardIsDeath = false;
-
-	const int PredTicks = std::clamp(g_Config.m_ClZzVisualPredictTicks, 2, 50);
-	CGameWorld SimWorld;
-	SimWorld.CopyWorldClean(&m_RegularPredictedWorld);
-	SimWorld.m_GameTick = Client()->GameTick(DummyIndex);
-	CCharacter *pSimChar = SimWorld.GetCharacterById(LocalId);
-	if(pSimChar)
-	{
-		pSimChar->SetCore(StartCore);
-		m_aZzVisualPredictPath[0] = pSimChar->Core()->m_Pos;
-		m_ZzVisualPredictPathLen = 1;
-		bool HazardIsDeath = false;
-		if(IsVisualHazardAt(pSimChar->Core()->m_Pos, &HazardIsDeath))
-		{
-			m_ZzVisualPredictHazardIndex = 0;
-			m_ZzVisualPredictHazardIsDeath = HazardIsDeath;
-		}
-		for(int t = 1; t <= PredTicks && m_ZzVisualPredictPathLen < ZZ_VISUAL_PREDICT_MAX_POINTS; t++)
-		{
-			pSimChar->OnPredictedInput(&SimIn);
-			SimWorld.Tick();
-			pSimChar = SimWorld.GetCharacterById(LocalId);
-			if(!pSimChar)
-				break;
-			m_aZzVisualPredictPath[m_ZzVisualPredictPathLen++] = pSimChar->Core()->m_Pos;
-			if(IsVisualHazardAt(pSimChar->Core()->m_Pos, &HazardIsDeath))
-			{
-				m_ZzVisualPredictHazardIndex = m_ZzVisualPredictPathLen - 1;
-				m_ZzVisualPredictHazardIsDeath = HazardIsDeath;
-				break;
-			}
-		}
-	}
-
-	m_ZzVisualPredictLastValid = m_ZzVisualPredictPathLen > 0;
-	if(m_ZzVisualPredictLastValid)
-	{
-		m_ZzVisualPredictLastStartPos = StartCore.m_Pos;
-		m_ZzVisualPredictLastStartVel = StartCore.m_Vel;
-		m_ZzVisualPredictLastInput = SimIn;
-	}
 }
 
 void CGameClient::OnRender()

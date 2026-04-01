@@ -357,14 +357,6 @@ public:
 	int FentBotGlobalPathLen() const { return m_FentBotGlobalPathLen; }
 	const vec2 &FentBotGlobalPathPoint(int Index) const { return m_aFentBotGlobalPath[Index]; }
 	const vec2 &FentBotSubgoal() const { return m_FentBotSubgoal; }
-	bool HookRideIsActive() const { return m_ZzHookRideActive; }
-	const vec2 &HookRideTarget() const { return m_ZzHookRideTarget; }
-	void UpdateVisualPredictPath();
-	static constexpr int ZZ_VISUAL_PREDICT_MAX_POINTS_PUBLIC = 51;
-	int VisualPredictPathLen() const { return m_ZzVisualPredictPathLen; }
-	const vec2 &VisualPredictPathPoint(int Index) const { return m_aZzVisualPredictPath[Index]; }
-	int VisualPredictHazardIndex() const { return m_ZzVisualPredictHazardIndex; }
-	bool VisualPredictHazardIsDeath() const { return m_ZzVisualPredictHazardIsDeath; }
 	void FentBotSetWaypoint(vec2 Waypoint)
 	{
 		m_FentBotWaypoint = Waypoint;
@@ -445,18 +437,6 @@ public:
 	std::array<vec2, FENTBOT_MAX_PATH_POINTS> m_aFentBotPlannedPath;
 	int m_FentBotPlannedPathLen = 0;
 	bool m_FentBotActive = false;
-	bool m_ZzHookRideActive = false;
-	vec2 m_ZzHookRideTarget = vec2(0.0f, 0.0f);
-	vec2 m_ZzHookRideTargetVel = vec2(0.0f, 0.0f);
-	static constexpr int ZZ_VISUAL_PREDICT_MAX_POINTS = 51;
-	std::array<vec2, ZZ_VISUAL_PREDICT_MAX_POINTS> m_aZzVisualPredictPath{};
-	int m_ZzVisualPredictPathLen = 0;
-	int m_ZzVisualPredictHazardIndex = -1;
-	bool m_ZzVisualPredictHazardIsDeath = false;
-	bool m_ZzVisualPredictLastValid = false;
-	vec2 m_ZzVisualPredictLastStartPos = vec2(0.0f, 0.0f);
-	vec2 m_ZzVisualPredictLastStartVel = vec2(0.0f, 0.0f);
-	CNetObj_PlayerInput m_ZzVisualPredictLastInput{};
 	bool m_FentBotHasWaypoint = false;
 	vec2 m_FentBotWaypoint = vec2(0.0f, 0.0f);
 	TFentBotPath m_aFentBotGlobalPath;
