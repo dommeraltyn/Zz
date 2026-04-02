@@ -2264,6 +2264,145 @@ int CGameClient::OnSnapInput(int *pData, bool Dummy, bool Force)
 				}
 				return false;
 			};
+			// ZZetClient: auto-unfreeze (restored from DmdSrc behavior).
+			{
+				static int64_t s_aAutoUnfreezeLastShot[NUM_DUMMIES] = {0, 0};
+				static bool s_aAutoUnfreezeFireReleasePending[NUM_DUMMIES] = {false, false};
+				auto IsFreezeTileAt = [&](const vec2 &Pos) -> bool {
+					const int PureIndex = Collision()->GetPureMapIndex(Pos);
+					if(PureIndex < 0)
+						return false;
+					const int Tile = Collision()->GetTileIndex(PureIndex);
+					const int FTile = Collision()->GetFrontTileIndex(PureIndex);
+					return Tile == TILE_FREEZE || Tile == TILE_DFREEZE || Tile == TILE_LFREEZE ||
+						FTile == TILE_FREEZE || FTile == TILE_DFREEZE || FTile == TILE_LFREEZE;
+				};
+				auto IsWithinFov = [&](const vec2 &AimDir, const vec2 &CurrentTarget, float FovDeg) -> bool {
+					if(FovDeg >= 360.0f)
+						return true;
+					if(length(AimDir) < 0.001f || length(CurrentTarget) < 0.001f)
+						return false;
+					float CosAngle = dot(normalize(AimDir), normalize(CurrentTarget));
+					CosAngle = std::clamp(CosAngle, -1.0f, 1.0f);
+					const float Angle = acosf(CosAngle);
+					const float HalfFov = (FovDeg * pi / 180.0f) * 0.5f;
+					return Angle <= HalfFov;
+				};
+				if(g_Config.m_ClZzAutoUnfreeze && !SaveInBlockActive && !ZzFentBotOverridesInput)
+				{
+					if(s_aAutoUnfreezeFireReleasePending[DummyIndex])
+					{
+						if(pInput->m_Fire & 1)
+							pInput->m_Fire = (pInput->m_Fire + 1) & INPUT_STATE_MASK;
+						s_aAutoUnfreezeFireReleasePending[DummyIndex] = false;
+						ZzAutoUnfreezeOverridesInput = true;
+					}
+
+					const vec2 LocalVel = m_aClients[LocalId].m_RegularPredicted.m_Vel;
+					const bool FrozenState = m_aClients[LocalId].m_RegularPredicted.m_IsInFreeze || Client()->m_IsLocalFrozen;
+					const bool FrozenTileNow = IsFreezeTileAt(LocalPos);
+					const bool FrozenTileNext = IsFreezeTileAt(LocalPos + LocalVel);
+					if(FrozenState || FrozenTileNow || FrozenTileNext)
+					{
+						CCharacter *pRegPredChar = m_RegularPredictedWorld.GetCharacterById(LocalId);
+						const bool HasLaser = pRegPredChar && pRegPredChar->GetWeaponGot(WEAPON_LASER);
+						if(pInput->m_WantedWeapon != WEAPON_LASER + 1 && HasLaser)
+						{
+							pInput->m_WantedWeapon = WEAPON_LASER + 1;
+							ZzAutoUnfreezeOverridesInput = true;
+						}
+
+						const bool LaserActive = m_Snap.m_pLocalCharacter && m_Snap.m_pLocalCharacter->m_Weapon == WEAPON_LASER;
+						if(LaserActive && HasLaser && time_get() >= s_aAutoUnfreezeLastShot[DummyIndex] + (int64_t)(time_freq() * 0.12f))
+						{
+							const int PredictTicks = 96;
+							vec2 aPredPos[PredictTicks];
+							DmdPredictCharacterPath(&m_aClients[LocalId].m_RegularPredicted, PredictTicks, aPredPos, &m_aTuning[DummyIndex], Collision());
+
+							const int MaxBounces = std::clamp((int)m_aTuning[DummyIndex].m_LaserBounceNum + 1, 1, 32);
+							const float LaserReach = (float)m_aTuning[DummyIndex].m_LaserReach;
+							const float BounceCost = (float)m_aTuning[DummyIndex].m_LaserBounceCost;
+							const double DelayMs = (double)m_aTuning[DummyIndex].m_LaserBounceDelay;
+							const int DelayTicks = (int)floor((double)SERVER_TICK_SPEED * (DelayMs / 1000.0) + 1e-6) + 1;
+							const float HitRadius = 14.0f;
+							const float BaseAim = angle(CurAim);
+							const int Samples = 181;
+							const float Step = (2.0f * pi) / (float)(Samples - 1);
+
+							bool Found = false;
+							vec2 BestDir = CurAim;
+							float BestScore = 1e18f;
+
+							for(int s = 0; s < Samples; s++)
+							{
+								const float Off = -pi + Step * (float)s;
+								vec2 Dir = direction(BaseAim + Off);
+								vec2 Pos = LocalPos;
+								float Energy = LaserReach;
+								int EvalTick = 0;
+								bool ZeroEnergyBounceInLastTick = false;
+
+								for(int Bounce = 0; Bounce <= MaxBounces && Energy > 0.0f && EvalTick < PredictTicks; Bounce++)
+								{
+									vec2 ColTile;
+									vec2 To = Pos + Dir * Energy;
+									const vec2 From = Pos;
+									const int Res = Collision()->IntersectLineTeleWeapon(Pos, To, &ColTile, &To);
+
+									for(int t = EvalTick; t < PredictTicks; t++)
+									{
+										if(IsFreezeTileAt(aPredPos[t]))
+											continue;
+										if(DmdIntersectCircleLine(aPredPos[t], HitRadius, Pos, To))
+										{
+											const float Score = (float)t * 1000.0f + fabsf(Off) * 100.0f + (float)Bounce * 5.0f;
+											if(!Found || Score < BestScore)
+											{
+												Found = true;
+												BestScore = Score;
+												BestDir = direction(BaseAim + Off);
+											}
+											break;
+										}
+									}
+
+									if(!Res || Bounce >= MaxBounces)
+										break;
+
+									vec2 TempPos = To;
+									vec2 TempDir = Dir * 4.0f;
+									Collision()->MovePoint(&TempPos, &TempDir, 1.0f, nullptr);
+									Pos = TempPos;
+									if(length(TempDir) <= 0.001f)
+										break;
+									Dir = normalize(TempDir);
+									const float Dist = distance(From, Pos);
+									if(Dist == 0.0f && ZeroEnergyBounceInLastTick)
+										break;
+									Energy -= Dist + BounceCost;
+									ZeroEnergyBounceInLastTick = Dist == 0.0f;
+									EvalTick += DelayTicks;
+								}
+							}
+
+							if(Found && IsWithinFov(BestDir, vec2((float)pInput->m_TargetX, (float)pInput->m_TargetY), (float)g_Config.m_ClZzAutoUnfreezeFov))
+							{
+								pInput->m_TargetX = (int)round_to_int(BestDir.x * 1000.0f);
+								pInput->m_TargetY = (int)round_to_int(BestDir.y * 1000.0f);
+								if(!pInput->m_TargetX && !pInput->m_TargetY)
+									pInput->m_TargetY = 1;
+								int Fire = pInput->m_Fire;
+								Fire = (Fire + 2) | 1;
+								Fire &= INPUT_STATE_MASK;
+								pInput->m_Fire = Fire;
+								s_aAutoUnfreezeLastShot[DummyIndex] = time_get();
+								s_aAutoUnfreezeFireReleasePending[DummyIndex] = true;
+								ZzAutoUnfreezeOverridesInput = true;
+							}
+						}
+					}
+				}
+			}
 
 			m_FentBotActive = false;
 			m_FentBotPlannedPathLen = 0;
@@ -3048,7 +3187,7 @@ int CGameClient::OnSnapInput(int *pData, bool Dummy, bool Force)
 			static int s_aBlatantJumpCooldown[NUM_DUMMIES] = {0, 0};
 			static int s_aBlatantRiskState[NUM_DUMMIES] = {0, 0}; // 0=safe, 1=warning, 2=critical
 			static int s_aBlatantRiskSafeTicks[NUM_DUMMIES] = {0, 0};
-			if(g_Config.m_ClZzAvoidEnabled && !ZzFentBotOverridesInput)
+			if(g_Config.m_ClZzAvoidEnabled && !ZzFentBotOverridesInput && !ZzAutoUnfreezeOverridesInput)
 			{
 				auto IsTeleTile = [&](int Tile) {
 					return Tile == TILE_TELEIN || Tile == TILE_TELEINEVIL || Tile == TILE_TELEINHOOK || Tile == TILE_TELEINWEAPON;
