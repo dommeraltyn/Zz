@@ -254,8 +254,10 @@ MACRO_CONFIG_INT(ClZzAvoidPredTicks, cl_zz_avoid_pred_ticks, 10, 1, 30, CFGFLAG_
 MACRO_CONFIG_INT(ClZzAvoidJump, cl_zz_avoid_jump, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Blatant: allow jump only at 100% freeze risk")
 MACRO_CONFIG_INT(ClZzAvoidDebugLog, cl_zz_avoid_debug_log, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "ZZetClient avoid debug log to save/avoid/avoid_trace_*.log")
 
-MACRO_CONFIG_INT(ClZzAutoUnfreeze, cl_zz_auto_unfreeze, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "ZZetClient auto-unfreeze: predict freeze exit, switch to laser and fire wallshot before unfreeze")
-MACRO_CONFIG_INT(ClZzAutoUnfreezeFov, cl_zz_auto_unfreeze_fov, 360, 1, 360, CFGFLAG_CLIENT | CFGFLAG_SAVE, "ZZetClient auto-unfreeze FOV")
+MACRO_CONFIG_INT(ClZzAutoUnfreeze, zz_auto_unfreeze, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "ZZetClient auto-unfreeze: predict freeze exit, switch to laser and fire wallshot before unfreeze")
+MACRO_CONFIG_INT(ClZzAutoUnfreezeFov, zz_auto_unfreeze_fov, 360, 1, 360, CFGFLAG_CLIENT | CFGFLAG_SAVE, "ZZetClient auto-unfreeze FOV")
+MACRO_CONFIG_INT(ClZzAutoUnfreezeAutoFire, zz_auto_unfreeze_autofire, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "ZZetClient auto-unfreeze auto-fire")
+MACRO_CONFIG_INT(ClZzDummyAutoUnfreeze, zz_dummy_auto_unfreeze, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "ZZetClient dummy auto-unfreeze")
 
 MACRO_CONFIG_INT(ClZzAutoShotgun, cl_zz_auto_shotgun, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "ZZetClient auto-shotgun: on fire, aim for bounce line that returns to self")
 

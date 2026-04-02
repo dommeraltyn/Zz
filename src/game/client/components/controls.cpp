@@ -3,6 +3,7 @@
 #include "controls.h"
 
 #include <base/math.h>
+#include <base/system.h>
 #include <base/time.h>
 #include <base/vmath.h>
 
@@ -249,7 +250,9 @@ bool ZzRayHitsEnemyWithBounces(CGameClient *pGameClient, int DummyIndex, int Loc
 
 CControls::CControls()
 {
+	mem_zero(&m_aInputData, sizeof(m_aInputData));
 	mem_zero(&m_aLastData, sizeof(m_aLastData));
+	mem_zero(&m_aInputHookSpam, sizeof(m_aInputHookSpam));
 	std::fill(std::begin(m_aMousePos), std::end(m_aMousePos), vec2(0.0f, 0.0f));
 	std::fill(std::begin(m_aMousePosOnAction), std::end(m_aMousePosOnAction), vec2(0.0f, 0.0f));
 	std::fill(std::begin(m_aTargetPos), std::end(m_aTargetPos), vec2(0.0f, 0.0f));
@@ -260,11 +263,15 @@ void CControls::OnReset()
 {
 	ResetInput(0);
 	ResetInput(1);
+	m_DummyAutoUnfreeze.Reset();
 
 	for(int &AmmoCount : m_aAmmoCount)
 		AmmoCount = 0;
 
 	m_LastSendTime = 0;
+	m_BotFireReleasePending = false;
+	m_ZzAutoUnfreezeOverridesInput = false;
+	m_UnfreezeFound = false;
 }
 
 void CControls::ResetInput(int Dummy)
@@ -279,6 +286,7 @@ void CControls::ResetInput(int Dummy)
 
 	m_aInputDirectionLeft[Dummy] = 0;
 	m_aInputDirectionRight[Dummy] = 0;
+	m_aInputHookSpam[Dummy] = 0;
 	m_aSaveInBlock[Dummy] = 0;
 }
 
@@ -420,6 +428,10 @@ void CControls::OnConsoleInit()
 	{
 		static CInputState s_State = {this, {&m_aInputData[0].m_Hook, &m_aInputData[1].m_Hook}};
 		Console()->Register("+hook", "", CFGFLAG_CLIENT, ConKeyInputState, &s_State, "Hook");
+	}
+	{
+		static CInputState s_State = {this, {&m_aInputHookSpam[0], &m_aInputHookSpam[1]}};
+		Console()->Register("+zz_hookspam", "", CFGFLAG_CLIENT, ConKeyInputState, &s_State, "Activate hook spam while key is held");
 	}
 	{
 		static CInputState s_State = {this, {&m_aInputData[0].m_Fire, &m_aInputData[1].m_Fire}};
@@ -569,6 +581,8 @@ void CControls::Balance()
 
 int CControls::SnapInput(int *pData)
 {
+	m_ZzAutoUnfreezeOverridesInput = false;
+
 	// update player state
 	if(GameClient()->m_Chat.IsActive())
 		m_aInputData[g_Config.m_ClDummy].m_PlayerFlags = PLAYERFLAG_CHATTING;
@@ -886,6 +900,8 @@ int CControls::SnapInput(int *pData)
 			pDummyInput->m_Hook = g_Config.m_ClDummyHook;
 		}
 
+		DoSelfUnfreeze();
+
 		// stress testing
 		if(g_Config.m_DbgStress)
 		{
@@ -972,6 +988,11 @@ void CControls::OnRender()
 	if(Client()->State() != IClient::STATE_ONLINE && Client()->State() != IClient::STATE_DEMOPLAYBACK)
 		return;
 
+	static bool s_WasAutoUnfreezeEnabled = false;
+	if(g_Config.m_ClZzAutoUnfreeze && !s_WasAutoUnfreezeEnabled)
+		g_Config.m_ClZzAutoUnfreezeAutoFire = 1;
+	s_WasAutoUnfreezeEnabled = g_Config.m_ClZzAutoUnfreeze != 0;
+
 	if(g_Config.m_ClAutoswitchWeaponsOutOfAmmo && !GameClient()->m_GameInfo.m_UnlimitedAmmo && GameClient()->m_Snap.m_pLocalCharacter)
 	{
 		// Keep track of ammo count, we know weapon ammo only when we switch to that weapon, this is tracked on server and protocol does not track that
@@ -1011,6 +1032,54 @@ void CControls::OnRender()
 	{
 		m_aTargetPos[g_Config.m_ClDummy] = m_aMousePos[g_Config.m_ClDummy];
 	}
+
+	RenderUnfreezePredict();
+}
+
+void CControls::DoSelfUnfreeze()
+{
+	const int DummyIndex = g_Config.m_ClDummy;
+	const CNetObj_PlayerInput PrevMainInput = m_aInputData[DummyIndex];
+	const CNetObj_PlayerInput PrevDummyInput = m_aInputData[!DummyIndex];
+	const CNetObj_PlayerInput PrevDummyNetInput = GameClient()->m_DummyInput;
+
+	GameClient()->RunDmdBot(
+		m_aInputData[DummyIndex],
+		m_aAmmoCount,
+		m_LastUnfreezeShot,
+		m_UnfreezeFound,
+		m_UnfreezePos,
+		m_UnfreezeHit,
+		m_UnfreezeFuture,
+		m_BotFireReleasePending);
+	GameClient()->RunDmdHookSpam(m_aInputData[DummyIndex], m_aInputHookSpam[DummyIndex] != 0);
+	Balance();
+	m_DummyAutoUnfreeze.Tick(GameClient(), DummyIndex, m_aInputData[!DummyIndex], GameClient()->m_DummyInput);
+
+	m_ZzAutoUnfreezeOverridesInput =
+		mem_comp(&PrevMainInput, &m_aInputData[DummyIndex], sizeof(CNetObj_PlayerInput)) != 0 ||
+		mem_comp(&PrevDummyInput, &m_aInputData[!DummyIndex], sizeof(CNetObj_PlayerInput)) != 0 ||
+		mem_comp(&PrevDummyNetInput, &GameClient()->m_DummyInput, sizeof(CNetObj_PlayerInput)) != 0;
+}
+
+void CControls::RenderUnfreezePredict()
+{
+	if(!m_UnfreezeFound)
+		return;
+
+	Graphics()->TextureClear();
+	Graphics()->LinesBegin();
+	Graphics()->SetColor(0.0f, 1.0f, 0.0f, 1.0f);
+	IGraphics::CLineItem L1(m_UnfreezePos.x, m_UnfreezePos.y, m_UnfreezeHit.x, m_UnfreezeHit.y);
+	Graphics()->LinesDraw(&L1, 1);
+
+	Graphics()->SetColor(1.0f, 0.0f, 0.0f, 1.0f);
+	IGraphics::CLineItem L2(m_UnfreezeHit.x, m_UnfreezeHit.y, m_UnfreezeFuture.x, m_UnfreezeFuture.y);
+	Graphics()->LinesDraw(&L2, 1);
+	Graphics()->LinesEnd();
+
+	if(time_get() > m_LastUnfreezeShot + time_freq() * 0.6f)
+		m_UnfreezeFound = false;
 }
 
 bool CControls::OnCursorMove(float x, float y, IInput::ECursorType CursorType)

@@ -2546,6 +2546,8 @@ if(CLIENT)
     components/envelope_state.h
     components/flow.cpp
     components/flow.h
+    components/FlyHelper/dummy_auto_unfreeze.cpp
+    components/FlyHelper/dummy_auto_unfreeze.h
     components/freezebars.cpp
     components/freezebars.h
     components/ghost.cpp

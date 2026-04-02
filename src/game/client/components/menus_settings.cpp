@@ -224,6 +224,34 @@ void CMenus::RenderSettingsGeneral(CUIRect MainView)
 	}
 }
 
+namespace
+{
+	CBindSlot FindBindSlotForCommand(CBinds *pBinds, const char *pCommand)
+	{
+		for(int Modifier = KeyModifier::NONE; Modifier < KeyModifier::COMBINATION_COUNT; Modifier++)
+		{
+			for(int Key = KEY_FIRST; Key < KEY_LAST; Key++)
+			{
+				if(str_comp(pBinds->Get(Key, Modifier), pCommand) == 0)
+					return CBindSlot(Key, Modifier);
+			}
+		}
+		return EMPTY_BIND_SLOT;
+	}
+
+	void UnbindCommand(CBinds *pBinds, const char *pCommand)
+	{
+		for(int Modifier = KeyModifier::NONE; Modifier < KeyModifier::COMBINATION_COUNT; Modifier++)
+		{
+			for(int Key = KEY_FIRST; Key < KEY_LAST; Key++)
+			{
+				if(str_comp(pBinds->Get(Key, Modifier), pCommand) == 0)
+					pBinds->Bind(Key, "", false, Modifier);
+			}
+		}
+	}
+	} // namespace
+
 void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 {
 	static int s_SubTab = 0;
@@ -477,14 +505,36 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 		}
 		{
 			CUIRect Inner;
-			DoFeaturePanel(LeftView, 112.0f, Inner);
-			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAutoUnfreeze, Localize("Auto-unfreeze"), &g_Config.m_ClZzAutoUnfreeze, &Inner, LineSize);
+			DoFeaturePanel(LeftView, 198.0f, Inner);
+			if(DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAutoUnfreeze, Localize("Auto-unfreeze"), &g_Config.m_ClZzAutoUnfreeze, &Inner, LineSize))
+			{
+				if(g_Config.m_ClZzAutoUnfreeze)
+					g_Config.m_ClZzAutoUnfreezeAutoFire = 1;
+			}
 			Inner.HSplitTop(4.0f, nullptr, &Inner);
 			Inner.HSplitTop(LineSize, &Button, &Inner);
 			Ui()->DoScrollbarOption(&g_Config.m_ClZzAutoUnfreezeFov, &g_Config.m_ClZzAutoUnfreezeFov, &Button, Localize("FOV"), 1, 360);
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAutoUnfreezeAutoFire, Localize("Auto-fire"), &g_Config.m_ClZzAutoUnfreezeAutoFire, &Inner, LineSize);
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzDummyAutoUnfreeze, Localize("Dummy auto-unfreeze"), &g_Config.m_ClZzDummyAutoUnfreeze, &Inner, LineSize);
+			Inner.HSplitTop(4.0f, nullptr, &Inner);
+			Inner.HSplitTop(LineSize, &Label, &Inner);
+			Ui()->DoLabel(&Label, Localize("Auto-unfreeze bind"), 14.0f, TEXTALIGN_ML);
+			Inner.HSplitTop(LineSize, &Button, &Inner);
+			constexpr const char *AutoUnfreezeToggleCommand = "toggle zz_auto_unfreeze 0 1";
+			CBindSlot AutoUnfreezeBind = FindBindSlotForCommand(&GameClient()->m_Binds, AutoUnfreezeToggleCommand);
+			static CButtonContainer s_AutoUnfreezeBindButton;
+			static CButtonContainer s_AutoUnfreezeBindClearButton;
+			const CKeyBinder::CKeyReaderResult AutoUnfreezeBindResult = GameClient()->m_KeyBinder.DoKeyReader(
+				&s_AutoUnfreezeBindButton, &s_AutoUnfreezeBindClearButton, &Button, AutoUnfreezeBind, false);
+			if(!AutoUnfreezeBindResult.m_Aborted && AutoUnfreezeBindResult.m_Bind != AutoUnfreezeBind)
+			{
+				UnbindCommand(&GameClient()->m_Binds, AutoUnfreezeToggleCommand);
+				if(AutoUnfreezeBindResult.m_Bind.m_Key != KEY_UNKNOWN)
+					GameClient()->m_Binds.Bind(AutoUnfreezeBindResult.m_Bind.m_Key, AutoUnfreezeToggleCommand, false, AutoUnfreezeBindResult.m_Bind.m_ModifierMask);
+			}
 			Inner.HSplitTop(4.0f, nullptr, &Inner);
 			Inner.HSplitTop(LineSize * 2.1f, &Label, &Inner);
-			Ui()->DoLabel(&Label, Localize("Автоматически стреляет лазером для анфриза."), 14.0f, TEXTALIGN_ML);
+			Ui()->DoLabel(&Label, Localize("Auto-unfreeze wallshot prediction with release tick."), 14.0f, TEXTALIGN_ML);
 		}
 		{
 			CUIRect Inner;
