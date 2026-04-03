@@ -1230,7 +1230,7 @@ void CHud::RenderCursor()
 		const vec2 UiMousePos = Ui()->UpdatedMousePos() * vec2(UiScreen.w, UiScreen.h) / WindowSize;
 		const vec2 UiToHudScale(m_Width / maximum(UiScreen.w, 1.0f), m_Height / maximum(UiScreen.h, 1.0f));
 		const vec2 HudMousePos = UiMousePos * UiToHudScale;
-		RenderTools()->RenderCursor(HudMousePos, 24.0f);
+		RenderTools()->RenderCursor(HudMousePos, 12.0f);
 		return;
 	}
 
