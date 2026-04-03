@@ -8,10 +8,13 @@
 #include "voting.h"
 
 #include <base/color.h>
+#include <base/system.h>
 #include <base/time.h>
 
 #include <engine/font_icons.h>
 #include <engine/graphics.h>
+#include <engine/image.h>
+#include <engine/keys.h>
 #include <engine/shared/config.h>
 #include <engine/textrender.h>
 
@@ -19,14 +22,62 @@
 #include <generated/protocol.h>
 
 #include <game/client/animstate.h>
+#include <game/client/ui.h>
 #include <game/client/components/scoreboard.h>
 #include <game/client/gameclient.h>
 #include <game/client/prediction/entities/character.h>
 #include <game/layers.h>
 #include <game/localization.h>
 
+#include <algorithm>
 #include <cmath>
+#include <string>
 #include <vector>
+
+namespace
+{
+ColorRGBA MixColors(const ColorRGBA &A, const ColorRGBA &B, float T)
+{
+	const float K = std::clamp(T, 0.0f, 1.0f);
+	return ColorRGBA(
+		A.r + (B.r - A.r) * K,
+		A.g + (B.g - A.g) * K,
+		A.b + (B.b - A.b) * K,
+		A.a + (B.a - A.a) * K);
+}
+
+ColorRGBA RainbowColor(float Phase, float Alpha)
+{
+	const float Hue = std::fmod(Phase, 1.0f);
+	const float NormalizedHue = Hue < 0.0f ? Hue + 1.0f : Hue;
+	ColorRGBA Col = color_cast<ColorRGBA>(ColorHSLA(NormalizedHue, 0.86f, 0.62f, 1.0f));
+	Col.a = Alpha;
+	return Col;
+}
+
+float ApproachValue(float Value, float Target, float Speed, float Dt)
+{
+	const float Step = maximum(0.0f, Speed) * maximum(0.0f, Dt);
+	if(Value < Target)
+		return minimum(Value + Step, Target);
+	return maximum(Value - Step, Target);
+}
+
+std::string CutText(const std::string &Text, int MaxChars)
+{
+	if((int)Text.size() <= MaxChars)
+		return Text;
+	std::string Out = Text.substr(0, MaxChars);
+	Out.append("...");
+	return Out;
+}
+
+bool IsPointInsideRect(const CUIRect &Rect, float X, float Y, float Padding = 0.0f)
+{
+	return X >= Rect.x - Padding && X <= Rect.x + Rect.w + Padding &&
+	       Y >= Rect.y - Padding && Y <= Rect.y + Rect.h + Padding;
+}
+}
 
 CHud::CHud()
 {
@@ -74,6 +125,9 @@ void CHud::ResetHudContainers()
 	m_ZzFeatureQuadContainerIndex = -1;
 	m_ZzFeatureQuadW = 0.0f;
 	m_ZzFeatureQuadH = 0.0f;
+	if(m_ZzIslandArtworkTexture.IsValid())
+		Graphics()->UnloadTexture(&m_ZzIslandArtworkTexture);
+	m_ZzIslandArtworkRevision = 0;
 }
 
 void CHud::OnWindowResize()
@@ -128,6 +182,11 @@ void CHud::OnInit()
 void CHud::RenderGameTimer()
 {
 	float Half = m_Width / 2.0f;
+	m_ZzIslandVisible = false;
+	m_ZzIslandX = 0.0f;
+	m_ZzIslandY = 0.0f;
+	m_ZzIslandW = 0.0f;
+	m_ZzIslandH = 0.0f;
 
 	if(!(GameClient()->m_Snap.m_pGameInfoObj->m_GameStateFlags & GAMESTATEFLAG_SUDDENDEATH))
 	{
@@ -149,55 +208,265 @@ void CHud::RenderGameTimer()
 			Time = (Client()->GameTick(g_Config.m_ClDummy) - GameClient()->m_Snap.m_pGameInfoObj->m_RoundStartTick) / Client()->GameTickSpeed();
 
 		str_time((int64_t)Time * 100, ETimeFormat::DAYS, aBuf, sizeof(aBuf));
-		float FontSize = 10.0f;
-		static float s_TextWidthM = TextRender()->TextWidth(FontSize, "00:00", -1, -1.0f);
-		static float s_TextWidthH = TextRender()->TextWidth(FontSize, "00:00:00", -1, -1.0f);
-		static float s_TextWidth0D = TextRender()->TextWidth(FontSize, "0d 00:00:00", -1, -1.0f);
-		static float s_TextWidth00D = TextRender()->TextWidth(FontSize, "00d 00:00:00", -1, -1.0f);
-		static float s_TextWidth000D = TextRender()->TextWidth(FontSize, "000d 00:00:00", -1, -1.0f);
-		float w = Time >= 3600 * 24 * 100 ? s_TextWidth000D : (Time >= 3600 * 24 * 10 ? s_TextWidth00D : (Time >= 3600 * 24 ? s_TextWidth0D : (Time >= 3600 ? s_TextWidthH : s_TextWidthM)));
-		const float PadX = 10.0f;
-		const float PadY = 3.0f;
-		const float BoxH = FontSize + PadY * 2.0f;
-		const float Corner = minimum(4.0f, BoxH * 0.5f);
-		const float Y = 2.0f;
-
-		// Timer + waves indicator (controls moved to ESC -> Game).
+		const float TimeFontSize = 8.6f;
+		const float TextWidth = TextRender()->TextWidth(TimeFontSize, aBuf, -1, -1.0f);
 		const auto Track = GameClient()->m_MusicSMTC.GetTrackInfo();
 		const bool Playing = Track.m_Available && Track.m_Playing;
-		const float Gap = 6.0f;
-		const float BarW = 3.0f;
-		const float BarGap = 2.0f;
-		const int Bars = 6;
-		const float BarsW = Playing ? (Bars * BarW + (Bars - 1) * BarGap) : 0.0f;
-		const float BoxW = w + PadX * 2.0f + (Playing ? (BarsW + Gap) : 0.0f);
+		const float Dt = std::clamp(Client()->RenderFrameTime(), 0.0f, 0.1f);
+		static float s_OrnamentsAlpha = 0.0f;
+		static float s_OrnamentsWidth = 0.0f;
+		static float s_PlayerExpand = 0.0f;
+		static float s_aVisualizerDisplay[CMusicSMTC::STrackInfo::VISUALIZER_BARS] = {0.0f, 0.0f, 0.0f, 0.0f};
+		s_OrnamentsAlpha = ApproachValue(s_OrnamentsAlpha, Playing ? 1.0f : 0.0f, 8.0f, Dt);
+		s_OrnamentsWidth = ApproachValue(s_OrnamentsWidth, Playing ? 1.0f : 0.0f, 3.3f, Dt);
+
+		if(Track.m_ArtworkRevision != m_ZzIslandArtworkRevision)
+		{
+			if(m_ZzIslandArtworkTexture.IsValid())
+				Graphics()->UnloadTexture(&m_ZzIslandArtworkTexture);
+			m_ZzIslandArtworkRevision = Track.m_ArtworkRevision;
+
+			if(Track.m_HasArtwork)
+			{
+				CImageInfo Image;
+				Image.m_Width = CMusicSMTC::STrackInfo::ARTWORK_DIM;
+				Image.m_Height = CMusicSMTC::STrackInfo::ARTWORK_DIM;
+				Image.m_Format = CImageInfo::FORMAT_RGBA;
+				Image.m_pData = static_cast<uint8_t *>(malloc(Track.m_aArtworkRgba.size()));
+				if(Image.m_pData != nullptr)
+				{
+					mem_copy(Image.m_pData, Track.m_aArtworkRgba.data(), Track.m_aArtworkRgba.size());
+					m_ZzIslandArtworkTexture = Graphics()->LoadTextureRawMove(Image, 0, "zz_smtc_art");
+				}
+			}
+		}
+
+		ColorRGBA Accent(std::clamp(Track.m_AccentR, 0.0f, 1.0f), std::clamp(Track.m_AccentG, 0.0f, 1.0f), std::clamp(Track.m_AccentB, 0.0f, 1.0f), 1.0f);
+		if(!Track.m_HasArtwork && g_Config.m_ClZzIslandRainbowEnabled)
+			Accent = RainbowColor(LocalTime() * 0.12f, 1.0f);
+		const ColorRGBA Accent2 = (!Track.m_HasArtwork && g_Config.m_ClZzIslandRainbowEnabled) ?
+			RainbowColor(LocalTime() * 0.12f + 0.22f, 1.0f) :
+			MixColors(Accent, ColorRGBA(0.12f, 0.16f, 0.22f, 1.0f), 0.35f);
+		const float BorderAlpha = 0.86f;
+		const ColorRGBA InnerFill = ColorRGBA(0.06f, 0.06f, 0.08f, 0.70f);
+		const ColorRGBA BorderLeft = MixColors(Accent, ColorRGBA(1.0f, 1.0f, 1.0f, 1.0f), 0.22f).WithAlpha(BorderAlpha);
+		const ColorRGBA BorderRight = MixColors(Accent2, ColorRGBA(1.0f, 1.0f, 1.0f, 1.0f), 0.18f).WithAlpha(BorderAlpha);
+
+		const float PaddingX = 5.0f;
+		const float PaddingY = 2.6f;
+		const float Spacing = 2.8f;
+		const int Bars = 4;
+		const float BarW = 1.7f;
+		const float BarGap = 1.3f;
+		const float BarsW = Bars * BarW + (Bars - 1) * BarGap;
+		const float ArtBaseSize = 11.0f;
+		const float ArtBlockW = (ArtBaseSize + Spacing) * s_OrnamentsWidth;
+		const float BarsBlockW = (BarsW + Spacing) * s_OrnamentsWidth;
+		const float BoxH = 18.5f;
+		const float BoxW = PaddingX + ArtBlockW + TextWidth + BarsBlockW + PaddingX;
+		const float Corner = BoxH * 0.38f;
+		const float Y = 2.0f;
 		const float X = Half - BoxW * 0.5f;
+
+		const bool CanExpandWithMouse = GameClient()->m_Chat.IsActive() && !GameClient()->m_Menus.IsActive();
+		const float ExpandGap = 2.0f;
+		const float ExpandPanelH = 20.0f;
+		bool ClickPrev = false;
+		bool ClickPause = false;
+		bool ClickNext = false;
+
+		const CUIRect UiScreen = *Ui()->Screen();
+		const vec2 WindowSize(maximum(1.0f, (float)Graphics()->WindowWidth()), maximum(1.0f, (float)Graphics()->WindowHeight()));
+		const vec2 UiMousePos = Ui()->UpdatedMousePos() * vec2(UiScreen.w, UiScreen.h) / WindowSize;
+		const vec2 UiToHudScale(m_Width / maximum(UiScreen.w, 1.0f), m_Height / maximum(UiScreen.h, 1.0f));
+		const float MouseX = UiMousePos.x * UiToHudScale.x;
+		const float MouseY = UiMousePos.y * UiToHudScale.y;
+		const bool ClickedLeft = CanExpandWithMouse && (Ui()->MouseButtonClicked(0) || Input()->KeyPress(KEY_MOUSE_1));
+		{
+			const CUIRect HoverRectHud = {X, Y, BoxW, BoxH + ExpandGap + ExpandPanelH};
+			const bool Hovered = CanExpandWithMouse && IsPointInsideRect(HoverRectHud, MouseX, MouseY, 1.5f);
+			s_PlayerExpand = ApproachValue(s_PlayerExpand, Hovered ? 1.0f : 0.0f, 4.8f, Dt);
+
+			if(CanExpandWithMouse && s_PlayerExpand > 0.01f)
+			{
+				const float PanelY = Y + BoxH + ExpandGap + (1.0f - s_PlayerExpand) * 2.0f;
+				const float BtnSize = 6.5f;
+				const float BtnGap = 2.2f;
+				const float BtnY = PanelY + 1.6f;
+				const float TotalButtonsW = BtnSize * 3.0f + BtnGap * 2.0f;
+				const float ButtonsX = X + (BoxW - TotalButtonsW) * 0.5f;
+				const CUIRect PrevRectHud = {ButtonsX, BtnY, BtnSize, BtnSize};
+				const CUIRect PauseRectHud = {ButtonsX + BtnSize + BtnGap, BtnY, BtnSize, BtnSize};
+				const CUIRect NextRectHud = {ButtonsX + (BtnSize + BtnGap) * 2.0f, BtnY, BtnSize, BtnSize};
+				const bool ButtonsEnabled = Track.m_Available;
+				const bool PrevHovered = ButtonsEnabled && IsPointInsideRect(PrevRectHud, MouseX, MouseY, 0.9f);
+				const bool PauseHovered = ButtonsEnabled && IsPointInsideRect(PauseRectHud, MouseX, MouseY, 0.9f);
+				const bool NextHovered = ButtonsEnabled && IsPointInsideRect(NextRectHud, MouseX, MouseY, 0.9f);
+				if(ClickedLeft && PrevHovered)
+					ClickPrev = true;
+				if(ClickedLeft && PauseHovered)
+					ClickPause = true;
+				if(ClickedLeft && NextHovered)
+					ClickNext = true;
+			}
+		}
+		if(ClickPrev)
+			GameClient()->m_MusicSMTC.Previous();
+		if(ClickPause)
+			GameClient()->m_MusicSMTC.TogglePlayPause();
+		if(ClickNext)
+			GameClient()->m_MusicSMTC.Next();
+
+		m_ZzIslandVisible = true;
+		m_ZzIslandX = X;
+		m_ZzIslandY = Y;
+		m_ZzIslandW = BoxW;
+		m_ZzIslandH = BoxH;
+
 		Graphics()->TextureClear();
-		Graphics()->DrawRect(X, Y, BoxW, BoxH, ColorRGBA(0.08f, 0.10f, 0.12f, 0.80f), IGraphics::CORNER_ALL, Corner);
-		Graphics()->SetColor(1.0f, 1.0f, 1.0f, 1.0f);
+		Graphics()->DrawRect4(X, Y, BoxW, BoxH, BorderLeft, BorderRight, BorderLeft, BorderRight, IGraphics::CORNER_ALL, Corner);
+		const float InnerInset = 0.55f;
+		Graphics()->DrawRect(
+			X + InnerInset, Y + InnerInset, BoxW - InnerInset * 2.0f, BoxH - InnerInset * 2.0f,
+			InnerFill, IGraphics::CORNER_ALL, maximum(0.0f, BoxH * 0.35f - 0.25f));
+
+		const float ArtSize = ArtBaseSize;
+		const float ArtX = X + PaddingX;
+		const float ArtY = Y + (BoxH - ArtSize) * 0.5f;
+		if(s_OrnamentsAlpha > 0.01f)
+		{
+			Graphics()->DrawRect(ArtX, ArtY, ArtSize, ArtSize, ColorRGBA(0.12f, 0.13f, 0.17f, 0.80f * s_OrnamentsAlpha), IGraphics::CORNER_ALL, 2.0f);
+
+			if(Track.m_HasArtwork && m_ZzIslandArtworkTexture.IsValid())
+			{
+				Graphics()->WrapClamp();
+				Graphics()->TextureSet(m_ZzIslandArtworkTexture);
+				Graphics()->QuadsBegin();
+				Graphics()->SetColor(1.0f, 1.0f, 1.0f, s_OrnamentsAlpha);
+				const float ImgInset = 0.45f;
+				IGraphics::CQuadItem Quad(ArtX + ImgInset, ArtY + ImgInset, ArtSize - ImgInset * 2.0f, ArtSize - ImgInset * 2.0f);
+				Graphics()->QuadsDrawTL(&Quad, 1);
+				Graphics()->QuadsEnd();
+				Graphics()->WrapNormal();
+			}
+			else
+			{
+				TextRender()->SetFontPreset(EFontPreset::ICON_FONT);
+				TextRender()->TextColor(1.0f, 1.0f, 1.0f, 0.98f * s_OrnamentsAlpha);
+				TextRender()->Text(ArtX + 1.9f, ArtY + 1.7f, 4.2f, FontIcon::MUSIC, -1.0f);
+				TextRender()->SetFontPreset(EFontPreset::DEFAULT_FONT);
+			}
+		}
+
 		// last 60 sec red, last 10 sec blink
 		if(GameClient()->m_Snap.m_pGameInfoObj->m_TimeLimit && Time <= 60 && (GameClient()->m_Snap.m_pGameInfoObj->m_WarmupTimer <= 0))
 		{
-			float Alpha = Time <= 10 && (2 * time() / time_freq()) % 2 ? 0.5f : 1.0f;
+			const float Alpha = Time <= 10 && (2 * time() / time_freq()) % 2 ? 0.5f : 1.0f;
 			TextRender()->TextColor(1.0f, 0.25f, 0.25f, Alpha);
 		}
-		float CursorX = X + PadX;
-		if(Playing)
+
+		const float TextX = X + PaddingX + ArtBlockW;
+		const float TextY = Y + BoxH / 2.0f - TimeFontSize / 2.0f;
+		TextRender()->Text(TextX, TextY, TimeFontSize, aBuf, -1.0f);
+
+		// Right signal bars for music-island visual style.
+		const float CurrentBarsW = BarsW * s_OrnamentsWidth;
+		const float SignalX = X + BoxW - PaddingX - CurrentBarsW;
+		const float MaxBarHeight = 10.5f;
+		const float SignalY = Y + (BoxH - MaxBarHeight) * 0.5f;
+		const float BaseHeights[4] = {0.4f, 0.55f, 0.7f, 0.85f};
+		const float T = LocalTime();
+		for(int i = 0; i < Bars && s_OrnamentsAlpha > 0.01f; i++)
 		{
-			const float T = (float)time() / (float)time_freq();
-			const float BaseY = Y + BoxH * 0.5f;
-			for(int i = 0; i < Bars; i++)
+			float Height = BaseHeights[i] * MaxBarHeight;
+			if(Playing)
 			{
-				const float PhA = T * 11.0f + i * 0.95f;
-				const float PhB = T * 6.0f + i * 1.65f;
-				const float S = 0.2f + 0.8f * (0.5f + 0.5f * (0.65f * sinf(PhA) + 0.35f * sinf(PhB)));
-				const float H = 2.0f + 9.0f * S;
-				Graphics()->DrawRect(CursorX + i * (BarW + BarGap), BaseY - H * 0.5f, BarW, H, ColorRGBA(0.02f, 0.02f, 0.02f, 0.95f), IGraphics::CORNER_ALL, 1.0f);
+				if(Track.m_HasVisualizer)
+				{
+					const float AudioLevel = std::clamp(Track.m_aVisualizer[i], 0.0f, 1.0f);
+					s_aVisualizerDisplay[i] = ApproachValue(s_aVisualizerDisplay[i], AudioLevel, 18.0f, Dt);
+					Height = 1.6f + s_aVisualizerDisplay[i] * (MaxBarHeight - 1.6f);
+				}
+				else
+				{
+					s_aVisualizerDisplay[i] = ApproachValue(s_aVisualizerDisplay[i], 0.0f, 6.0f, Dt);
+					const float Wave = 0.6f * sinf(T * (1.8f + i * 0.7f) + i * 0.8f) + 0.4f * sinf(T * (3.0f + i * 0.4f) + i * 1.1f);
+					Height *= 1.0f + Wave * 0.28f;
+				}
+				Height = std::clamp(Height, 1.6f, MaxBarHeight);
 			}
-			CursorX += BarsW + Gap;
+			const float BarX = SignalX + i * ((BarW + BarGap) * s_OrnamentsWidth);
+			const float BarY = SignalY + MaxBarHeight - Height;
+			ColorRGBA BarColor = MixColors(Accent, ColorRGBA(1.0f, 1.0f, 1.0f, 1.0f), 0.35f + i * 0.10f).WithAlpha(0.94f * s_OrnamentsAlpha);
+			const float DrawBarW = maximum(0.45f, BarW * s_OrnamentsWidth);
+			Graphics()->DrawRect(BarX, BarY, DrawBarW, Height, BarColor, IGraphics::CORNER_T, 0.8f);
 		}
-		TextRender()->Text(CursorX, Y + PadY, FontSize, aBuf, -1.0f);
-		TextRender()->TextColor(1.0f, 1.0f, 1.0f, 1.0f);
+
+		if(s_PlayerExpand > 0.01f && CanExpandWithMouse)
+		{
+			const float PanelAlpha = s_PlayerExpand;
+			const float PanelW = BoxW;
+			const float PanelH = ExpandPanelH;
+			const float PanelX = X;
+			const float PanelY = Y + BoxH + ExpandGap + (1.0f - s_PlayerExpand) * 2.0f;
+			const float PanelCorner = PanelH * 0.35f;
+
+			Graphics()->DrawRect4(
+				PanelX, PanelY, PanelW, PanelH,
+				BorderLeft.WithAlpha(BorderAlpha * PanelAlpha),
+				BorderRight.WithAlpha(BorderAlpha * PanelAlpha),
+				BorderLeft.WithAlpha(BorderAlpha * PanelAlpha),
+				BorderRight.WithAlpha(BorderAlpha * PanelAlpha),
+				IGraphics::CORNER_ALL, PanelCorner);
+			Graphics()->DrawRect(
+				PanelX + InnerInset, PanelY + InnerInset, PanelW - InnerInset * 2.0f, PanelH - InnerInset * 2.0f,
+				ColorRGBA(0.06f, 0.06f, 0.08f, 0.70f * PanelAlpha), IGraphics::CORNER_ALL, maximum(0.0f, PanelCorner - 0.4f));
+
+			const bool ButtonsEnabled = Track.m_Available;
+			const float BtnSize = 6.5f;
+			const float BtnGap = 2.2f;
+			const float BtnY = PanelY + 1.6f;
+			const float TotalButtonsW = BtnSize * 3.0f + BtnGap * 2.0f;
+			const float ButtonsX = PanelX + (PanelW - TotalButtonsW) * 0.5f;
+			CUIRect PrevRect = {ButtonsX, BtnY, BtnSize, BtnSize};
+			CUIRect PauseRect = {ButtonsX + BtnSize + BtnGap, BtnY, BtnSize, BtnSize};
+			CUIRect NextRect = {ButtonsX + (BtnSize + BtnGap) * 2.0f, BtnY, BtnSize, BtnSize};
+
+			const float BtnAlpha = ButtonsEnabled ? PanelAlpha : PanelAlpha * 0.5f;
+			Graphics()->DrawRect(PrevRect.x, PrevRect.y, PrevRect.w, PrevRect.h, ColorRGBA(0.12f, 0.14f, 0.18f, 0.78f * BtnAlpha), IGraphics::CORNER_ALL, 1.8f);
+			Graphics()->DrawRect(PauseRect.x, PauseRect.y, PauseRect.w, PauseRect.h, ColorRGBA(0.12f, 0.14f, 0.18f, 0.78f * BtnAlpha), IGraphics::CORNER_ALL, 1.8f);
+			Graphics()->DrawRect(NextRect.x, NextRect.y, NextRect.w, NextRect.h, ColorRGBA(0.12f, 0.14f, 0.18f, 0.78f * BtnAlpha), IGraphics::CORNER_ALL, 1.8f);
+
+			TextRender()->SetFontPreset(EFontPreset::ICON_FONT);
+			TextRender()->TextColor(1.0f, 1.0f, 1.0f, 0.96f * BtnAlpha);
+			const char *pPauseIcon = Track.m_Playing ? FontIcon::PAUSE : FontIcon::PLAY;
+			const float IconSize = 4.5f;
+			const float PrevW = TextRender()->TextWidth(IconSize, FontIcon::BACKWARD_STEP, -1, -1.0f);
+			const float PauseW = TextRender()->TextWidth(IconSize, pPauseIcon, -1, -1.0f);
+			const float NextW = TextRender()->TextWidth(IconSize, FontIcon::FORWARD_STEP, -1, -1.0f);
+			TextRender()->Text(PrevRect.x + (PrevRect.w - PrevW) * 0.5f, PrevRect.y + (PrevRect.h - IconSize) * 0.5f - 0.1f, IconSize, FontIcon::BACKWARD_STEP, -1.0f);
+			TextRender()->Text(PauseRect.x + (PauseRect.w - PauseW) * 0.5f, PauseRect.y + (PauseRect.h - IconSize) * 0.5f - 0.1f, IconSize, pPauseIcon, -1.0f);
+			TextRender()->Text(NextRect.x + (NextRect.w - NextW) * 0.5f, NextRect.y + (NextRect.h - IconSize) * 0.5f - 0.1f, IconSize, FontIcon::FORWARD_STEP, -1.0f);
+			TextRender()->SetFontPreset(EFontPreset::DEFAULT_FONT);
+
+			const std::string Title = Track.m_Title.empty() ? std::string("No track") : CutText(Track.m_Title, 24);
+			const std::string Artist = Track.m_Artist.empty() ? std::string("") : CutText(Track.m_Artist, 28);
+			const float TitleSize = 3.5f;
+			const float ArtistSize = 3.0f;
+			const float TextY0 = BtnY + BtnSize + 1.0f;
+			const float CenterX = PanelX + PanelW * 0.5f;
+			const float TitleW = TextRender()->TextWidth(TitleSize, Title.c_str(), -1, -1.0f);
+			TextRender()->TextColor(1.0f, 1.0f, 1.0f, 0.95f * PanelAlpha);
+			TextRender()->Text(CenterX - TitleW * 0.5f, TextY0, TitleSize, Title.c_str(), -1.0f);
+			if(!Artist.empty())
+			{
+				const float ArtistW = TextRender()->TextWidth(ArtistSize, Artist.c_str(), -1, -1.0f);
+				TextRender()->TextColor(0.86f, 0.88f, 0.93f, 0.90f * PanelAlpha);
+				TextRender()->Text(CenterX - ArtistW * 0.5f, TextY0 + 3.6f, ArtistSize, Artist.c_str(), -1.0f);
+			}
+		}
+
+		TextRender()->TextColor(TextRender()->DefaultTextColor());
 	}
 }
 
@@ -954,6 +1223,9 @@ void CHud::RenderTeambalanceWarning()
 
 void CHud::RenderCursor()
 {
+	if(GameClient()->m_Chat.IsActive() && !GameClient()->m_Menus.IsActive())
+		return;
+
 	const float Scale = (float)g_Config.m_TcCursorScale / 100.0f;
 	if(Scale <= 0.0f)
 		return;
@@ -2085,6 +2357,63 @@ void CHud::RenderLocalTime(float x)
 	// TextRender()->Text(x - 25.0f, (12.5f - 5.f) / 2.f, 5.0f, aTimeStr, -1.0f);
 }
 
+void CHud::RenderZzWatermark()
+{
+	if(!g_Config.m_ClZzWatermarkEnabled)
+		return;
+
+	const char *pText = "ZZClient Free";
+	const float FontSize = 5.2f;
+	const float PaddingX = 3.0f;
+	const float PaddingY = 1.8f;
+	const float TextWidth = TextRender()->TextWidth(FontSize, pText, -1, -1.0f);
+	const float BoxW = PaddingX * 2.0f + TextWidth;
+	const float BoxH = FontSize + PaddingY * 2.0f + 0.6f;
+	const float Corner = BoxH * 0.43f;
+
+	const auto Track = GameClient()->m_MusicSMTC.GetTrackInfo();
+	ColorRGBA Accent(std::clamp(Track.m_AccentR, 0.0f, 1.0f), std::clamp(Track.m_AccentG, 0.0f, 1.0f), std::clamp(Track.m_AccentB, 0.0f, 1.0f), 1.0f);
+	ColorRGBA Accent2 = MixColors(Accent, ColorRGBA(0.10f, 0.14f, 0.20f, 1.0f), 0.42f);
+	if(g_Config.m_ClZzWatermarkRainbowEnabled)
+	{
+		Accent = RainbowColor(LocalTime() * 0.10f, 1.0f);
+		Accent2 = RainbowColor(LocalTime() * 0.10f + 0.20f, 1.0f);
+	}
+	const float BorderAlpha = 0.86f;
+	const ColorRGBA InnerFill = ColorRGBA(0.06f, 0.06f, 0.08f, 0.70f);
+	const ColorRGBA BorderLeft = MixColors(Accent, ColorRGBA(1.0f, 1.0f, 1.0f, 1.0f), 0.25f).WithAlpha(BorderAlpha);
+	const ColorRGBA BorderRight = MixColors(Accent2, ColorRGBA(1.0f, 1.0f, 1.0f, 1.0f), 0.20f).WithAlpha(BorderAlpha);
+
+	const float Margin = 6.0f;
+	const float IslandGap = 5.0f;
+	float X = m_Width - BoxW - Margin;
+	float Y = Margin;
+	if(m_ZzIslandVisible)
+	{
+		X = m_ZzIslandX + m_ZzIslandW + IslandGap;
+		Y = m_ZzIslandY + (m_ZzIslandH - BoxH) * 0.5f;
+		if(X + BoxW > m_Width - Margin)
+			X = m_ZzIslandX - IslandGap - BoxW;
+	}
+	X = std::clamp(X, Margin, m_Width - BoxW - Margin);
+	Y = std::clamp(Y, Margin, m_Height - BoxH - Margin);
+
+	Graphics()->TextureClear();
+	Graphics()->DrawRect4(X, Y, BoxW, BoxH, BorderLeft, BorderRight, BorderLeft, BorderRight, IGraphics::CORNER_ALL, Corner);
+	const float InnerInset = 0.7f;
+	Graphics()->DrawRect4(
+		X + InnerInset, Y + InnerInset, BoxW - InnerInset * 2.0f, BoxH - InnerInset * 2.0f,
+		InnerFill, InnerFill,
+		InnerFill, InnerFill,
+		IGraphics::CORNER_ALL, maximum(0.0f, Corner - 0.55f));
+
+	const float TextX = X + PaddingX;
+	const float TextY = Y + BoxH / 2.0f - FontSize / 2.0f - 0.1f;
+	TextRender()->TextColor(1.0f, 1.0f, 1.0f, 1.0f);
+	TextRender()->Text(TextX, TextY, FontSize, pText, -1.0f);
+	TextRender()->TextColor(TextRender()->DefaultTextColor());
+}
+
 void CHud::OnNewSnapshot()
 {
 	if(Client()->State() != IClient::STATE_ONLINE && Client()->State() != IClient::STATE_DEMOPLAYBACK)
@@ -2331,6 +2660,7 @@ void CHud::OnRender()
 		GameClient()->m_Voting.Render();
 		if(g_Config.m_ClShowRecord)
 			RenderRecord();
+		RenderZzWatermark();
 	}
 	RenderCursor();
 }
