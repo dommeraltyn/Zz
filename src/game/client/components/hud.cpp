@@ -1224,7 +1224,15 @@ void CHud::RenderTeambalanceWarning()
 void CHud::RenderCursor()
 {
 	if(GameClient()->m_Chat.IsActive() && !GameClient()->m_Menus.IsActive())
+	{
+		const CUIRect UiScreen = *Ui()->Screen();
+		const vec2 WindowSize(maximum(1.0f, (float)Graphics()->WindowWidth()), maximum(1.0f, (float)Graphics()->WindowHeight()));
+		const vec2 UiMousePos = Ui()->UpdatedMousePos() * vec2(UiScreen.w, UiScreen.h) / WindowSize;
+		const vec2 UiToHudScale(m_Width / maximum(UiScreen.w, 1.0f), m_Height / maximum(UiScreen.h, 1.0f));
+		const vec2 HudMousePos = UiMousePos * UiToHudScale;
+		RenderTools()->RenderCursor(HudMousePos, 24.0f);
 		return;
+	}
 
 	const float Scale = (float)g_Config.m_TcCursorScale / 100.0f;
 	if(Scale <= 0.0f)

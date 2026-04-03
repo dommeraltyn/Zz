@@ -540,8 +540,6 @@ void CChat::EnableMode(int Team)
 		m_CompletionChosen = -1;
 		m_CompletionUsed = false;
 		m_Input.Activate(EInputPriority::CHAT);
-		if(!GameClient()->m_Menus.IsActive() && !GameClient()->m_GameConsole.IsActive())
-			Input()->MouseModeAbsolute();
 	}
 }
 
@@ -551,8 +549,6 @@ void CChat::DisableMode()
 	{
 		m_Mode = MODE_NONE;
 		m_Input.Deactivate();
-		if(!GameClient()->m_Menus.IsActive() && !GameClient()->m_GameConsole.IsActive())
-			Input()->MouseModeRelative();
 	}
 }
 
