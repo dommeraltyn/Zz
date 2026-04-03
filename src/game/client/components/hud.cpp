@@ -208,7 +208,7 @@ void CHud::RenderGameTimer()
 			Time = (Client()->GameTick(g_Config.m_ClDummy) - GameClient()->m_Snap.m_pGameInfoObj->m_RoundStartTick) / Client()->GameTickSpeed();
 
 		str_time((int64_t)Time * 100, ETimeFormat::DAYS, aBuf, sizeof(aBuf));
-		const float TimeFontSize = 8.6f;
+		const float TimeFontSize = 7.0f;
 		const float TextWidth = TextRender()->TextWidth(TimeFontSize, aBuf, -1, -1.0f);
 		const auto Track = GameClient()->m_MusicSMTC.GetTrackInfo();
 		const bool Playing = Track.m_Available && Track.m_Playing;
@@ -252,17 +252,17 @@ void CHud::RenderGameTimer()
 		const ColorRGBA BorderLeft = MixColors(Accent, ColorRGBA(1.0f, 1.0f, 1.0f, 1.0f), 0.22f).WithAlpha(BorderAlpha);
 		const ColorRGBA BorderRight = MixColors(Accent2, ColorRGBA(1.0f, 1.0f, 1.0f, 1.0f), 0.18f).WithAlpha(BorderAlpha);
 
-		const float PaddingX = 5.0f;
-		const float PaddingY = 2.6f;
-		const float Spacing = 2.8f;
+		const float PaddingX = 3.8f;
+		const float PaddingY = 2.0f;
+		const float Spacing = 2.2f;
 		const int Bars = 4;
-		const float BarW = 1.7f;
-		const float BarGap = 1.3f;
+		const float BarW = 1.5f;
+		const float BarGap = 1.1f;
 		const float BarsW = Bars * BarW + (Bars - 1) * BarGap;
-		const float ArtBaseSize = 11.0f;
+		const float ArtBaseSize = 8.5f;
 		const float ArtBlockW = (ArtBaseSize + Spacing) * s_OrnamentsWidth;
 		const float BarsBlockW = (BarsW + Spacing) * s_OrnamentsWidth;
-		const float BoxH = 18.5f;
+		const float BoxH = 14.2f;
 		const float BoxW = PaddingX + ArtBlockW + TextWidth + BarsBlockW + PaddingX;
 		const float Corner = BoxH * 0.38f;
 		const float Y = 2.0f;
@@ -270,7 +270,7 @@ void CHud::RenderGameTimer()
 
 		const bool CanExpandWithMouse = GameClient()->m_Chat.IsActive() && !GameClient()->m_Menus.IsActive();
 		const float ExpandGap = 2.0f;
-		const float ExpandPanelH = 20.0f;
+		const float ExpandPanelH = 16.0f;
 		bool ClickPrev = false;
 		bool ClickPause = false;
 		bool ClickNext = false;
@@ -290,9 +290,9 @@ void CHud::RenderGameTimer()
 			if(CanExpandWithMouse && s_PlayerExpand > 0.01f)
 			{
 				const float PanelY = Y + BoxH + ExpandGap + (1.0f - s_PlayerExpand) * 2.0f;
-				const float BtnSize = 6.5f;
-				const float BtnGap = 2.2f;
-				const float BtnY = PanelY + 1.6f;
+				const float BtnSize = 5.4f;
+				const float BtnGap = 1.9f;
+				const float BtnY = PanelY + 1.3f;
 				const float TotalButtonsW = BtnSize * 3.0f + BtnGap * 2.0f;
 				const float ButtonsX = X + (BoxW - TotalButtonsW) * 0.5f;
 				const CUIRect PrevRectHud = {ButtonsX, BtnY, BtnSize, BtnSize};
@@ -423,9 +423,9 @@ void CHud::RenderGameTimer()
 				ColorRGBA(0.06f, 0.06f, 0.08f, 0.70f * PanelAlpha), IGraphics::CORNER_ALL, maximum(0.0f, PanelCorner - 0.4f));
 
 			const bool ButtonsEnabled = Track.m_Available;
-			const float BtnSize = 6.5f;
-			const float BtnGap = 2.2f;
-			const float BtnY = PanelY + 1.6f;
+			const float BtnSize = 5.4f;
+			const float BtnGap = 1.9f;
+			const float BtnY = PanelY + 1.3f;
 			const float TotalButtonsW = BtnSize * 3.0f + BtnGap * 2.0f;
 			const float ButtonsX = PanelX + (PanelW - TotalButtonsW) * 0.5f;
 			CUIRect PrevRect = {ButtonsX, BtnY, BtnSize, BtnSize};
@@ -440,7 +440,7 @@ void CHud::RenderGameTimer()
 			TextRender()->SetFontPreset(EFontPreset::ICON_FONT);
 			TextRender()->TextColor(1.0f, 1.0f, 1.0f, 0.96f * BtnAlpha);
 			const char *pPauseIcon = Track.m_Playing ? FontIcon::PAUSE : FontIcon::PLAY;
-			const float IconSize = 4.5f;
+			const float IconSize = 4.0f;
 			const float PrevW = TextRender()->TextWidth(IconSize, FontIcon::BACKWARD_STEP, -1, -1.0f);
 			const float PauseW = TextRender()->TextWidth(IconSize, pPauseIcon, -1, -1.0f);
 			const float NextW = TextRender()->TextWidth(IconSize, FontIcon::FORWARD_STEP, -1, -1.0f);
@@ -451,8 +451,8 @@ void CHud::RenderGameTimer()
 
 			const std::string Title = Track.m_Title.empty() ? std::string("No track") : CutText(Track.m_Title, 24);
 			const std::string Artist = Track.m_Artist.empty() ? std::string("") : CutText(Track.m_Artist, 28);
-			const float TitleSize = 3.5f;
-			const float ArtistSize = 3.0f;
+			const float TitleSize = 3.2f;
+			const float ArtistSize = 2.8f;
 			const float TextY0 = BtnY + BtnSize + 1.0f;
 			const float CenterX = PanelX + PanelW * 0.5f;
 			const float TitleW = TextRender()->TextWidth(TitleSize, Title.c_str(), -1, -1.0f);

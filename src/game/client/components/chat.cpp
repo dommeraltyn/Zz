@@ -524,6 +524,16 @@ bool CChat::OnInput(const IInput::CEvent &Event)
 	return true;
 }
 
+bool CChat::OnCursorMove(float x, float y, IInput::ECursorType CursorType)
+{
+	if(m_Mode == MODE_NONE)
+		return false;
+
+	Ui()->ConvertMouseMove(&x, &y, CursorType);
+	Ui()->OnCursorMove(x, y);
+	return true;
+}
+
 void CChat::EnableMode(int Team)
 {
 	if(Client()->State() == IClient::STATE_DEMOPLAYBACK)
