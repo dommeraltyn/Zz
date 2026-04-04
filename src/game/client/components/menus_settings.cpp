@@ -565,7 +565,7 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 		}
 		{
 			CUIRect Inner;
-			DoFeaturePanel(LeftView, 198.0f, Inner);
+			DoFeaturePanel(LeftView, 220.0f, Inner);
 			if(DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzCompanionEnabled, Localize("Companion"), &g_Config.m_ClZzCompanionEnabled, &Inner, LineSize))
 			{
 				if(g_Config.m_ClZzCompanionEnabled)
@@ -573,6 +573,7 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 			}
 			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzCompanionFightMode, Localize("Fight mode"), &g_Config.m_ClZzCompanionFightMode, &Inner, LineSize);
 			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzCompanionNoAggroTeam, Localize("No aggro teammates + rescue"), &g_Config.m_ClZzCompanionNoAggroTeam, &Inner, LineSize);
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzCompanionHitOnlyWars, Localize("Hit only wars"), &g_Config.m_ClZzCompanionHitOnlyWars, &Inner, LineSize);
 			Inner.HSplitTop(4.0f, nullptr, &Inner);
 			Inner.HSplitTop(LineSize, &Button, &Inner);
 			Ui()->DoScrollbarOption(&g_Config.m_ClZzCompanionFollowTiles, &g_Config.m_ClZzCompanionFollowTiles, &Button, Localize("Follow tiles"), 5, 200);
@@ -595,7 +596,7 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 			}
 			Inner.HSplitTop(4.0f, nullptr, &Inner);
 			Inner.HSplitTop(LineSize * 1.6f, &Label, &Inner);
-			Ui()->DoLabel(&Label, Localize("Дамми следует за основой, спасает из фриза, а в fight mode может бить только врагов."), 14.0f, TEXTALIGN_ML);
+			Ui()->DoLabel(&Label, Localize("!team = тиммейты (не бить/спасать), !war = враги для режима Hit only wars."), 14.0f, TEXTALIGN_ML);
 		}
 		{
 			CUIRect Inner;

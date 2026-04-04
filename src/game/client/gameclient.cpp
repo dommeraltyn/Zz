@@ -1567,6 +1567,17 @@ bool CompanionFindRescueAnchor(CGameClient *pGameClient, vec2 DummyPos, int Owne
 	return true;
 }
 
+constexpr int COMPANION_WAR_GROUP_ENEMY = 1;
+constexpr int COMPANION_WAR_GROUP_TEAM = 2;
+
+bool CompanionWarGroupMatch(CGameClient *pGameClient, int ClientId, int GroupIndex)
+{
+	if(!pGameClient || ClientId < 0 || ClientId >= MAX_CLIENTS || GroupIndex < 0)
+		return false;
+	const std::vector<char> &vMatches = pGameClient->m_WarList.GetWarData(ClientId).m_WarGroupMatches;
+	return GroupIndex < (int)vMatches.size() && vMatches[GroupIndex];
+}
+
 bool CompanionFindFightTarget(CGameClient *pGameClient, int DummyCid, int OwnerCid, vec2 DummyPos, vec2 OwnerPos, float MaxDummyDist, float MaxOwnerDist, int *pOutTargetCid, vec2 *pOutTargetPos)
 {
 	if(!pGameClient || !pOutTargetCid || !pOutTargetPos)
@@ -1598,8 +1609,12 @@ bool CompanionFindFightTarget(CGameClient *pGameClient, int DummyCid, int OwnerC
 		const float DistOwner = distance(OwnerPos, TargetPos);
 		if(DistDummy > MaxDummyDist || DistOwner > MaxOwnerDist)
 			continue;
+		const bool IsWarEnemy = CompanionWarGroupMatch(pGameClient, ClientId, COMPANION_WAR_GROUP_ENEMY);
+		const bool IsWarTeammate = CompanionWarGroupMatch(pGameClient, ClientId, COMPANION_WAR_GROUP_TEAM);
 		const bool SameTeamAsOwner = pGameClient->m_Teams.SameTeam(OwnerCid, ClientId);
-		if(g_Config.m_ClZzCompanionNoAggroTeam && SameTeamAsOwner)
+		if(g_Config.m_ClZzCompanionNoAggroTeam && IsWarTeammate)
+			continue;
+		if(g_Config.m_ClZzCompanionHitOnlyWars && !IsWarEnemy)
 			continue;
 		if(pCollision->IntersectLine(DummyPos, TargetPos, nullptr, nullptr) != 0)
 			continue;
@@ -1609,6 +1624,10 @@ bool CompanionFindFightTarget(CGameClient *pGameClient, int DummyCid, int OwnerC
 		float Score = DistDummy + DistOwner * 0.30f;
 		if(SameTeamAsOwner)
 			Score += 100.0f;
+		if(IsWarTeammate)
+			Score += 220.0f;
+		if(IsWarEnemy)
+			Score -= 45.0f;
 		if(pGameClient->m_aClients[ClientId].m_Friend)
 			Score += 140.0f;
 		if(!Found || Score < BestScore)
@@ -1647,7 +1666,8 @@ bool CompanionFindRescueTeammate(CGameClient *pGameClient, int DummyCid, int Own
 	{
 		if(ClientId == DummyCid || ClientId == OwnerCid)
 			continue;
-		if(!pGameClient->m_Teams.SameTeam(OwnerCid, ClientId))
+		const bool IsWarTeammate = CompanionWarGroupMatch(pGameClient, ClientId, COMPANION_WAR_GROUP_TEAM);
+		if(!IsWarTeammate)
 			continue;
 
 		CCharacter *pTargetChar = pGameClient->m_RegularPredictedWorld.GetCharacterById(ClientId);
@@ -1789,8 +1809,10 @@ bool CompanionBuildFightInput(CGameClient *pGameClient, int DummyCid, int OwnerC
 	const bool DummyAboveTarget = DummyPos.y < TargetPos.y - 12.0f;
 	const bool VerticallyStacked = fabsf(TargetPos.x - DummyPos.x) < CCharacterCore::PhysicalSize() * 0.92f;
 	const bool DummyGrounded = CompanionIsGrounded(pCollision, DummyPos);
-	const bool WantJump = TargetPos.y < DummyPos.y - 22.0f || DummyVel.y > 6.5f || (TargetAboveDummy && !DummyGrounded);
-	int LateralFightDir = CompanionChooseLateralDir(pCollision, DummyPos, TargetPos, FightDir, TargetAboveDummy && DummyGrounded && VerticallyStacked);
+	const bool TargetGrounded = CompanionIsGrounded(pCollision, TargetPos);
+	const bool ForceStandJumpForHeight = DummyGrounded && TargetGrounded && TargetPos.y <= DummyPos.y + 20.0f;
+	const bool WantJump = TargetPos.y < DummyPos.y - 22.0f || DummyVel.y > 6.5f || (TargetAboveDummy && !DummyGrounded) || ForceStandJumpForHeight;
+	int LateralFightDir = CompanionChooseLateralDir(pCollision, DummyPos, TargetPos, FightDir, (TargetAboveDummy || ForceStandJumpForHeight) && DummyGrounded && VerticallyStacked);
 	if(LateralFightDir == 0)
 		LateralFightDir = FightDir;
 
@@ -1875,6 +1897,17 @@ bool CompanionBuildFightInput(CGameClient *pGameClient, int DummyCid, int OwnerC
 	{
 		PushCandidate(BuildInput(LateralFightDir, true, false, false, AimToTarget), 8.0f, false);
 		PushCandidate(BuildInput(0, true, false, false, AimToTarget), 22.0f, false);
+	}
+	if(ForceStandJumpForHeight)
+	{
+		int HeightJumpDir = LateralFightDir;
+		if(HeightJumpDir == 0)
+			HeightJumpDir = CompanionChooseLateralDir(pCollision, DummyPos, TargetPos, TargetPos.x >= DummyPos.x ? -1 : 1, true);
+		if(HeightJumpDir == 0)
+			HeightJumpDir = TargetPos.x >= DummyPos.x ? -1 : 1;
+		PushCandidate(BuildInput(HeightJumpDir, true, false, false, AimToTarget), -56.0f, false);
+		if(CanHookTarget && DummySafeNow && !OwnerWouldBeHit(TargetPos, CCharacterCore::PhysicalSize() * 1.15f))
+			PushCandidate(BuildInput(HeightJumpDir, true, true, false, HookAimDir), -72.0f, false);
 	}
 
 	if(CanHammerTarget && !OwnerWouldBeHit(TargetPos, CCharacterCore::PhysicalSize() * 1.05f))
@@ -1973,6 +2006,19 @@ bool CompanionBuildFightInput(CGameClient *pGameClient, int DummyCid, int OwnerC
 			Score += 46.0f;
 		const float HeightAdvantage = Eval.m_TargetFinalPos.y - Eval.m_DummyFinalPos.y;
 		const float XGap = fabsf(Eval.m_TargetFinalPos.x - Eval.m_DummyFinalPos.x);
+		if(ForceStandJumpForHeight)
+		{
+			if(Candidate.m_Input.m_Jump != 0)
+				Score -= 86.0f;
+			else
+				Score += 132.0f;
+			if(Candidate.m_Input.m_Jump != 0 && Candidate.m_Input.m_Direction == 0 && XGap < CCharacterCore::PhysicalSize() * 0.80f)
+				Score += 62.0f;
+			if(HeightAdvantage < 10.0f)
+				Score += (10.0f - HeightAdvantage) * 4.5f;
+			if(HeightAdvantage > 18.0f)
+				Score -= 48.0f;
+		}
 		if(HeightAdvantage > 12.0f)
 			Score -= minimum(HeightAdvantage, 90.0f) * 1.15f;
 		else if(HeightAdvantage < -8.0f)
