@@ -6,6 +6,8 @@
 #include <game/client/component.h>
 
 #include <atomic>
+#include <array>
+#include <cstdint>
 #include <mutex>
 #include <string>
 
@@ -14,10 +16,21 @@ class CMusicSMTC : public CComponent
 public:
 	struct STrackInfo
 	{
+		static constexpr int ARTWORK_DIM = 36;
+		static constexpr int VISUALIZER_BARS = 4;
+
 		bool m_Available = false;
 		bool m_Playing = false;
 		std::string m_Title;
 		std::string m_Artist;
+		bool m_HasArtwork = false;
+		uint64_t m_ArtworkRevision = 0;
+		std::array<uint8_t, ARTWORK_DIM * ARTWORK_DIM * 4> m_aArtworkRgba{};
+		float m_AccentR = 0.34f;
+		float m_AccentG = 0.53f;
+		float m_AccentB = 0.79f;
+		bool m_HasVisualizer = false;
+		std::array<float, VISUALIZER_BARS> m_aVisualizer{};
 	};
 
 	CMusicSMTC();

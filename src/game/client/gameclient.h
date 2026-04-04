@@ -87,6 +87,7 @@
 #include "components/tclient/trails.h"
 #include "components/tclient/translate.h"
 #include "components/tclient/warlist.h"
+#include "components/tclient/zz_bestclient_presence.h"
 #include "components/tooltips.h"
 #include "components/touch_controls.h"
 #include "components/voting.h"
@@ -238,6 +239,7 @@ public:
 	CWarList m_WarList;
 	CScripting m_Scripting;
 	CMod m_Mod;
+	CZzBestClientPresence m_ZzBestClientPresence;
 	CCustomCommunities m_CustomCommunities;
 	CMovingTiles m_MovingTilesBackground = CMovingTiles{ false };
 	CMovingTiles m_MovingTilesForeground = CMovingTiles{ true };

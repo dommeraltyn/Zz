@@ -2588,6 +2588,8 @@ if(CLIENT)
     components/menus_settings_controls.h
     components/menus_start.cpp
     components/menus_start.h
+    components/rclient/menu/menus_start_rclient.cpp
+    components/rclient/menu/menus_start_rclient.h
     components/motd.cpp
     components/motd.h
     components/nameplates.cpp
@@ -2653,6 +2655,8 @@ if(CLIENT)
     components/tclient/translate.h
     components/tclient/warlist.cpp
     components/tclient/warlist.h
+    components/tclient/zz_bestclient_presence.cpp
+    components/tclient/zz_bestclient_presence.h
     components/tooltips.cpp
     components/tooltips.h
     components/touch_controls.cpp

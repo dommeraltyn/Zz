@@ -11,6 +11,7 @@
 #include <generated/protocol.h>
 
 #include <game/client/component.h>
+#include "FlyHelper/dummy_auto_unfreeze.h"
 
 class CControls : public CComponent
 {
@@ -38,8 +39,10 @@ public:
 	CNetObj_PlayerInput m_aLastData[NUM_DUMMIES];
 	int m_aInputDirectionLeft[NUM_DUMMIES];
 	int m_aInputDirectionRight[NUM_DUMMIES];
+	int m_aInputHookSpam[NUM_DUMMIES];
 	int m_aShowHookColl[NUM_DUMMIES];
 	int m_aSaveInBlock[NUM_DUMMIES];
+	bool m_ZzAutoUnfreezeOverridesInput = false;
 
 	// TClient
 	CNetObj_PlayerInput m_aFastInput[NUM_DUMMIES];
@@ -61,8 +64,19 @@ public:
 	void ResetInput(int Dummy);
 	bool CheckNewInput();
 	void Balance();
+	void RenderUnfreezePredict();
 
 private:
+	void DoSelfUnfreeze();
+
+	bool m_UnfreezeFound = false;
+	vec2 m_UnfreezePos = vec2(0.0f, 0.0f);
+	vec2 m_UnfreezeHit = vec2(0.0f, 0.0f);
+	vec2 m_UnfreezeFuture = vec2(0.0f, 0.0f);
+	int64_t m_LastUnfreezeShot = 0;
+	bool m_BotFireReleasePending = false;
+	FlyHelper::CDummyAutoUnfreeze m_DummyAutoUnfreeze;
+
 	static void ConKeyInputState(IConsole::IResult *pResult, void *pUserData);
 	static void ConKeyInputCounter(IConsole::IResult *pResult, void *pUserData);
 	static void ConKeyInputSet(IConsole::IResult *pResult, void *pUserData);

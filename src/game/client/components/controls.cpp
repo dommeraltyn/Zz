@@ -1,4 +1,4 @@
-/* (c) Magnus Auvinen. See licence.txt in the root of the distribution for more information. */
+﻿/* (c) Magnus Auvinen. See licence.txt in the root of the distribution for more information. */
 /* If you are missing that file, acquire a complete release at teeworlds.com.                */
 #include "controls.h"
 
@@ -16,12 +16,15 @@
 #include <game/client/components/chat.h>
 #include <game/client/components/menus.h>
 #include <game/client/components/scoreboard.h>
+#include <game/client/prediction/entities/character.h>
 #include <game/client/gameclient.h>
 #include <game/collision.h>
+#include <game/mapitems.h>
 
 #include <algorithm>
 #include <cmath>
 #include <optional>
+#include <vector>
 
 namespace
 {
@@ -244,6 +247,782 @@ bool ZzRayHitsEnemyWithBounces(CGameClient *pGameClient, int DummyIndex, int Loc
 		Energy -= distance(From, Pos) + BounceCost;
 		Bounces++;
 	}
+	return false;
+}
+}
+
+namespace
+{
+constexpr int ZZ_BLATANT_AVOID_BASE_TICKS = 14;
+constexpr int ZZ_BLATANT_AVOID_MIN_TICKS = 8;
+constexpr int ZZ_BLATANT_AVOID_MAX_TICKS = 30;
+constexpr int ZZ_BLATANT_AVOID_VALIDATE_EXTRA_TICKS = 10;
+constexpr int ZZ_BLATANT_AVOID_TRIGGER_TICKS = 4;
+constexpr int ZZ_BLATANT_AVOID_PANIC_TICKS = 2;
+constexpr int ZZ_BLATANT_AVOID_ONE_TILE_TICKS = 1;
+constexpr int ZZ_BLATANT_AVOID_MAX_CANDIDATES = 24;
+constexpr float ZZ_BLATANT_AVOID_MIN_HOOK_DIST = 24.0f;
+constexpr float ZZ_BLATANT_AVOID_PANIC_MIN_HOOK_DIST = 8.0f;
+constexpr float ZZ_BLATANT_AVOID_ONE_TILE_MIN_HOOK_DIST = 4.0f;
+constexpr float ZZ_BLATANT_AVOID_DUPLICATE_DIST = 18.0f;
+constexpr float ZZ_BLATANT_AVOID_TRIGGER_DIST = 40.0f;
+constexpr float ZZ_BLATANT_AVOID_TRIGGER_MAX_DIST = 72.0f;
+constexpr float ZZ_BLATANT_AVOID_PANIC_DIST = 24.0f;
+constexpr float ZZ_BLATANT_AVOID_ONE_TILE_DIST = 44.0f;
+constexpr float ZZ_BLATANT_AVOID_CURSOR_DANGER_SOFT_DOT = 0.20f;
+constexpr float ZZ_BLATANT_AVOID_CURSOR_DANGER_HARD_DOT = 0.60f;
+constexpr float ZZ_BLATANT_AVOID_PANIC_CURSOR_DANGER_DOT = 0.45f;
+constexpr float ZZ_BLATANT_AVOID_DIRECTION_SCORE = 96.0f;
+constexpr float ZZ_BLATANT_AVOID_CURSOR_INPUT_SCORE = 1.15f;
+constexpr float ZZ_BLATANT_AVOID_CURSOR_HOOK_SCORE = 84.0f;
+constexpr float ZZ_BLATANT_AVOID_CURSOR_RAY_SCORE = 0.35f;
+constexpr float ZZ_BLATANT_AVOID_CURSOR_PROGRESS_SCORE = 0.34f;
+constexpr float ZZ_BLATANT_AVOID_PANIC_CURSOR_PROGRESS_SCORE = 0.50f;
+constexpr float ZZ_BLATANT_AVOID_CURSOR_SIDE_SCORE = 0.05f;
+constexpr float ZZ_BLATANT_AVOID_ESCAPE_PROGRESS_SCORE = 0.11f;
+constexpr float ZZ_BLATANT_AVOID_PANIC_ESCAPE_PROGRESS_SCORE = 0.18f;
+constexpr float ZZ_BLATANT_AVOID_BACKTRACK_SCORE = 1.45f;
+constexpr float ZZ_BLATANT_AVOID_CORRIDOR_AXIS_SCORE = 0.18f;
+constexpr float ZZ_BLATANT_AVOID_MANUAL_DIRECTION_SCORE = 0.18f;
+constexpr float ZZ_BLATANT_AVOID_MANUAL_JUMP_SCORE = 0.32f;
+constexpr float ZZ_BLATANT_AVOID_AUTO_JUMP_SCORE = 0.9f;
+constexpr float ZZ_BLATANT_AVOID_FALLBACK_DIST_IMPROVEMENT = 12.0f;
+constexpr float ZZ_BLATANT_AVOID_HOOK_MOVE_SCORE_FACTOR = 0.7f;
+constexpr int ZZ_BLATANT_AVOID_HOOK_INPUT_VARIANTS = 3;
+constexpr int ZZ_BLATANT_AVOID_PANIC_HOOK_INPUT_VARIANTS = 6;
+constexpr float ZZ_BLATANT_AVOID_PANIC_RELEASE_SCORE = -0.9f;
+constexpr float ZZ_BLATANT_AVOID_REHOOK_DIR_SCORE = 96.0f;
+constexpr float ZZ_BLATANT_AVOID_REHOOK_PROGRESS_SCORE = 0.18f;
+constexpr int ZZ_BLATANT_AVOID_REHOOK_MAX_CANDIDATES = 40;
+constexpr int ZZ_BLATANT_AVOID_TAKEOVER_TICKS = 4;
+constexpr int ZZ_BLATANT_AVOID_TAKEOVER_MAX_CANDIDATES = 56;
+constexpr int ZZ_BLATANT_AVOID_TAKEOVER_HOOK_INPUT_VARIANTS = 8;
+constexpr float ZZ_BLATANT_AVOID_TAKEOVER_RELEASE_SCORE = -1.2f;
+constexpr int ZZ_BLATANT_AVOID_ONE_TILE_MAX_CANDIDATES = 96;
+constexpr int ZZ_BLATANT_AVOID_ONE_TILE_HOOK_INPUT_VARIANTS = 14;
+constexpr float ZZ_BLATANT_AVOID_ONE_TILE_RELEASE_SCORE = -2.2f;
+constexpr float ZZ_BLATANT_AVOID_FALL_RESCUE_SPEED = 7.0f;
+constexpr float ZZ_BLATANT_AVOID_FALL_TRAVEL_SCORE = 0.16f;
+constexpr float ZZ_BLATANT_AVOID_REHOOK_LOWER_BLOCK_SCORE = 0.18f;
+constexpr float ZZ_BLATANT_AVOID_HOOK_STABILITY_SCORE = 10.0f;
+constexpr float ZZ_BLATANT_AVOID_NEW_HOOK_SAFE_PENALTY = 6.0f;
+constexpr float ZZ_BLATANT_AVOID_HOOK_REPLACE_MARGIN = 14.0f;
+constexpr float ZZ_BLATANT_AVOID_KEEP_HOOK_MARGIN = 6.0f;
+constexpr float ZZ_BLATANT_AVOID_KEEP_HOOK_SAFE_BONUS = 2.6f;
+constexpr float ZZ_BLATANT_AVOID_HOOK_CURSOR_VERTICAL_SCORE = 0.12f;
+constexpr float ZZ_BLATANT_AVOID_HOOK_CURSOR_LOCK_PENALTY = 18.0f;
+constexpr float ZZ_BLATANT_AVOID_HOOK_REVERSE_PENALTY = 24.0f;
+constexpr int ZZ_BLATANT_AVOID_HOOK_COMMIT_TICKS = 6;
+constexpr float ZZ_BLATANT_AVOID_SAFE_CURSOR_BACKTRACK_DIST = 6.0f;
+constexpr float ZZ_BLATANT_AVOID_SAFE_CURSOR_ESCAPE_DIST = 18.0f;
+constexpr float ZZ_BLATANT_AVOID_SAFE_CURSOR_HOOK_MIN_DOT = 0.12f;
+constexpr float ZZ_BLATANT_AVOID_ONE_TILE_CURSOR_PROGRESS_SCORE = 0.46f;
+constexpr float ZZ_BLATANT_AVOID_ONE_TILE_BACKTRACK_SCORE = 1.15f;
+constexpr float ZZ_BLATANT_AVOID_ONE_TILE_SAFE_CURSOR_BACKTRACK_DIST = 8.0f;
+constexpr float ZZ_BLATANT_AVOID_ONE_TILE_SAFE_CURSOR_ESCAPE_DIST = 12.0f;
+constexpr float ZZ_BLATANT_AVOID_ONE_TILE_HOOK_CURSOR_MIN_DOT = -0.08f;
+constexpr float ZZ_BLATANT_AVOID_ONE_TILE_OPPOSITE_HOOK_ESCAPE_DOT = 0.55f;
+constexpr float ZZ_BLATANT_AVOID_ONE_TILE_OPPOSITE_CURSOR_PROGRESS = -3.0f;
+constexpr float ZZ_BLATANT_AVOID_ONE_TILE_REHOOK_ESCAPE_DOT = 0.82f;
+constexpr float ZZ_BLATANT_AVOID_ONE_TILE_REHOOK_ESCAPE_PROGRESS = 14.0f;
+constexpr float ZZ_BLATANT_AVOID_ONE_TILE_REHOOK_REVERSE_MARGIN = 0.18f;
+constexpr float ZZ_BLATANT_AVOID_ONE_TILE_VERTICAL_HOOK_MARGIN = 8.0f;
+constexpr int ZZ_BLATANT_AVOID_LAST_JUMP_CHECK_TICKS = 22;
+constexpr int ZZ_BLATANT_AVOID_JUMP_CHECK_TICKS = 5;
+constexpr int ZZ_BLATANT_AVOID_PHASE_TICKS = 4;
+constexpr float ZZ_BLATANT_AVOID_FOLLOWUP_SCORE_FACTOR = 0.55f;
+constexpr int ZZ_BLATANT_AVOID_PHASE_BUDGET_SAFE = 2;
+constexpr int ZZ_BLATANT_AVOID_PHASE_BUDGET_TAKEOVER = 6;
+constexpr int ZZ_BLATANT_AVOID_PHASE_DANGER_TICKS = 6;
+
+struct SZzAvoidHookCandidate
+{
+	vec2 m_HookPos;
+	float m_Score;
+
+	bool operator<(const SZzAvoidHookCandidate &Other) const
+	{
+		return m_Score < Other.m_Score;
+	}
+};
+
+struct SZzAvoidInputCandidate
+{
+	CNetObj_PlayerInput m_Input;
+	float m_Score;
+
+	bool operator<(const SZzAvoidInputCandidate &Other) const
+	{
+		return m_Score < Other.m_Score;
+	}
+};
+
+struct SZzAvoidFallback
+{
+	bool m_Valid = false;
+	CNetObj_PlayerInput m_Input{};
+	float m_Score = 0.0f;
+	int m_DangerTick = -1;
+	float m_DangerDist = 0.0f;
+};
+
+bool ZzAvoidIsFrozenState(const CCharacter *pCharacter)
+{
+	return !pCharacter || pCharacter->m_FreezeTime > 0 || pCharacter->Core()->m_FreezeEnd != 0 || pCharacter->Core()->m_IsInFreeze || pCharacter->Core()->m_DeepFrozen;
+}
+
+bool ZzAvoidIsDangerTile(int Tile)
+{
+	return Tile == TILE_FREEZE || Tile == TILE_DFREEZE || Tile == TILE_LFREEZE || Tile == TILE_DEATH;
+}
+
+vec2 ZzAvoidNormalizedOrZero(vec2 Dir)
+{
+	const float Len = length(Dir);
+	if(Len < 0.001f)
+		return vec2(0.0f, 0.0f);
+	return Dir / Len;
+}
+
+float ZzAvoidCursorWeight(vec2 CursorDir, vec2 DangerDir)
+{
+	if(length(CursorDir) < 0.001f)
+		return 0.0f;
+
+	const float CursorDangerDot = dot(CursorDir, DangerDir);
+	if(CursorDangerDot <= ZZ_BLATANT_AVOID_CURSOR_DANGER_SOFT_DOT)
+		return 1.0f;
+	if(CursorDangerDot >= ZZ_BLATANT_AVOID_CURSOR_DANGER_HARD_DOT)
+		return 0.18f;
+
+	const float T = (CursorDangerDot - ZZ_BLATANT_AVOID_CURSOR_DANGER_SOFT_DOT) / (ZZ_BLATANT_AVOID_CURSOR_DANGER_HARD_DOT - ZZ_BLATANT_AVOID_CURSOR_DANGER_SOFT_DOT);
+	return mix(1.0f, 0.18f, T);
+}
+
+vec2 ZzAvoidPreferredCursorDir(vec2 CursorDir, vec2 DangerDir)
+{
+	if(length(CursorDir) < 0.001f)
+		return vec2(0.0f, 0.0f);
+
+	const float CursorDangerDot = maximum(0.0f, dot(CursorDir, DangerDir));
+	if(CursorDangerDot <= ZZ_BLATANT_AVOID_CURSOR_DANGER_SOFT_DOT)
+		return CursorDir;
+
+	const vec2 SideDir = CursorDir - DangerDir * CursorDangerDot;
+	return ZzAvoidNormalizedOrZero(SideDir);
+}
+
+bool ZzAvoidIsDangerIndex(const CCollision *pCollision, int Index)
+{
+	if(!pCollision || Index < 0)
+		return false;
+
+	if(ZzAvoidIsDangerTile(pCollision->GetTileIndex(Index)) ||
+		ZzAvoidIsDangerTile(pCollision->GetFrontTileIndex(Index)) ||
+		ZzAvoidIsDangerTile(pCollision->GetSwitchType(Index)))
+	{
+		return true;
+	}
+
+	return pCollision->IsTeleport(Index) != 0 ||
+		pCollision->IsEvilTeleport(Index) != 0 ||
+		pCollision->IsCheckTeleport(Index) ||
+		pCollision->IsCheckEvilTeleport(Index);
+}
+
+bool ZzAvoidProbeDanger(const CCollision *pCollision, vec2 Pos, vec2 Offset)
+{
+	if(!pCollision)
+		return false;
+
+	for(const int Index : pCollision->GetMapIndices(Pos, Pos + Offset))
+	{
+		if(ZzAvoidIsDangerIndex(pCollision, Index))
+			return true;
+	}
+
+	return false;
+}
+
+bool ZzAvoidFindDangerOnPath(const CCollision *pCollision, vec2 PrevPos, vec2 CurrentPos, vec2 *pDangerPos = nullptr)
+{
+	if(!pCollision)
+		return false;
+
+	for(const int Index : pCollision->GetMapIndices(PrevPos, CurrentPos))
+	{
+		if(ZzAvoidIsDangerIndex(pCollision, Index))
+		{
+			if(pDangerPos)
+				*pDangerPos = pCollision->GetPos(Index);
+			return true;
+		}
+	}
+
+	return false;
+}
+
+float ZzAvoidInputScore(int Direction, bool Jump, vec2 DangerDir, vec2 CursorDir, float CursorWeight, int BaseDirection, bool BaseJump)
+{
+	vec2 MoveDir((float)Direction, Jump ? -1.0f : 0.0f);
+	const float MoveLen = length(MoveDir);
+	float Score = Jump ? ZZ_BLATANT_AVOID_AUTO_JUMP_SCORE : 0.0f;
+
+	if(MoveLen < 0.001f)
+	{
+		Score += 0.25f;
+	}
+	else
+	{
+		const vec2 MoveDirNormalized = MoveDir / MoveLen;
+		Score += 1.0f - dot(MoveDirNormalized, -DangerDir);
+		if(length(CursorDir) > 0.001f)
+			Score -= dot(MoveDirNormalized, CursorDir) * ZZ_BLATANT_AVOID_CURSOR_INPUT_SCORE;
+	}
+
+	if(Direction != BaseDirection)
+		Score += ZZ_BLATANT_AVOID_MANUAL_DIRECTION_SCORE;
+	if(Jump != BaseJump)
+		Score += ZZ_BLATANT_AVOID_MANUAL_JUMP_SCORE;
+
+	return Score;
+}
+
+float ZzAvoidHookScore(vec2 StartPos, vec2 HookPos, vec2 DangerDir, vec2 CursorDir, float CursorWeight)
+{
+	const float HookDist = distance(StartPos, HookPos);
+	const vec2 HookDir = normalize(HookPos - StartPos);
+
+	float Score = HookDist - dot(HookDir, -DangerDir) * ZZ_BLATANT_AVOID_DIRECTION_SCORE;
+	if(length(CursorDir) > 0.001f)
+	{
+		Score -= dot(HookDir, CursorDir) * ZZ_BLATANT_AVOID_CURSOR_HOOK_SCORE;
+		const vec2 ToHook = HookPos - StartPos;
+		const float CursorProjection = maximum(0.0f, dot(ToHook, CursorDir));
+		Score += distance(ToHook, CursorDir * CursorProjection) * ZZ_BLATANT_AVOID_CURSOR_RAY_SCORE;
+	}
+	if(dot(HookDir, DangerDir) > 0.97f)
+		Score += ZZ_BLATANT_AVOID_DIRECTION_SCORE;
+
+	return Score;
+}
+
+bool ZzAvoidIsFallbackImprovement(int BaseDangerTick, float BaseDangerDist, int CandidateDangerTick, float CandidateDangerDist)
+{
+	return CandidateDangerTick > BaseDangerTick ||
+		(CandidateDangerTick == BaseDangerTick && CandidateDangerDist > BaseDangerDist + ZZ_BLATANT_AVOID_FALLBACK_DIST_IMPROVEMENT);
+}
+
+bool ZzAvoidIsBetterFallback(int CandidateDangerTick, float CandidateDangerDist, float CandidateScore, const SZzAvoidFallback &BestFallback)
+{
+	if(!BestFallback.m_Valid)
+		return true;
+	if(CandidateDangerTick != BestFallback.m_DangerTick)
+		return CandidateDangerTick > BestFallback.m_DangerTick;
+	if(std::abs(CandidateDangerDist - BestFallback.m_DangerDist) > 0.001f)
+		return CandidateDangerDist > BestFallback.m_DangerDist;
+	return CandidateScore < BestFallback.m_Score;
+}
+
+bool SimulateZzBlatantAvoid(CGameWorld *pSourceWorld, int ClientId, const CNetObj_PlayerInput &BaseInput, int Ticks, const vec2 *pHookPos, int *pFirstDangerTick = nullptr, vec2 *pFirstDangerPos = nullptr, vec2 *pFinalPos = nullptr)
+{
+	CGameWorld FutureWorld;
+	FutureWorld.CopyWorld(pSourceWorld);
+	const CCollision *pCollision = FutureWorld.Collision();
+
+	for(int Tick = 0; Tick < Ticks; Tick++)
+	{
+		CCharacter *pCharacter = FutureWorld.GetCharacterById(ClientId);
+		if(ZzAvoidIsFrozenState(pCharacter))
+		{
+			if(pFirstDangerTick)
+				*pFirstDangerTick = Tick;
+			if(pFirstDangerPos)
+				*pFirstDangerPos = pCharacter ? pCharacter->GetPos() : vec2(0.0f, 0.0f);
+			if(pFinalPos)
+				*pFinalPos = pCharacter ? pCharacter->GetPos() : vec2(0.0f, 0.0f);
+			return true;
+		}
+
+		const vec2 PreviousPos = pCharacter->GetPos();
+		if(ZzAvoidFindDangerOnPath(pCollision, PreviousPos, PreviousPos, pFirstDangerPos))
+		{
+			if(pFirstDangerTick)
+				*pFirstDangerTick = Tick;
+			if(pFinalPos)
+				*pFinalPos = PreviousPos;
+			return true;
+		}
+
+		CNetObj_PlayerInput Input = BaseInput;
+		if(pHookPos)
+		{
+			const vec2 Aim = *pHookPos - pCharacter->GetPos();
+			Input.m_Hook = 1;
+			Input.m_TargetX = round_to_int(Aim.x);
+			Input.m_TargetY = round_to_int(Aim.y);
+			if(Input.m_TargetX == 0 && Input.m_TargetY == 0)
+				Input.m_TargetX = 1;
+		}
+
+		pCharacter->OnDirectInput(&Input);
+		FutureWorld.m_GameTick++;
+		pCharacter->OnPredictedInput(&Input);
+		FutureWorld.Tick();
+
+		pCharacter = FutureWorld.GetCharacterById(ClientId);
+		if(ZzAvoidIsFrozenState(pCharacter))
+		{
+			if(pFirstDangerTick)
+				*pFirstDangerTick = Tick;
+			if(pFirstDangerPos)
+				*pFirstDangerPos = pCharacter ? pCharacter->GetPos() : vec2(0.0f, 0.0f);
+			if(pFinalPos)
+				*pFinalPos = pCharacter ? pCharacter->GetPos() : PreviousPos;
+			return true;
+		}
+		if(!pCharacter)
+			break;
+		if(ZzAvoidFindDangerOnPath(pCollision, PreviousPos, pCharacter->GetPos(), pFirstDangerPos))
+		{
+			if(pFirstDangerTick)
+				*pFirstDangerTick = Tick;
+			if(pFinalPos)
+				*pFinalPos = pCharacter->GetPos();
+			return true;
+		}
+	}
+
+	if(pFinalPos)
+	{
+		CCharacter *pCharacter = FutureWorld.GetCharacterById(ClientId);
+		*pFinalPos = pCharacter ? pCharacter->GetPos() : vec2(0.0f, 0.0f);
+	}
+
+	return false;
+}
+
+bool BuildZzAvoidFutureWorld(CGameWorld *pSourceWorld, int ClientId, const CNetObj_PlayerInput &BaseInput, int Ticks, const vec2 *pHookPos, CGameWorld *pOutWorld, vec2 *pFinalPos = nullptr)
+{
+	if(!pSourceWorld || !pOutWorld || Ticks < 0)
+		return false;
+
+	CGameWorld FutureWorld;
+	FutureWorld.CopyWorld(pSourceWorld);
+	const CCollision *pCollision = FutureWorld.Collision();
+
+	for(int Tick = 0; Tick < Ticks; Tick++)
+	{
+		CCharacter *pCharacter = FutureWorld.GetCharacterById(ClientId);
+		if(ZzAvoidIsFrozenState(pCharacter))
+			return false;
+
+		const vec2 PreviousPos = pCharacter->GetPos();
+		if(ZzAvoidFindDangerOnPath(pCollision, PreviousPos, PreviousPos))
+			return false;
+
+		CNetObj_PlayerInput Input = BaseInput;
+		if(pHookPos)
+		{
+			const vec2 Aim = *pHookPos - pCharacter->GetPos();
+			Input.m_Hook = 1;
+			Input.m_TargetX = round_to_int(Aim.x);
+			Input.m_TargetY = round_to_int(Aim.y);
+			if(Input.m_TargetX == 0 && Input.m_TargetY == 0)
+				Input.m_TargetX = 1;
+		}
+
+		pCharacter->OnDirectInput(&Input);
+		FutureWorld.m_GameTick++;
+		pCharacter->OnPredictedInput(&Input);
+		FutureWorld.Tick();
+
+		pCharacter = FutureWorld.GetCharacterById(ClientId);
+		if(ZzAvoidIsFrozenState(pCharacter))
+			return false;
+		if(!pCharacter)
+			return false;
+		if(ZzAvoidFindDangerOnPath(pCollision, PreviousPos, pCharacter->GetPos()))
+			return false;
+	}
+
+	pOutWorld->CopyWorld(&FutureWorld);
+	if(pFinalPos)
+	{
+		CCharacter *pCharacter = FutureWorld.GetCharacterById(ClientId);
+		*pFinalPos = pCharacter ? pCharacter->GetPos() : vec2(0.0f, 0.0f);
+	}
+	return true;
+}
+
+bool TryApplyZzBlatantAvoid(CGameClient *pGameClient, const CNetObj_PlayerInput &BaseInput, CNetObj_PlayerInput &OutputInput)
+{
+	if(!g_Config.m_ClZzAvoidEnabled || g_Config.m_ClZzAvoidMode != 1 || pGameClient->m_Snap.m_LocalClientId < 0 || !pGameClient->Collision())
+		return false;
+
+	CGameWorld *pSourceWorld = pGameClient->Predict() ? &pGameClient->m_PredictedWorld : &pGameClient->m_GameWorld;
+	CCharacter *pCharacter = pSourceWorld->GetCharacterById(pGameClient->m_Snap.m_LocalClientId);
+	if(!pCharacter || ZzAvoidIsFrozenState(pCharacter))
+		return false;
+
+	const int LookAheadTicks = std::clamp(ZZ_BLATANT_AVOID_BASE_TICKS + round_to_int(length(pCharacter->Core()->m_Vel) / 4.0f), ZZ_BLATANT_AVOID_BASE_TICKS, ZZ_BLATANT_AVOID_MAX_TICKS);
+	const vec2 StartPos = pCharacter->GetPos();
+	const bool Grounded = pCharacter->IsGrounded();
+	const int AvailableJumps = pCharacter->Core()->m_Jumps;
+	const int JumpedFlags = pCharacter->Core()->m_Jumped;
+	const bool HasAirJumpAvailable = !Grounded && !(JumpedFlags & 2);
+	const bool LastJumpState = (Grounded && AvailableJumps == 1) || (HasAirJumpAvailable && AvailableJumps <= 2);
+	const float CeilingProbeDist = pCharacter->GetProximityRadius() + 24.0f;
+	const bool DangerAboveImmediate = ZzAvoidProbeDanger(pGameClient->Collision(), StartPos, vec2(0.0f, -CeilingProbeDist));
+
+	if(BaseInput.m_Jump != 0 && LastJumpState)
+	{
+		CNetObj_PlayerInput NoJumpInput = BaseInput;
+		NoJumpInput.m_Jump = 0;
+
+		int JumpDangerTick = -1;
+		int NoJumpDangerTick = -1;
+		vec2 JumpDangerPos(0.0f, 0.0f);
+		vec2 NoJumpDangerPos(0.0f, 0.0f);
+		const int LastJumpCheckTicks = minimum(ZZ_BLATANT_AVOID_LAST_JUMP_CHECK_TICKS, maximum(LookAheadTicks, ZZ_BLATANT_AVOID_JUMP_CHECK_TICKS + 4));
+		const bool JumpDanger = SimulateZzBlatantAvoid(pSourceWorld, pGameClient->m_Snap.m_LocalClientId, BaseInput, LastJumpCheckTicks, nullptr, &JumpDangerTick, &JumpDangerPos);
+		const bool NoJumpDanger = SimulateZzBlatantAvoid(pSourceWorld, pGameClient->m_Snap.m_LocalClientId, NoJumpInput, LastJumpCheckTicks, nullptr, &NoJumpDangerTick, &NoJumpDangerPos);
+		const float JumpDangerDist = distance(StartPos, JumpDangerPos);
+		const float NoJumpDangerDist = distance(StartPos, NoJumpDangerPos);
+
+		if(JumpDanger && (!NoJumpDanger || ZzAvoidIsFallbackImprovement(JumpDangerTick, JumpDangerDist, NoJumpDangerTick, NoJumpDangerDist)))
+		{
+			OutputInput = NoJumpInput;
+			return true;
+		}
+	}
+
+	if(BaseInput.m_Jump != 0 && DangerAboveImmediate)
+	{
+		CNetObj_PlayerInput NoJumpInput = BaseInput;
+		NoJumpInput.m_Jump = 0;
+
+		int JumpDangerTick = -1;
+		int NoJumpDangerTick = -1;
+		vec2 JumpDangerPos(0.0f, 0.0f);
+		vec2 NoJumpDangerPos(0.0f, 0.0f);
+		const int CeilingJumpCheckTicks = minimum(ZZ_BLATANT_AVOID_LAST_JUMP_CHECK_TICKS, maximum(LookAheadTicks, ZZ_BLATANT_AVOID_JUMP_CHECK_TICKS + 6));
+		const bool JumpDanger = SimulateZzBlatantAvoid(pSourceWorld, pGameClient->m_Snap.m_LocalClientId, BaseInput, CeilingJumpCheckTicks, nullptr, &JumpDangerTick, &JumpDangerPos);
+		const bool NoJumpDanger = SimulateZzBlatantAvoid(pSourceWorld, pGameClient->m_Snap.m_LocalClientId, NoJumpInput, CeilingJumpCheckTicks, nullptr, &NoJumpDangerTick, &NoJumpDangerPos);
+		const float JumpDangerDist = distance(StartPos, JumpDangerPos);
+		const float NoJumpDangerDist = distance(StartPos, NoJumpDangerPos);
+
+		if(JumpDanger && (!NoJumpDanger || ZzAvoidIsFallbackImprovement(JumpDangerTick, JumpDangerDist, NoJumpDangerTick, NoJumpDangerDist)))
+		{
+			OutputInput = NoJumpInput;
+			return true;
+		}
+	}
+
+	int DangerTick = -1;
+	vec2 FirstDangerPos(0.0f, 0.0f);
+	if(!SimulateZzBlatantAvoid(pSourceWorld, pGameClient->m_Snap.m_LocalClientId, BaseInput, LookAheadTicks, nullptr, &DangerTick, &FirstDangerPos))
+		return false;
+
+	vec2 DangerDir = pCharacter->Core()->m_Vel;
+	if(length(DangerDir) < 0.001f)
+		DangerDir = FirstDangerPos - pCharacter->GetPos();
+	const float DangerLen = length(DangerDir);
+	if(DangerLen < 0.001f)
+		return false;
+	DangerDir /= DangerLen;
+	const vec2 CursorDir = ZzAvoidNormalizedOrZero(vec2((float)BaseInput.m_TargetX, (float)BaseInput.m_TargetY));
+	const float BaseDangerDist = distance(StartPos, FirstDangerPos);
+	const bool OneTileMode = DangerTick <= ZZ_BLATANT_AVOID_ONE_TILE_TICKS || BaseDangerDist <= ZZ_BLATANT_AVOID_ONE_TILE_DIST;
+	const bool HasCurrentHook = BaseInput.m_Hook != 0 && (pCharacter->Core()->m_HookState == HOOK_FLYING || pCharacter->Core()->m_HookState == HOOK_GRABBED) &&
+		distance(StartPos, pCharacter->Core()->m_HookPos) > 1.0f;
+	const vec2 CurrentHookDir = HasCurrentHook ? normalize(pCharacter->Core()->m_HookPos - StartPos) : vec2(0.0f, 0.0f);
+	const bool CurrentHookIntoDanger = HasCurrentHook && dot(CurrentHookDir, DangerDir) > 0.2f;
+	const float TriggerDist = minimum(ZZ_BLATANT_AVOID_TRIGGER_MAX_DIST, maximum(ZZ_BLATANT_AVOID_TRIGGER_DIST, length(pCharacter->Core()->m_Vel) * 1.75f));
+	if(DangerTick > ZZ_BLATANT_AVOID_TRIGGER_TICKS && distance(StartPos, FirstDangerPos) > TriggerDist)
+		return false;
+
+	const int SimTicks = std::clamp(DangerTick + ZZ_BLATANT_AVOID_VALIDATE_EXTRA_TICKS, ZZ_BLATANT_AVOID_MIN_TICKS, ZZ_BLATANT_AVOID_MAX_TICKS);
+	CNetObj_PlayerInput WorkingInput = BaseInput;
+	bool HasSafeCandidate = false;
+	CNetObj_PlayerInput BestSafeInput = BaseInput;
+	float BestSafeScore = 0.0f;
+	bool BestSafeUsesNewHook = false;
+	bool BestSafeKeepsCurrentHook = false;
+	SZzAvoidFallback BestFallback;
+
+	auto TryStoreSafeCandidate = [&](const CNetObj_PlayerInput &FinalInput, float CandidateScore, bool UsesNewHook, bool KeepsCurrentHook) {
+		if(!HasSafeCandidate)
+		{
+			HasSafeCandidate = true;
+			BestSafeInput = FinalInput;
+			BestSafeScore = CandidateScore;
+			BestSafeUsesNewHook = UsesNewHook;
+			BestSafeKeepsCurrentHook = KeepsCurrentHook;
+			return true;
+		}
+
+		if(OneTileMode && !CurrentHookIntoDanger)
+		{
+			if(!UsesNewHook && BestSafeUsesNewHook && CandidateScore <= BestSafeScore + 6.0f)
+			{
+				BestSafeInput = FinalInput;
+				BestSafeScore = CandidateScore;
+				BestSafeUsesNewHook = false;
+				BestSafeKeepsCurrentHook = KeepsCurrentHook;
+				return true;
+			}
+			if(KeepsCurrentHook && !BestSafeKeepsCurrentHook && CandidateScore <= BestSafeScore + 4.0f)
+			{
+				BestSafeInput = FinalInput;
+				BestSafeScore = CandidateScore;
+				BestSafeUsesNewHook = UsesNewHook;
+				BestSafeKeepsCurrentHook = true;
+				return true;
+			}
+			if(!KeepsCurrentHook && BestSafeKeepsCurrentHook && CandidateScore >= BestSafeScore - 4.0f)
+				return false;
+		}
+
+		if(CandidateScore < BestSafeScore)
+		{
+			BestSafeInput = FinalInput;
+			BestSafeScore = CandidateScore;
+			BestSafeUsesNewHook = UsesNewHook;
+			BestSafeKeepsCurrentHook = KeepsCurrentHook;
+			return true;
+		}
+		return false;
+	};
+
+	auto RegisterCandidate = [&](const CNetObj_PlayerInput &CandidateInput, float CandidateScore, const vec2 *pHookPos = nullptr) {
+		int CandidateDangerTick = -1;
+		vec2 CandidateDangerPos(0.0f, 0.0f);
+		vec2 CandidateFinalPos = StartPos;
+		const bool HasDanger = SimulateZzBlatantAvoid(pSourceWorld, pGameClient->m_Snap.m_LocalClientId, CandidateInput, SimTicks, pHookPos, &CandidateDangerTick, &CandidateDangerPos, &CandidateFinalPos);
+
+		CNetObj_PlayerInput FinalInput = CandidateInput;
+		if(pHookPos)
+		{
+			FinalInput.m_Hook = 1;
+			const vec2 Aim = *pHookPos - StartPos;
+			FinalInput.m_TargetX = round_to_int(Aim.x);
+			FinalInput.m_TargetY = round_to_int(Aim.y);
+			if(FinalInput.m_TargetX == 0 && FinalInput.m_TargetY == 0)
+				FinalInput.m_TargetX = 1;
+		}
+		const bool UsesNewHook = pHookPos != nullptr;
+		const bool KeepsCurrentHook = !UsesNewHook && HasCurrentHook && CandidateInput.m_Hook != 0;
+		float AdjustedScore = CandidateScore;
+		if(OneTileMode)
+		{
+			const vec2 Travel = CandidateFinalPos - StartPos;
+			const float EscapeProgress = dot(Travel, -DangerDir);
+			AdjustedScore -= EscapeProgress * (ZZ_BLATANT_AVOID_ESCAPE_PROGRESS_SCORE * 1.7f);
+
+			if(length(CursorDir) > 0.001f)
+			{
+				const float CursorProgress = dot(Travel, CursorDir);
+				AdjustedScore -= CursorProgress * (ZZ_BLATANT_AVOID_ONE_TILE_CURSOR_PROGRESS_SCORE * 0.85f);
+				if(CursorProgress < 0.0f && EscapeProgress < 20.0f)
+					AdjustedScore += -CursorProgress * ZZ_BLATANT_AVOID_ONE_TILE_BACKTRACK_SCORE;
+			}
+
+			if(UsesNewHook && !CurrentHookIntoDanger)
+				AdjustedScore += ZZ_BLATANT_AVOID_NEW_HOOK_SAFE_PENALTY * 0.35f;
+			if(KeepsCurrentHook && !CurrentHookIntoDanger)
+				AdjustedScore -= ZZ_BLATANT_AVOID_KEEP_HOOK_SAFE_BONUS * 0.55f;
+		}
+
+		if(!HasDanger)
+		{
+			TryStoreSafeCandidate(FinalInput, AdjustedScore, UsesNewHook, KeepsCurrentHook);
+			return;
+		}
+
+		const float CandidateDangerDist = distance(StartPos, CandidateDangerPos);
+		if(!ZzAvoidIsFallbackImprovement(DangerTick, BaseDangerDist, CandidateDangerTick, CandidateDangerDist))
+			return;
+
+		if(ZzAvoidIsBetterFallback(CandidateDangerTick, CandidateDangerDist, AdjustedScore, BestFallback))
+		{
+			BestFallback.m_Valid = true;
+			BestFallback.m_Input = FinalInput;
+			BestFallback.m_Score = AdjustedScore;
+			BestFallback.m_DangerTick = CandidateDangerTick;
+			BestFallback.m_DangerDist = CandidateDangerDist;
+		}
+	};
+
+	if(BaseInput.m_Hook != 0)
+	{
+		RegisterCandidate(BaseInput, CurrentHookIntoDanger ? 0.0f : -0.35f);
+		CNetObj_PlayerInput ReleaseInput = BaseInput;
+		ReleaseInput.m_Hook = 0;
+		RegisterCandidate(ReleaseInput, OneTileMode ? -0.35f : -0.25f);
+		if(CurrentHookIntoDanger)
+			WorkingInput = ReleaseInput;
+	}
+
+	std::vector<SZzAvoidInputCandidate> vInputCandidates;
+	vInputCandidates.reserve(6);
+
+	auto AddInputCandidate = [&](int Direction, int Jump)
+	{
+		CNetObj_PlayerInput Candidate = WorkingInput;
+		Candidate.m_Direction = Direction;
+		Candidate.m_Jump = Jump;
+
+		if(Jump != 0)
+		{
+			CNetObj_PlayerInput NonJumpCandidate = Candidate;
+			NonJumpCandidate.m_Jump = 0;
+			int JumpDangerTick = -1;
+			int NonJumpDangerTick = -1;
+			vec2 DummyPos(0.0f, 0.0f);
+			const int JumpCheckTicks = LastJumpState ? SimTicks : minimum(SimTicks, maximum(ZZ_BLATANT_AVOID_JUMP_CHECK_TICKS, DangerTick + 2));
+			const bool JumpDanger = SimulateZzBlatantAvoid(pSourceWorld, pGameClient->m_Snap.m_LocalClientId, Candidate, JumpCheckTicks, nullptr, &JumpDangerTick, &DummyPos);
+			const bool NonJumpDanger = SimulateZzBlatantAvoid(pSourceWorld, pGameClient->m_Snap.m_LocalClientId, NonJumpCandidate, JumpCheckTicks, nullptr, &NonJumpDangerTick, &DummyPos);
+			if(JumpDanger && (LastJumpState || !NonJumpDanger || JumpDangerTick <= NonJumpDangerTick + 1))
+				return;
+		}
+
+		if(Candidate.m_Direction == WorkingInput.m_Direction && Candidate.m_Jump == WorkingInput.m_Jump)
+			return;
+
+		for(const SZzAvoidInputCandidate &Existing : vInputCandidates)
+		{
+			if(Existing.m_Input.m_Direction == Candidate.m_Direction && Existing.m_Input.m_Jump == Candidate.m_Jump)
+				return;
+		}
+
+		vInputCandidates.push_back({Candidate, ZzAvoidInputScore(Direction, Jump != 0, DangerDir, CursorDir, 1.0f, BaseInput.m_Direction, BaseInput.m_Jump != 0)});
+	};
+
+	AddInputCandidate(0, 0);
+	AddInputCandidate(-1, 0);
+	AddInputCandidate(1, 0);
+	const bool ShouldTryJump = BaseInput.m_Jump != 0 || pCharacter->Core()->m_Vel.y > 4.0f || DangerDir.y > 0.25f;
+	if(ShouldTryJump)
+	{
+		AddInputCandidate(0, 1);
+		AddInputCandidate(-1, 1);
+		AddInputCandidate(1, 1);
+	}
+
+	std::sort(vInputCandidates.begin(), vInputCandidates.end());
+
+	for(const SZzAvoidInputCandidate &Candidate : vInputCandidates)
+		RegisterCandidate(Candidate.m_Input, Candidate.m_Score);
+
+	if(HasSafeCandidate && OneTileMode && (!BestSafeUsesNewHook || BestSafeKeepsCurrentHook))
+	{
+		OutputInput = BestSafeInput;
+		return true;
+	}
+
+	const float HookLength = pCharacter->GetTuning(pCharacter->GetOverriddenTuneZone())->m_HookLength;
+	const int TileRadius = round_to_int(std::ceil((HookLength + 32.0f) / 32.0f));
+	const int CenterX = round_to_int(StartPos.x) / 32;
+	const int CenterY = round_to_int(StartPos.y) / 32;
+	const int Width = pGameClient->Collision()->GetWidth();
+	const int Height = pGameClient->Collision()->GetHeight();
+
+	std::vector<SZzAvoidHookCandidate> vHookCandidates;
+	vHookCandidates.reserve((TileRadius * 2 + 1) * (TileRadius * 2 + 1));
+
+	for(int y = maximum(0, CenterY - TileRadius); y <= minimum(Height - 1, CenterY + TileRadius); y++)
+	{
+		for(int x = maximum(0, CenterX - TileRadius); x <= minimum(Width - 1, CenterX + TileRadius); x++)
+		{
+			const vec2 TilePos(x * 32.0f + 16.0f, y * 32.0f + 16.0f);
+			if(distance(StartPos, TilePos) > HookLength + 32.0f)
+				continue;
+
+			vec2 HookPos;
+			vec2 BeforeCollision;
+			const int Hit = pGameClient->Collision()->IntersectLineTeleHook(StartPos, TilePos, &HookPos, &BeforeCollision);
+			if(Hit == 0 || Hit == TILE_NOHOOK)
+				continue;
+
+			const float HookDist = distance(StartPos, HookPos);
+			const float MinHookDist = OneTileMode ? ZZ_BLATANT_AVOID_ONE_TILE_MIN_HOOK_DIST : ZZ_BLATANT_AVOID_MIN_HOOK_DIST;
+			if(HookDist < MinHookDist || HookDist > HookLength + 4.0f)
+				continue;
+
+			const vec2 ToHookDir = normalize(HookPos - StartPos);
+			if(OneTileMode && length(CursorDir) > 0.001f)
+			{
+				const float HookCursorDot = dot(ToHookDir, CursorDir);
+				const float HookEscapeDot = dot(ToHookDir, -DangerDir);
+				if(HookCursorDot < -0.22f && HookEscapeDot < 0.45f)
+					continue;
+				if(CursorDir.y < -0.15f && HookPos.y > StartPos.y + 10.0f && HookEscapeDot < 0.58f)
+					continue;
+				if(CursorDir.y > 0.15f && HookPos.y < StartPos.y - 10.0f && HookEscapeDot < 0.58f)
+					continue;
+			}
+
+			vHookCandidates.push_back({HookPos, ZzAvoidHookScore(StartPos, HookPos, DangerDir, CursorDir, 1.0f)});
+		}
+	}
+
+	const bool AllowHookSearch = !Grounded || OneTileMode || CurrentHookIntoDanger || BaseInput.m_Hook != 0;
+	if(AllowHookSearch && !vHookCandidates.empty())
+	{
+		std::sort(vHookCandidates.begin(), vHookCandidates.end());
+
+		std::vector<vec2> vAcceptedHookPositions;
+		const int MaxHookCandidates = OneTileMode ? 48 : ZZ_BLATANT_AVOID_MAX_CANDIDATES;
+		vAcceptedHookPositions.reserve(MaxHookCandidates);
+
+		for(const SZzAvoidHookCandidate &Candidate : vHookCandidates)
+		{
+			bool Duplicate = false;
+			for(const vec2 &Existing : vAcceptedHookPositions)
+			{
+				if(distance(Existing, Candidate.m_HookPos) < ZZ_BLATANT_AVOID_DUPLICATE_DIST)
+				{
+					Duplicate = true;
+					break;
+				}
+			}
+			if(Duplicate)
+				continue;
+
+			vAcceptedHookPositions.push_back(Candidate.m_HookPos);
+			if((int)vAcceptedHookPositions.size() >= MaxHookCandidates)
+				break;
+
+			RegisterCandidate(WorkingInput, Candidate.m_Score, &Candidate.m_HookPos);
+			if(OneTileMode)
+			{
+				int HookVariants = 0;
+				for(const SZzAvoidInputCandidate &InputCandidate : vInputCandidates)
+				{
+					CNetObj_PlayerInput HookMoveInput = InputCandidate.m_Input;
+					HookMoveInput.m_Hook = 0;
+					RegisterCandidate(HookMoveInput, Candidate.m_Score + InputCandidate.m_Score * 0.7f, &Candidate.m_HookPos);
+					HookVariants++;
+					if(HookVariants >= 4)
+						break;
+				}
+			}
+		}
+	}
+
+	if(HasSafeCandidate)
+	{
+		OutputInput = BestSafeInput;
+		return true;
+	}
+
+	if(BestFallback.m_Valid)
+	{
+		OutputInput = BestFallback.m_Input;
+		return true;
+	}
+
 	return false;
 }
 }
@@ -623,6 +1402,7 @@ int CControls::SnapInput(int *pData)
 			InputData.m_PlayerFlags |= PLAYERFLAG_SCOREBOARD;
 
 	bool Send = m_aLastData[g_Config.m_ClDummy].m_PlayerFlags != m_aInputData[g_Config.m_ClDummy].m_PlayerFlags;
+	CNetObj_PlayerInput InputToSend = m_aInputData[g_Config.m_ClDummy];
 
 	m_aLastData[g_Config.m_ClDummy].m_PlayerFlags = m_aInputData[g_Config.m_ClDummy].m_PlayerFlags;
 
@@ -637,17 +1417,12 @@ int CControls::SnapInput(int *pData)
 		// set the target anyway though so that we can keep seeing our surroundings,
 		// even if chat or menu are activated
 		vec2 Pos = GameClient()->m_Controls.m_aMousePos[g_Config.m_ClDummy];
-		if(g_Config.m_TcScaleMouseDistance && !GameClient()->m_Snap.m_SpecInfo.m_Active)
-		{
-			const int MaxDistance = g_Config.m_ClDyncam ? g_Config.m_ClDyncamMaxDistance : g_Config.m_ClMouseMaxDistance;
-			if(MaxDistance > 5 && MaxDistance < 1000) // Don't scale if angle bind or reduces precision
-				Pos *= 1000.0f / (float)MaxDistance;
-		}
 		m_aInputData[g_Config.m_ClDummy].m_TargetX = (int)Pos.x;
 		m_aInputData[g_Config.m_ClDummy].m_TargetY = (int)Pos.y;
 
 		if(!m_aInputData[g_Config.m_ClDummy].m_TargetX && !m_aInputData[g_Config.m_ClDummy].m_TargetY)
 			m_aInputData[g_Config.m_ClDummy].m_TargetX = 1;
+		InputToSend = m_aInputData[g_Config.m_ClDummy];
 
 		// send once a second just to be sure
 		Send = Send || time_get() > m_LastSendTime + time_freq();
@@ -667,12 +1442,6 @@ int CControls::SnapInput(int *pData)
 		m_FastInputHookAction = false;
 		m_FastInputFireAction = false;
 
-		if(g_Config.m_TcScaleMouseDistance && !GameClient()->m_Snap.m_SpecInfo.m_Active)
-		{
-			const int MaxDistance = g_Config.m_ClDyncam ? g_Config.m_ClDyncamMaxDistance : g_Config.m_ClMouseMaxDistance;
-			if(MaxDistance > 5 && MaxDistance < 1000) // Don't scale if angle bind or reduces precision
-				Pos *= 1000.0f / (float)MaxDistance;
-		}
 		m_aInputData[g_Config.m_ClDummy].m_TargetX = (int)Pos.x;
 		m_aInputData[g_Config.m_ClDummy].m_TargetY = (int)Pos.y;
 
@@ -715,11 +1484,8 @@ int CControls::SnapInput(int *pData)
 				const int Tick = s_aFakeLagTick[DummyIndex]++;
 				if(BaseDir != 0)
 				{
-					// Preserve movement most of the time and inject occasional opposite ticks.
-					// In air we inject less often to avoid breaking control.
-					const int Phase = OnGround ? (Tick % 4) : (Tick % 6);
-					const bool InjectOpposite = OnGround ? (Phase == 1) : (Phase == 2);
-					m_aInputData[DummyIndex].m_Direction = InjectOpposite ? -BaseDir : BaseDir;
+					// Very aggressive fake-lag: alternate every tick for the fastest A/D spam.
+					m_aInputData[DummyIndex].m_Direction = (Tick & 1) ? -BaseDir : BaseDir;
 				}
 				else
 				{
@@ -729,17 +1495,8 @@ int CControls::SnapInput(int *pData)
 					}
 					else
 					{
-						// Standing still: short left burst, pause, short right burst, pause.
-						// Keeps fake-lag wobble while staying close to the same coordinates.
-						const int StandPhase = Tick % 8;
-						if(StandPhase < 2)
-							m_aInputData[DummyIndex].m_Direction = -1;
-						else if(StandPhase < 4)
-							m_aInputData[DummyIndex].m_Direction = 0;
-						else if(StandPhase < 6)
-							m_aInputData[DummyIndex].m_Direction = 1;
-						else
-							m_aInputData[DummyIndex].m_Direction = 0;
+						// Standing fake-lag: also alternate immediately without pauses.
+						m_aInputData[DummyIndex].m_Direction = (Tick & 1) ? 1 : -1;
 					}
 				}
 			}
@@ -917,30 +1674,45 @@ int CControls::SnapInput(int *pData)
 			m_aInputData[g_Config.m_ClDummy].m_TargetY = (int)(std::cos(t * 3) * 100.0f);
 		}
 
+		InputToSend = m_aInputData[g_Config.m_ClDummy];
+		if(g_Config.m_ClZzAvoidEnabled && g_Config.m_ClZzAvoidMode == 1)
+		{
+			CNetObj_PlayerInput BotBaseInput = m_aInputData[g_Config.m_ClDummy];
+			InputToSend = BotBaseInput;
+			TryApplyZzBlatantAvoid(GameClient(), BotBaseInput, InputToSend);
+		}
+
 		// check if we need to send input
-		Send = Send || m_aInputData[g_Config.m_ClDummy].m_Direction != m_aLastData[g_Config.m_ClDummy].m_Direction;
-		Send = Send || m_aInputData[g_Config.m_ClDummy].m_Jump != m_aLastData[g_Config.m_ClDummy].m_Jump;
-		Send = Send || m_aInputData[g_Config.m_ClDummy].m_Fire != m_aLastData[g_Config.m_ClDummy].m_Fire;
-		Send = Send || m_aInputData[g_Config.m_ClDummy].m_Hook != m_aLastData[g_Config.m_ClDummy].m_Hook;
-		Send = Send || m_aInputData[g_Config.m_ClDummy].m_WantedWeapon != m_aLastData[g_Config.m_ClDummy].m_WantedWeapon;
-		Send = Send || m_aInputData[g_Config.m_ClDummy].m_NextWeapon != m_aLastData[g_Config.m_ClDummy].m_NextWeapon;
-		Send = Send || m_aInputData[g_Config.m_ClDummy].m_PrevWeapon != m_aLastData[g_Config.m_ClDummy].m_PrevWeapon;
+		Send = Send || InputToSend.m_Direction != m_aLastData[g_Config.m_ClDummy].m_Direction;
+		Send = Send || InputToSend.m_Jump != m_aLastData[g_Config.m_ClDummy].m_Jump;
+		Send = Send || InputToSend.m_Fire != m_aLastData[g_Config.m_ClDummy].m_Fire;
+		Send = Send || InputToSend.m_Hook != m_aLastData[g_Config.m_ClDummy].m_Hook;
+		Send = Send || InputToSend.m_WantedWeapon != m_aLastData[g_Config.m_ClDummy].m_WantedWeapon;
+		Send = Send || InputToSend.m_NextWeapon != m_aLastData[g_Config.m_ClDummy].m_NextWeapon;
+		Send = Send || InputToSend.m_PrevWeapon != m_aLastData[g_Config.m_ClDummy].m_PrevWeapon;
 		Send = Send || time_get() > m_LastSendTime + time_freq() / 25; // send at least 25 Hz
 
 		// ZZetClient: while hammer assist is actively trying to hit (hammer + fire held), send at tickrate.
 		if(g_Config.m_ClZzHammerAssistEnabled && GameClient()->m_Snap.m_pLocalCharacter &&
-			GameClient()->m_Snap.m_pLocalCharacter->m_Weapon == WEAPON_HAMMER && (m_aInputData[g_Config.m_ClDummy].m_Fire & 1))
+			GameClient()->m_Snap.m_pLocalCharacter->m_Weapon == WEAPON_HAMMER && (InputToSend.m_Fire & 1))
 		{
 			const int TickSpeed = maximum(1, Client()->GameTickSpeed());
 			Send = Send || time_get() > m_LastSendTime + time_freq() / TickSpeed;
 		}
-		Send = Send || (GameClient()->m_Snap.m_pLocalCharacter && GameClient()->m_Snap.m_pLocalCharacter->m_Weapon == WEAPON_NINJA && (m_aInputData[g_Config.m_ClDummy].m_Direction || m_aInputData[g_Config.m_ClDummy].m_Jump || m_aInputData[g_Config.m_ClDummy].m_Hook));
+		// Keep hook aimbot responsive on every game tick instead of only the default 25 Hz send cadence.
+		if(g_Config.m_ClZzAimbotEnabled && InputToSend.m_Hook && !m_ZzAutoUnfreezeOverridesInput)
+		{
+			const int TickSpeed = maximum(1, Client()->GameTickSpeed());
+			Send = Send || time_get() > m_LastSendTime + time_freq() / TickSpeed;
+		}
+		Send = Send || (GameClient()->m_Snap.m_pLocalCharacter && GameClient()->m_Snap.m_pLocalCharacter->m_Weapon == WEAPON_NINJA && (InputToSend.m_Direction || InputToSend.m_Jump || InputToSend.m_Hook));
+
 	}
 
 	const CNetObj_PlayerInput OldLastData = m_aLastData[g_Config.m_ClDummy];
 
 	// copy and return size
-	m_aLastData[g_Config.m_ClDummy] = m_aInputData[g_Config.m_ClDummy];
+	m_aLastData[g_Config.m_ClDummy] = InputToSend;
 
 	if(!Send)
 		return 0;
@@ -952,7 +1724,7 @@ int CControls::SnapInput(int *pData)
 		if(s_LastSendDbg == 0 || Now - s_LastSendDbg >= time_freq())
 		{
 			s_LastSendDbg = Now;
-			const CNetObj_PlayerInput &Cur = m_aInputData[g_Config.m_ClDummy];
+			const CNetObj_PlayerInput &Cur = InputToSend;
 			int Changed = 0;
 			if(Cur.m_Direction != OldLastData.m_Direction) Changed |= 1 << 0;
 			if(Cur.m_Jump != OldLastData.m_Jump) Changed |= 1 << 1;
@@ -979,7 +1751,7 @@ int CControls::SnapInput(int *pData)
 	}
 
 	m_LastSendTime = time_get();
-	mem_copy(pData, &m_aInputData[g_Config.m_ClDummy], sizeof(m_aInputData[0]));
+	mem_copy(pData, &InputToSend, sizeof(m_aInputData[0]));
 	return sizeof(m_aInputData[0]);
 }
 
@@ -1256,3 +2028,4 @@ bool CControls::CheckNewInput()
 	else
 		return false;
 }
+

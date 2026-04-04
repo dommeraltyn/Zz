@@ -20,6 +20,7 @@
 #include <game/client/components/menus_ingame_touch_controls.h>
 #include <game/client/components/menus_settings_controls.h>
 #include <game/client/components/menus_start.h>
+#include <game/client/components/rclient/menu/menus_start_rclient.h>
 #include <game/client/components/skins7.h>
 #include <game/client/components/tclient/warlist.h>
 #include <game/client/lineinput.h>
@@ -833,6 +834,7 @@ private:
 	CMenusSettingsControls m_MenusSettingsControls;
 	friend CMenusSettingsControls;
 	CMenusStart m_MenusStart;
+	CMenusStartRClient m_MenusStartRClient;
 
 	static int GhostlistFetchCallback(const CFsFileInfo *pInfo, int IsDir, int StorageType, void *pUser);
 

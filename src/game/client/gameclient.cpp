@@ -1260,6 +1260,7 @@ void CGameClient::OnConsoleInit()
 					      &m_Translate, // TClient
 					      &m_Ghost,
 					      &m_TClient, // TClient (Must be before chat and players)
+					      &m_ZzBestClientPresence, // ZZetClient
 					      &m_Players,
 						  &m_MovingTilesBackground, // TClient
 						  &m_MapLayersForeground,
@@ -4220,9 +4221,125 @@ int CGameClient::OnSnapInput(int *pData, bool Dummy, bool Force)
 			}
 
 			auto FindBestTargetDir = [&](float HalfFovRad, float MaxDist, bool IgnoreFriends) -> std::optional<vec2> {
-				float BestScore = 1e18f;
-				vec2 BestDir = CurAim;
-				bool Found = false;
+				struct SHookAimCandidate
+				{
+					int m_TargetId;
+					vec2 m_Dir;
+					float m_PrefScore;
+				};
+
+				constexpr int MaxPredictTicks = 22;
+				const float HookSpeedPerTick = maximum(1.0f, (float)m_aTuning[g_Config.m_ClDummy].m_HookFireSpeed);
+				const float TeeRadius = CCharacterCore::PhysicalSize() + 2.0f;
+				const int PredictTicks = std::clamp((int)ceilf(MaxDist / HookSpeedPerTick) + 6, 6, MaxPredictTicks);
+				std::vector<SHookAimCandidate> vCandidates;
+				vCandidates.reserve(64);
+
+				vec2 aaFuturePos[MaxPredictTicks + 1][MAX_CLIENTS];
+				bool aaFutureActive[MaxPredictTicks + 1][MAX_CLIENTS] = {{false}};
+				for(int i = 0; i < MAX_CLIENTS; i++)
+				{
+					if(!m_Snap.m_aCharacters[i].m_Active)
+						continue;
+					aaFutureActive[0][i] = true;
+					aaFuturePos[0][i] = m_aClients[i].m_RegularPredicted.m_Pos;
+				}
+
+				CGameWorld FutureWorld;
+				FutureWorld.CopyWorldClean(&m_RegularPredictedWorld);
+				FutureWorld.m_GameTick = Client()->GameTick(g_Config.m_ClDummy);
+				for(int Tick = 1; Tick <= PredictTicks; Tick++)
+				{
+					FutureWorld.Tick();
+					for(int i = 0; i < MAX_CLIENTS; i++)
+					{
+						if(CCharacter *pFutureChar = FutureWorld.GetCharacterById(i))
+						{
+							aaFutureActive[Tick][i] = true;
+							aaFuturePos[Tick][i] = pFutureChar->GetPos();
+						}
+					}
+				}
+
+				auto AddCandidate = [&](int TargetId, const vec2 &AimPoint, const vec2 &TargetCenter, float PrefScore) {
+					const float RawDist = distance(LocalPos, AimPoint);
+					if(RawDist < 0.001f || RawDist > MaxDist + TeeRadius * 1.25f)
+						return;
+
+					vec2 RawDir = normalize(AimPoint - LocalPos);
+					const float RawAngle = acosf(std::clamp(dot(CurAim, RawDir), -1.0f, 1.0f));
+					if(HalfFovRad > 0.0f && RawAngle > HalfFovRad + 0.18f)
+						return;
+
+					vec2 Forward = AimPoint - TargetCenter;
+					if(length(Forward) > 0.001f)
+						Forward = normalize(Forward);
+					else
+						Forward = normalize(CurAim);
+					const vec2 Side = vec2(-Forward.y, Forward.x);
+					const vec2 aVisibleProbePoints[] = {
+						AimPoint,
+						TargetCenter,
+						TargetCenter + Forward * (TeeRadius * 0.35f),
+						TargetCenter - Forward * (TeeRadius * 0.20f),
+						TargetCenter + Side * (TeeRadius * 0.58f),
+						TargetCenter - Side * (TeeRadius * 0.58f),
+						TargetCenter + Forward * (TeeRadius * 0.28f) + Side * (TeeRadius * 0.32f),
+						TargetCenter + Forward * (TeeRadius * 0.28f) - Side * (TeeRadius * 0.32f),
+					};
+
+					vec2 BestVisibleAimPoint = vec2(0.0f, 0.0f);
+					float BestVisiblePenalty = 1e18f;
+					bool Visible = false;
+					for(const vec2 &ProbePoint : aVisibleProbePoints)
+					{
+						vec2 HitPos;
+						if(Collision()->IntersectLine(LocalPos, ProbePoint, &HitPos, nullptr) != 0)
+							continue;
+
+						const float Penalty = distance(ProbePoint, AimPoint);
+						if(!Visible || Penalty < BestVisiblePenalty)
+						{
+							Visible = true;
+							BestVisiblePenalty = Penalty;
+							BestVisibleAimPoint = ProbePoint;
+							if(BestVisiblePenalty <= 0.001f)
+								break;
+						}
+					}
+
+					if(!Visible)
+						return;
+
+					PrefScore += BestVisiblePenalty * 2.2f;
+
+					vec2 Dir = BestVisibleAimPoint - LocalPos;
+					const float Dist = length(Dir);
+					if(Dist < 0.001f || Dist > MaxDist + TeeRadius)
+						return;
+					Dir *= 1.0f / Dist;
+
+					const float Angle = acosf(std::clamp(dot(CurAim, Dir), -1.0f, 1.0f));
+					if(HalfFovRad > 0.0f && Angle > HalfFovRad)
+						return;
+
+					for(auto &Candidate : vCandidates)
+					{
+						if(Candidate.m_TargetId != TargetId)
+							continue;
+						if(dot(Candidate.m_Dir, Dir) < 0.9992f)
+							continue;
+						if(PrefScore < Candidate.m_PrefScore)
+						{
+							Candidate.m_Dir = Dir;
+							Candidate.m_PrefScore = PrefScore;
+						}
+						return;
+					}
+
+					vCandidates.push_back({TargetId, Dir, PrefScore});
+				};
+
 				for(int i = 0; i < MAX_CLIENTS; i++)
 				{
 					if(i == LocalId)
@@ -4231,93 +4348,248 @@ int CGameClient::OnSnapInput(int *pData, bool Dummy, bool Force)
 						continue;
 					if(IgnoreFriends && m_aClients[i].m_Friend)
 						continue;
-
-					// Use regular predicted positions/velocities so we aim in the same time domain as LocalPos.
-					// This avoids snap/pred mismatch that can cause large aim offsets and FOV inconsistencies.
-					const vec2 TargetPos = m_aClients[i].m_RegularPredicted.m_Pos;
-					const vec2 TargetVel = m_aClients[i].m_RegularPredicted.m_Vel;
-					vec2 ToCenter = TargetPos - LocalPos;
-					float DistCenter = length(ToCenter);
-					if(DistCenter < 0.001f)
-						continue;
-					if(MaxDist > 0.0f && DistCenter > MaxDist)
+					if(!aaFutureActive[0][i])
 						continue;
 
-					// Simple lead: predict where the target will be when the hook reaches them.
-					// Hook fire speed is units per tick; convert to units per second using tick speed.
-					const float HookSpeed = (float)m_aTuning[g_Config.m_ClDummy].m_HookFireSpeed * Client()->GameTickSpeed();
-					const float LeadTime = HookSpeed > 0.001f ? (DistCenter / HookSpeed) : 0.0f;
-					const float LeadTimeClamped = std::clamp(LeadTime, 0.0f, 0.30f);
-					const vec2 PredTargetPos = TargetPos + TargetVel * LeadTimeClamped;
-					ToCenter = PredTargetPos - LocalPos;
-					DistCenter = length(ToCenter);
-					if(DistCenter < 0.001f)
+					const vec2 SnapTargetPos = vec2((float)m_Snap.m_aCharacters[i].m_Cur.m_X, (float)m_Snap.m_aCharacters[i].m_Cur.m_Y);
+					const vec2 TargetPos = aaFuturePos[0][i];
+					const float DistCenter = distance(LocalPos, TargetPos);
+					if(DistCenter < 0.001f || DistCenter > MaxDist + TeeRadius)
 						continue;
 
-					// Multi-ray aimpoints around the target so we can hook even if center is behind a wall.
-					const float R = CCharacterCore::PhysicalSize() * 0.65f;
-					vec2 BestAimPos;
-					float BestAimDist = 1e18f;
-					bool AimVisible = false;
-					for(int k = 0; k < 12; k++)
+					AddCandidate(i, SnapTargetPos, SnapTargetPos, std::abs(distance(LocalPos, SnapTargetPos) / HookSpeedPerTick - 0.0f) * 28.0f);
+					AddCandidate(i, TargetPos, TargetPos, std::abs(distance(LocalPos, TargetPos) / HookSpeedPerTick - 0.0f) * 28.0f);
+
+					for(int Tick = 0; Tick <= PredictTicks; Tick++)
 					{
-						const float Ang = (2.0f * pi) * ((float)k / 12.0f);
-						const vec2 AimPos = PredTargetPos + vec2(cosf(Ang), sinf(Ang)) * R;
-						vec2 HitPos;
-						if(Collision()->IntersectLine(LocalPos, AimPos, &HitPos, nullptr) != 0)
+						if(!aaFutureActive[Tick][i])
 							continue;
-						const float D = distance(LocalPos, AimPos);
-						if(D < BestAimDist)
+						const vec2 PredTargetPos = aaFuturePos[Tick][i];
+						if(distance(LocalPos, PredTargetPos) > MaxDist + TeeRadius)
+							continue;
+
+						vec2 StepVel = m_aClients[i].m_RegularPredicted.m_Vel;
+						if(Tick > 0 && aaFutureActive[Tick - 1][i])
+							StepVel = aaFuturePos[Tick][i] - aaFuturePos[Tick - 1][i];
+
+						vec2 StepDir = vec2(0.0f, 0.0f);
+						if(length(StepVel) > 0.001f)
+							StepDir = normalize(StepVel);
+						const vec2 SideDir = vec2(-StepDir.y, StepDir.x);
+						const vec2 QuarterPrev = Tick > 0 && aaFutureActive[Tick - 1][i] ? mix(aaFuturePos[Tick - 1][i], PredTargetPos, 0.25f) : PredTargetPos;
+						const vec2 MidPrev = Tick > 0 && aaFutureActive[Tick - 1][i] ? mix(aaFuturePos[Tick - 1][i], PredTargetPos, 0.50f) : PredTargetPos;
+						const vec2 ThreeQuarterPrev = Tick > 0 && aaFutureActive[Tick - 1][i] ? mix(aaFuturePos[Tick - 1][i], PredTargetPos, 0.75f) : PredTargetPos;
+						const vec2 aAimPoints[] = {
+							PredTargetPos,
+							QuarterPrev,
+							MidPrev,
+							ThreeQuarterPrev,
+							PredTargetPos + StepVel * 0.35f,
+							PredTargetPos + StepVel * 0.75f,
+							PredTargetPos + StepVel * 1.05f,
+							PredTargetPos + StepVel * 1.25f,
+							PredTargetPos - StepVel * 0.15f,
+							PredTargetPos + SideDir * (TeeRadius * 0.55f),
+							PredTargetPos - SideDir * (TeeRadius * 0.55f),
+							PredTargetPos + vec2(0.0f, TeeRadius * 0.60f),
+							PredTargetPos - vec2(0.0f, TeeRadius * 0.60f),
+							PredTargetPos + StepVel * 0.60f + SideDir * (TeeRadius * 0.30f),
+							PredTargetPos + StepVel * 0.60f - SideDir * (TeeRadius * 0.30f),
+							PredTargetPos + StepVel * 0.95f + SideDir * (TeeRadius * 0.22f),
+							PredTargetPos + StepVel * 0.95f - SideDir * (TeeRadius * 0.22f),
+						};
+
+						for(const vec2 &AimPoint : aAimPoints)
 						{
-							BestAimDist = D;
-							BestAimPos = AimPos;
-							AimVisible = true;
+							const float AimTravelTicks = distance(LocalPos, AimPoint) / HookSpeedPerTick;
+							const float TimePref = std::abs(AimTravelTicks - (float)Tick) * 34.0f;
+							AddCandidate(i, AimPoint, PredTargetPos, TimePref + distance(PredTargetPos, AimPoint) * 1.2f);
 						}
 					}
-					if(!AimVisible)
-						continue;
-
-					vec2 To = BestAimPos - LocalPos;
-					const float Dist = length(To);
-					if(Dist < 0.001f)
-						continue;
-					To *= 1.0f / Dist;
-					const float Angle = acosf(std::clamp(dot(CurAim, To), -1.0f, 1.0f));
-					if(HalfFovRad > 0.0f && Angle > HalfFovRad)
-						continue;
-					// Prefer smaller angle strongly; keep distance as tie-breaker.
-					// Add a tiny stabilization term so we don't switch targets too eagerly when many players are in FOV.
-					const float Score = Angle * 2000.0f + Dist * 0.25f;
-					if(Score < BestScore)
-					{
-						BestScore = Score;
-						BestDir = To;
-						Found = true;
-					}
 				}
-				if(!Found)
+
+				if(vCandidates.empty())
 					return std::nullopt;
-				return BestDir;
+
+				std::sort(vCandidates.begin(), vCandidates.end(), [](const SHookAimCandidate &Left, const SHookAimCandidate &Right) {
+					return Left.m_PrefScore < Right.m_PrefScore;
+				});
+
+				const int MaxSimCandidates = minimum((int)vCandidates.size(), 16);
+				float BestScore = 1e18f;
+				vec2 BestDir = CurAim;
+				bool Found = false;
+				const float aSimAngleOffsets[] = {
+					0.0f,
+					-0.0035f, 0.0035f,
+					-0.0065f, 0.0065f,
+					-0.0095f, 0.0095f,
+					-0.0125f, 0.0125f,
+					-0.0160f, 0.0160f,
+					-0.0200f, 0.0200f,
+					-0.0250f, 0.0250f,
+					-0.0300f, 0.0300f,
+					-0.0370f, 0.0370f,
+					-0.0450f, 0.0450f,
+				};
+
+				auto SimulateHookGrab = [&](int TargetId, const vec2 &AimDir, int *pAttachTick) -> bool {
+					CGameWorld SimWorld;
+					SimWorld.CopyWorldClean(&m_RegularPredictedWorld);
+					SimWorld.m_GameTick = Client()->GameTick(g_Config.m_ClDummy);
+
+					for(int Tick = 0; Tick < PredictTicks; Tick++)
+					{
+						CCharacter *pSimLocal = SimWorld.GetCharacterById(LocalId);
+						if(!pSimLocal)
+							return false;
+
+						CNetObj_PlayerInput In = *pInput;
+						In.m_Hook = 1;
+						In.m_TargetX = round_to_int(AimDir.x * 1000.0f);
+						In.m_TargetY = round_to_int(AimDir.y * 1000.0f);
+						if(In.m_TargetX == 0 && In.m_TargetY == 0)
+							In.m_TargetX = 1;
+
+						pSimLocal->OnDirectInput(&In);
+						SimWorld.m_GameTick++;
+						pSimLocal->OnPredictedInput(&In);
+						SimWorld.Tick();
+
+						pSimLocal = SimWorld.GetCharacterById(LocalId);
+						if(!pSimLocal)
+							return false;
+
+						if(pSimLocal->Core()->HookedPlayer() == TargetId && pSimLocal->Core()->m_HookState == HOOK_GRABBED)
+						{
+							*pAttachTick = Tick;
+							return true;
+						}
+
+						if(pSimLocal->Core()->m_HookState >= HOOK_RETRACT_START && pSimLocal->Core()->HookedPlayer() == -1)
+							return false;
+					}
+					return false;
+				};
+
+				auto TryExactDir = [&](int TargetId, const vec2 &BaseDir, float BasePrefScore) {
+					const float BaseAngle = angle(BaseDir);
+					struct SHitResult
+					{
+						int m_Index;
+						int m_AttachTick;
+						float m_AngleOffset;
+						vec2 m_Dir;
+					};
+					std::vector<SHitResult> vHits;
+					vHits.reserve(sizeof(aSimAngleOffsets) / sizeof(aSimAngleOffsets[0]));
+
+					for(int OffsetIndex = 0; OffsetIndex < (int)(sizeof(aSimAngleOffsets) / sizeof(aSimAngleOffsets[0])); OffsetIndex++)
+					{
+						const float AngleOffset = aSimAngleOffsets[OffsetIndex];
+						const vec2 SimDir = direction(BaseAngle + AngleOffset);
+						const float CurAngle = acosf(std::clamp(dot(CurAim, SimDir), -1.0f, 1.0f));
+						if(HalfFovRad > 0.0f && CurAngle > HalfFovRad)
+							continue;
+
+						int AttachTick = PredictTicks + 1;
+						if(!SimulateHookGrab(TargetId, SimDir, &AttachTick))
+							continue;
+
+						vHits.push_back({OffsetIndex, AttachTick, AngleOffset, SimDir});
+					}
+
+					if(vHits.empty())
+						return;
+
+					for(const SHitResult &Hit : vHits)
+					{
+						int SupportCount = 0;
+						float SupportWidth = 0.0f;
+						for(const SHitResult &OtherHit : vHits)
+						{
+							if(abs(OtherHit.m_Index - Hit.m_Index) > 2)
+								continue;
+							if(abs(OtherHit.m_AttachTick - Hit.m_AttachTick) > 1)
+								continue;
+							SupportCount++;
+							SupportWidth += abs(OtherHit.m_AngleOffset);
+						}
+
+						const float CurAngle = acosf(std::clamp(dot(CurAim, Hit.m_Dir), -1.0f, 1.0f));
+						const float Score = BasePrefScore + CurAngle * 1050.0f + (float)Hit.m_AttachTick * 20.0f +
+							std::abs(Hit.m_AngleOffset) * 620.0f - (float)SupportCount * 120.0f - SupportWidth * 260.0f;
+						if(Score < BestScore)
+						{
+							BestScore = Score;
+							BestDir = Hit.m_Dir;
+							Found = true;
+						}
+					}
+				};
+
+				for(int Index = 0; Index < MaxSimCandidates; Index++)
+				{
+					const SHookAimCandidate &Candidate = vCandidates[Index];
+					TryExactDir(Candidate.m_TargetId, Candidate.m_Dir, Candidate.m_PrefScore);
+				}
+
+				int aTopTargetIds[4] = {-1, -1, -1, -1};
+				int TopTargetCount = 0;
+				for(const SHookAimCandidate &Candidate : vCandidates)
+				{
+					bool Exists = false;
+					for(int n = 0; n < TopTargetCount; n++)
+					{
+						if(aTopTargetIds[n] == Candidate.m_TargetId)
+						{
+							Exists = true;
+							break;
+						}
+					}
+					if(Exists)
+						continue;
+					aTopTargetIds[TopTargetCount++] = Candidate.m_TargetId;
+					if(TopTargetCount >= (int)(sizeof(aTopTargetIds) / sizeof(aTopTargetIds[0])))
+						break;
+				}
+
+				for(int n = 0; n < TopTargetCount; n++)
+				{
+					TryExactDir(aTopTargetIds[n], CurAim, 5000.0f);
+				}
+
+				if(Found)
+					return BestDir;
+
+				// Fallback: keep the best heuristic candidate so aimbot still reacts even if exact sim found nothing.
+				return vCandidates.front().m_Dir;
 			};
 
 			// Aimbot: only when trying to hook.
 			if(g_Config.m_ClZzAimbotEnabled && !SaveInBlockActive && pInput->m_Hook && !ZzAutoUnfreezeOverridesInput)
 			{
-				const float HalfFov = (float)g_Config.m_ClZzAimbotFov * (pi / 180.0f) * 0.5f;
-				const float HookLen = (float)m_aTuning[g_Config.m_ClDummy].m_HookLength;
-				if(const auto BestDir = FindBestTargetDir(HalfFov, HookLen, g_Config.m_ClZzAimbotIgnoreFriends != 0))
+				CCharacter *pPredLocalChar = m_RegularPredictedWorld.GetCharacterById(LocalId);
+				const bool HookAlreadyCommitted = pPredLocalChar &&
+					(pPredLocalChar->Core()->m_HookState == HOOK_FLYING || pPredLocalChar->Core()->m_HookState == HOOK_GRABBED);
+				if(!HookAlreadyCommitted)
 				{
-					// Always set outgoing target so hook is aimed immediately (same tick).
-					pInput->m_TargetX = (int)round_to_int((*BestDir).x * 1000.0f);
-					pInput->m_TargetY = (int)round_to_int((*BestDir).y * 1000.0f);
-					if(!pInput->m_TargetX && !pInput->m_TargetY)
-						pInput->m_TargetX = 1;
-					if(!g_Config.m_ClZzAimbotSilent)
+					const float HalfFov = (float)g_Config.m_ClZzAimbotFov * (pi / 180.0f) * 0.5f;
+					const float HookLen = (float)m_aTuning[g_Config.m_ClDummy].m_HookLength;
+					if(const auto BestDir = FindBestTargetDir(HalfFov, HookLen, g_Config.m_ClZzAimbotIgnoreFriends != 0))
 					{
-						// Non-silent: also update local mouse pos for visual consistency.
-						m_Controls.m_aMousePos[g_Config.m_ClDummy] = (*BestDir) * 1000.0f;
+						// Always set outgoing target so hook is aimed immediately (same tick).
+						pInput->m_TargetX = (int)round_to_int((*BestDir).x * 1000.0f);
+						pInput->m_TargetY = (int)round_to_int((*BestDir).y * 1000.0f);
+						if(!pInput->m_TargetX && !pInput->m_TargetY)
+							pInput->m_TargetX = 1;
+						if(!g_Config.m_ClZzAimbotSilent)
+						{
+							// Non-silent: also update local mouse pos for visual consistency.
+							m_Controls.m_aMousePos[g_Config.m_ClDummy] = (*BestDir) * 1000.0f;
+						}
+						ZzAutoUnfreezeOverridesInput = true;
 					}
-					ZzAutoUnfreezeOverridesInput = true;
 				}
 			}
 

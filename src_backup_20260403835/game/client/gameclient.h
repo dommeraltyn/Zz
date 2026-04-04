@@ -90,12 +90,12 @@
 #include "components/tooltips.h"
 #include "components/touch_controls.h"
 #include "components/voting.h"
+#include "kog_ai_controller.h"
 
 #include <memory>
 #include <vector>
 
 class IMap;
-class CKoGAIController;
 
 class CGameInfo
 {
@@ -893,6 +893,13 @@ public:
 
 	void ApplyPreInputs(int Tick, bool Direct, CGameWorld &GameWorld);
 	bool GetDummyFastInput(CNetObj_PlayerInput &DummyFastInput, const CNetObj_PlayerInput *pDummyInputData, const class CCharacter *pDummyChar, int LocalTee, int DummyTee) const;
+	vec2 DmdGetWallshotPos(int MaxBounces, int CircleRadius, float Accuracy, int TargetID);
+	void AutoUnfreeze();
+	bool DmdInFov(vec2 TargetDir, vec2 CurrentPos, float Fov);
+	void DmdPredictedPosition(int TargetID, int PredictedTicks, vec2 *pPosArray);
+	void RunDmdBot(CNetObj_PlayerInput &Input, int *pAmmoCount, int64_t &LastUnfreezeShot, bool &UnfreezeFound, vec2 &UnfreezePos, vec2 &UnfreezeHit, vec2 &UnfreezeFuture, bool &BotFireReleasePending);
+	void RunDmdHookSpam(CNetObj_PlayerInput &Input, bool Active);
+	bool IsWithinFov(vec2 Line, vec2 Target, float Fov);
 
 	int m_aNextChangeInfo[NUM_DUMMIES];
 

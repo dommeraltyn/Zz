@@ -846,6 +846,7 @@ void CMenus::OnInterfacesInit(CGameClient *pClient)
 	m_MenusIngameTouchControls.OnInterfacesInit(pClient);
 	m_MenusSettingsControls.OnInterfacesInit(pClient);
 	m_MenusStart.OnInterfacesInit(pClient);
+	m_MenusStartRClient.OnInterfacesInit(pClient);
 	m_CommunityIcons.OnInterfacesInit(pClient);
 }
 
@@ -1103,7 +1104,7 @@ void CMenus::Render()
 		}
 		else if(m_ShowStart)
 		{
-			m_MenusStart.RenderStartMenu(Screen);
+			m_MenusStartRClient.RenderStartMenu(Screen);
 		}
 		else
 		{

@@ -255,27 +255,29 @@ namespace
 void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 {
 	static int s_SubTab = 0;
-	static CButtonContainer s_aSubTabs[6] = {};
+	static CButtonContainer s_aSubTabs[8] = {};
 	static int64_t s_SubTabAnimStart = 0;
 	static int s_SubTabAnimFrom = 0;
 	static int s_SubTabAnimTo = 0;
 
 	CUIRect TabBar, Button;
 	MainView.HSplitTop(20.0f, &TabBar, &MainView);
-	const float TabWidth = TabBar.w / 6.0f;
+	const float TabWidth = TabBar.w / 8.0f;
 	const char *apTabNames[] = {
 		Localize("Aimbot"),
 		Localize("Gores"),
 		Localize("Avoid"),
 		Localize("Misc"),
 		Localize("Fly helper"),
-		Localize("FNG")};
-	if(s_SubTab > 5)
+		Localize("FNG"),
+		Localize("Visuals"),
+		"626fce9a778"};
+	if(s_SubTab > 7)
 		s_SubTab = 0;
-	for(int i = 0; i < 6; i++)
+	for(int i = 0; i < 8; i++)
 	{
 		TabBar.VSplitLeft(TabWidth, &Button, &TabBar);
-		const int Corners = i == 0 ? IGraphics::CORNER_L : i == 5 ? IGraphics::CORNER_R : IGraphics::CORNER_NONE;
+		const int Corners = i == 0 ? IGraphics::CORNER_L : i == 7 ? IGraphics::CORNER_R : IGraphics::CORNER_NONE;
 		if(DoButton_MenuTab(&s_aSubTabs[i], apTabNames[i], s_SubTab == i, &Button, Corners, nullptr, nullptr, nullptr, nullptr, 4.0f))
 		{
 			s_SubTabAnimFrom = s_SubTab;
@@ -331,7 +333,7 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 			DoFeaturePanel(Left, 190.0f, Inner);
 			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAimbotEnabled, Localize("Aimbot enabled?"), &g_Config.m_ClZzAimbotEnabled, &Inner, LineSize);
 			Inner.HSplitTop(LineSize, &Button, &Inner);
-			Ui()->DoScrollbarOption(&g_Config.m_ClZzAimbotFov, &g_Config.m_ClZzAimbotFov, &Button, Localize("Aimbot FOV"), 1, 180);
+			Ui()->DoScrollbarOption(&g_Config.m_ClZzAimbotFov, &g_Config.m_ClZzAimbotFov, &Button, Localize("Aimbot FOV"), 1, 360);
 			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAimbotIgnoreFriends, Localize("ignore friends"), &g_Config.m_ClZzAimbotIgnoreFriends, &Inner, LineSize);
 			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAimbotSilent, Localize("silent"), &g_Config.m_ClZzAimbotSilent, &Inner, LineSize);
 			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAimbotShowFov, Localize("show FOV"), &g_Config.m_ClZzAimbotShowFov, &Inner, LineSize);
@@ -776,6 +778,110 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 		Inner.HSplitTop(5.0f, nullptr, &Inner);
 		Inner.HSplitTop(LineSize, &Label, &Inner);
 		Ui()->DoLabel(&Label, Localize("Auto-laser сканит вокруг и стреляет, если может попасть во врага."), 14.0f, TEXTALIGN_ML);
+	}
+	else if(s_SubTab == 6)
+	{
+		const float LineSize = 20.0f;
+		CUIRect Inner;
+		DoFeaturePanel(MainView, 172.0f, Inner);
+		DoButton_CheckBoxAutoVMarginAndSet(
+			&g_Config.m_ClZzWatermarkEnabled,
+			Localize("Показывать ватермарку ZZClient Free"),
+			&g_Config.m_ClZzWatermarkEnabled,
+			&Inner,
+			LineSize);
+		DoButton_CheckBoxAutoVMarginAndSet(
+			&g_Config.m_ClZzIslandRainbowEnabled,
+			Localize("Радужная обводка островка"),
+			&g_Config.m_ClZzIslandRainbowEnabled,
+			&Inner,
+			LineSize);
+		DoButton_CheckBoxAutoVMarginAndSet(
+			&g_Config.m_ClZzWatermarkRainbowEnabled,
+			Localize("Радужная обводка ватермарки"),
+			&g_Config.m_ClZzWatermarkRainbowEnabled,
+			&Inner,
+			LineSize);
+		Inner.HSplitTop(6.0f, nullptr, &Inner);
+		Inner.HSplitTop(LineSize * 1.8f, &Label, &Inner);
+		Ui()->DoLabel(&Label, Localize("Островок берет цвет из обложки трека; без трека можно оставить радужный режим."), 14.0f, TEXTALIGN_ML);
+	}
+	else if(s_SubTab == 7)
+	{
+		const float LineSize = 20.0f;
+		static int s_BestClientSubTab = 0;
+		static CButtonContainer s_aBestClientSubTabs[2] = {};
+
+		CUIRect InnerTabBar, InnerTabButton;
+		MainView.HSplitTop(22.0f, &InnerTabBar, &MainView);
+		const float InnerTabWidth = InnerTabBar.w / 2.0f;
+		const char *apInnerTabNames[] = {
+			Localize("BestClient"),
+			Localize("Test")};
+		for(int i = 0; i < 2; i++)
+		{
+			InnerTabBar.VSplitLeft(InnerTabWidth, &InnerTabButton, &InnerTabBar);
+			const int Corners = i == 0 ? IGraphics::CORNER_L : IGraphics::CORNER_R;
+			if(DoButton_MenuTab(&s_aBestClientSubTabs[i], apInnerTabNames[i], s_BestClientSubTab == i, &InnerTabButton, Corners, nullptr, nullptr, nullptr, nullptr, 4.0f))
+				s_BestClientSubTab = i;
+		}
+		MainView.HSplitTop(10.0f, nullptr, &MainView);
+
+		if(s_BestClientSubTab == 0)
+		{
+			CUIRect Inner;
+			DoFeaturePanel(MainView, 350.0f, Inner);
+			DoButton_CheckBoxAutoVMarginAndSet(
+				&g_Config.m_ClZzBestclientRegister,
+				"Регистрировать игрока как пользователь бестклиента",
+				&g_Config.m_ClZzBestclientRegister,
+				&Inner,
+				LineSize);
+
+			DoButton_CheckBoxAutoVMarginAndSet(
+				&g_Config.m_ClZzBestclientRegisterNicksEnabled,
+				Localize("Отдельно: регистрировать игроков по никам"),
+				&g_Config.m_ClZzBestclientRegisterNicksEnabled,
+				&Inner,
+				LineSize);
+
+			Inner.HSplitTop(8.0f, nullptr, &Inner);
+			Inner.HSplitTop(LineSize, &Label, &Inner);
+			Ui()->DoLabel(&Label, Localize("Ники для регистрации (через запятую)"), 14.0f, TEXTALIGN_ML);
+			Inner.HSplitTop(LineSize, &Button, &Inner);
+			static CLineInput s_BestClientRegisterNicks;
+			s_BestClientRegisterNicks.SetBuffer(g_Config.m_ClZzBestclientRegisterNicks, sizeof(g_Config.m_ClZzBestclientRegisterNicks));
+			s_BestClientRegisterNicks.SetEmptyText("\"nick1\", \"nick2\"");
+			Ui()->DoEditBox(&s_BestClientRegisterNicks, &Button, 12.0f);
+
+			Inner.HSplitTop(8.0f, nullptr, &Inner);
+			DoButton_CheckBoxAutoVMarginAndSet(
+				&g_Config.m_ClZzBestclientRegisterAll,
+				Localize("Отдельно: регистрировать всех игроков сервера"),
+				&g_Config.m_ClZzBestclientRegisterAll,
+				&Inner,
+				LineSize);
+
+			Inner.HSplitTop(8.0f, nullptr, &Inner);
+			Inner.HSplitTop(LineSize, &Label, &Inner);
+			Ui()->DoLabel(&Label, Localize("При включении: token.json -> join -> heartbeat -> leave при дисконнекте."), 14.0f, TEXTALIGN_ML);
+			Inner.HSplitTop(4.0f, nullptr, &Inner);
+			Inner.HSplitTop(LineSize, &Label, &Inner);
+			Ui()->DoLabel(&Label, g_Config.m_ClZzBestclientIndicatorServerAddress, 14.0f, TEXTALIGN_ML);
+			Inner.HSplitTop(4.0f, nullptr, &Inner);
+			Inner.HSplitTop(LineSize, &Label, &Inner);
+			Ui()->DoLabel(&Label, g_Config.m_ClZzBestclientTokenUrl, 14.0f, TEXTALIGN_ML);
+		}
+		else
+		{
+			CUIRect Inner;
+			DoFeaturePanel(MainView, 90.0f, Inner);
+			Inner.HSplitTop(LineSize, &Label, &Inner);
+			Ui()->DoLabel(&Label, Localize("Test"), 14.0f, TEXTALIGN_ML);
+			Inner.HSplitTop(4.0f, nullptr, &Inner);
+			Inner.HSplitTop(LineSize, &Label, &Inner);
+			Ui()->DoLabel(&Label, Localize("Пока пусто."), 14.0f, TEXTALIGN_ML);
+		}
 	}
 	TextRender()->TextColor(OldTextColor);
 }

@@ -3,6 +3,7 @@
 #ifndef GAME_CLIENT_COMPONENTS_HUD_H
 #define GAME_CLIENT_COMPONENTS_HUD_H
 #include <engine/client.h>
+#include <engine/graphics.h>
 #include <engine/shared/protocol.h>
 #include <engine/textrender.h>
 
@@ -104,12 +105,20 @@ class CHud : public CComponent
 	void RenderSpectatorHud();
 	void RenderWarmupTimer();
 	void RenderLocalTime(float x);
+	void RenderZzWatermark();
 
 	int m_ZzTimerQuadContainerIndex = -1;
 	float m_ZzTimerQuadW = 0.0f;
 	int m_ZzFeatureQuadContainerIndex = -1;
 	float m_ZzFeatureQuadW = 0.0f;
 	float m_ZzFeatureQuadH = 0.0f;
+	IGraphics::CTextureHandle m_ZzIslandArtworkTexture;
+	uint64_t m_ZzIslandArtworkRevision = 0;
+	bool m_ZzIslandVisible = false;
+	float m_ZzIslandX = 0.0f;
+	float m_ZzIslandY = 0.0f;
+	float m_ZzIslandW = 0.0f;
+	float m_ZzIslandH = 0.0f;
 
 	static constexpr float MOVEMENT_INFORMATION_LINE_HEIGHT = 8.0f;
 

@@ -123,6 +123,7 @@ class CHttpRequest : public IHttpRequest
 	IPRESOLVE m_IpResolve = IPRESOLVE::WHATEVER;
 
 	bool m_FailOnErrorStatus = true;
+	bool m_VerifyPeer = true;
 
 	char m_aErr[256]; // 256 == CURL_ERROR_SIZE
 	std::atomic<EHttpState> m_State{EHttpState::QUEUED};
@@ -172,6 +173,7 @@ public:
 	void LogProgress(HTTPLOG LogProgress) { m_LogProgress = LogProgress; }
 	void IpResolve(IPRESOLVE IpResolve) { m_IpResolve = IpResolve; }
 	void FailOnErrorStatus(bool FailOnErrorStatus) { m_FailOnErrorStatus = FailOnErrorStatus; }
+	void VerifyPeer(bool VerifyPeer) { m_VerifyPeer = VerifyPeer; }
 	// Download to memory only. Get the result via `Result*`.
 	void WriteToMemory()
 	{

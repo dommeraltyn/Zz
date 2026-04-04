@@ -190,6 +190,8 @@ bool CHttpRequest::ConfigureHandle(void *pHandle)
 #endif
 	curl_easy_setopt(pH, CURLOPT_FOLLOWLOCATION, 1L);
 	curl_easy_setopt(pH, CURLOPT_MAXREDIRS, 4L);
+	curl_easy_setopt(pH, CURLOPT_SSL_VERIFYPEER, m_VerifyPeer ? 1L : 0L);
+	curl_easy_setopt(pH, CURLOPT_SSL_VERIFYHOST, m_VerifyPeer ? 2L : 0L);
 	if(m_FailOnErrorStatus)
 	{
 		curl_easy_setopt(pH, CURLOPT_FAILONERROR, 1L);

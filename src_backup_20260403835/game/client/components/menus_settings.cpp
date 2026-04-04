@@ -224,6 +224,34 @@ void CMenus::RenderSettingsGeneral(CUIRect MainView)
 	}
 }
 
+namespace
+{
+	CBindSlot FindBindSlotForCommand(CBinds *pBinds, const char *pCommand)
+	{
+		for(int Modifier = KeyModifier::NONE; Modifier < KeyModifier::COMBINATION_COUNT; Modifier++)
+		{
+			for(int Key = KEY_FIRST; Key < KEY_LAST; Key++)
+			{
+				if(str_comp(pBinds->Get(Key, Modifier), pCommand) == 0)
+					return CBindSlot(Key, Modifier);
+			}
+		}
+		return EMPTY_BIND_SLOT;
+	}
+
+	void UnbindCommand(CBinds *pBinds, const char *pCommand)
+	{
+		for(int Modifier = KeyModifier::NONE; Modifier < KeyModifier::COMBINATION_COUNT; Modifier++)
+		{
+			for(int Key = KEY_FIRST; Key < KEY_LAST; Key++)
+			{
+				if(str_comp(pBinds->Get(Key, Modifier), pCommand) == 0)
+					pBinds->Bind(Key, "", false, Modifier);
+			}
+		}
+	}
+	} // namespace
+
 void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 {
 	static int s_SubTab = 0;
@@ -403,29 +431,25 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 
 		{
 			CUIRect Inner;
-			DoFeaturePanel(Left, 280.0f, Inner);
+			DoFeaturePanel(Left, 180.0f, Inner);
 			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAvoidEnabled, Localize("Avoid enabled?"), &g_Config.m_ClZzAvoidEnabled, &Inner, LineSize);
 			Inner.HSplitTop(LineSize, &Button, &Inner);
 			Ui()->DoScrollbarOption(&g_Config.m_ClZzAvoidMode, &g_Config.m_ClZzAvoidMode, &Button, Localize("Mode"), 0, 1);
 			Inner.HSplitTop(LineSize, &Label, &Inner);
 			Ui()->DoLabel(&Label, Localize("0 = old (for block), 1 = blatant"), 14.0f, TEXTALIGN_ML);
-			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAvoidFreeze, Localize("Avoid freeze"), &g_Config.m_ClZzAvoidFreeze, &Inner, LineSize);
-			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAvoidHookAssist, Localize("Hook assist"), &g_Config.m_ClZzAvoidHookAssist, &Inner, LineSize);
-			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAvoidTele, Localize("Avoid tele"), &g_Config.m_ClZzAvoidTele, &Inner, LineSize);
-			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAvoidKill, Localize("Avoid kill"), &g_Config.m_ClZzAvoidKill, &Inner, LineSize);
-			Inner.HSplitTop(LineSize, &Button, &Inner);
-			Ui()->DoScrollbarOption(&g_Config.m_ClZzAvoidLookahead, &g_Config.m_ClZzAvoidLookahead, &Button, Localize("Lookahead"), 4, 128);
-			Inner.HSplitTop(LineSize, &Button, &Inner);
-			Ui()->DoScrollbarOption(&g_Config.m_ClZzAvoidHookAssistRange, &g_Config.m_ClZzAvoidHookAssistRange, &Button, Localize("Hook range"), 16, 512);
-			Inner.HSplitTop(LineSize, &Button, &Inner);
-			Ui()->DoScrollbarOption(&g_Config.m_ClZzAvoidPredTicks, &g_Config.m_ClZzAvoidPredTicks, &Button, Localize("Blatant pred ticks"), 4, 30);
-			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAvoidBlatantJump, Localize("Blatant jump"), &g_Config.m_ClZzAvoidBlatantJump, &Inner, LineSize);
-			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAvoidDebugLog, Localize("Debug log"), &g_Config.m_ClZzAvoidDebugLog, &Inner, LineSize);
+			if(g_Config.m_ClZzAvoidMode == 1)
+			{
+				Inner.HSplitTop(LineSize, &Button, &Inner);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzAvoidPredTicks, &g_Config.m_ClZzAvoidPredTicks, &Button, Localize("Blatant pred ticks"), 1, 30);
+				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAvoidJump, Localize("Blatant jump"), &g_Config.m_ClZzAvoidJump, &Inner, LineSize);
+				Inner.HSplitTop(LineSize * 2.0f, &Label, &Inner);
+				Ui()->DoLabel(&Label, Localize("Jump is used only at 100% freeze risk (freeze in 1 tile)."), 14.0f, TEXTALIGN_ML);
+			}
 		}
 
 		{
 			CUIRect Inner;
-			DoFeaturePanel(Right, 130.0f, Inner);
+			DoFeaturePanel(Right, 115.0f, Inner);
 			Inner.HSplitTop(LineSize, &Label, &Inner);
 			Ui()->DoLabel(&Label, Localize("Avoid toggle keybind"), 14.0f, TEXTALIGN_ML);
 			Inner.HSplitTop(LineSize, &Button, &Inner);
@@ -443,8 +467,8 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 					GameClient()->m_Binds.Bind(ResAvoid.m_Bind.m_Key, "+zz_avoid_toggle", false, ResAvoid.m_Bind.m_ModifierMask);
 			}
 			Inner.HSplitTop(8.0f, nullptr, &Inner);
-			Inner.HSplitTop(LineSize * 2.0f, &Label, &Inner);
-			Ui()->DoLabel(&Label, Localize("Blatant использует предикт и скор, чтобы выбрать A/D, hook и отпускание hook."), 14.0f, TEXTALIGN_ML);
+			Inner.HSplitTop(LineSize * 1.8f, &Label, &Inner);
+			Ui()->DoLabel(&Label, Localize("Blatant uses prediction scoring for A/D, hook and late hook release."), 14.0f, TEXTALIGN_ML);
 		}
 	}
 	else if(s_SubTab == 3)
@@ -481,14 +505,36 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 		}
 		{
 			CUIRect Inner;
-			DoFeaturePanel(LeftView, 112.0f, Inner);
-			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAutoUnfreeze, Localize("Auto-unfreeze"), &g_Config.m_ClZzAutoUnfreeze, &Inner, LineSize);
+			DoFeaturePanel(LeftView, 198.0f, Inner);
+			if(DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAutoUnfreeze, Localize("Auto-unfreeze"), &g_Config.m_ClZzAutoUnfreeze, &Inner, LineSize))
+			{
+				if(g_Config.m_ClZzAutoUnfreeze)
+					g_Config.m_ClZzAutoUnfreezeAutoFire = 1;
+			}
 			Inner.HSplitTop(4.0f, nullptr, &Inner);
 			Inner.HSplitTop(LineSize, &Button, &Inner);
 			Ui()->DoScrollbarOption(&g_Config.m_ClZzAutoUnfreezeFov, &g_Config.m_ClZzAutoUnfreezeFov, &Button, Localize("FOV"), 1, 360);
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAutoUnfreezeAutoFire, Localize("Auto-fire"), &g_Config.m_ClZzAutoUnfreezeAutoFire, &Inner, LineSize);
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzDummyAutoUnfreeze, Localize("Dummy auto-unfreeze"), &g_Config.m_ClZzDummyAutoUnfreeze, &Inner, LineSize);
+			Inner.HSplitTop(4.0f, nullptr, &Inner);
+			Inner.HSplitTop(LineSize, &Label, &Inner);
+			Ui()->DoLabel(&Label, Localize("Auto-unfreeze bind"), 14.0f, TEXTALIGN_ML);
+			Inner.HSplitTop(LineSize, &Button, &Inner);
+			constexpr const char *AutoUnfreezeToggleCommand = "toggle zz_auto_unfreeze 0 1";
+			CBindSlot AutoUnfreezeBind = FindBindSlotForCommand(&GameClient()->m_Binds, AutoUnfreezeToggleCommand);
+			static CButtonContainer s_AutoUnfreezeBindButton;
+			static CButtonContainer s_AutoUnfreezeBindClearButton;
+			const CKeyBinder::CKeyReaderResult AutoUnfreezeBindResult = GameClient()->m_KeyBinder.DoKeyReader(
+				&s_AutoUnfreezeBindButton, &s_AutoUnfreezeBindClearButton, &Button, AutoUnfreezeBind, false);
+			if(!AutoUnfreezeBindResult.m_Aborted && AutoUnfreezeBindResult.m_Bind != AutoUnfreezeBind)
+			{
+				UnbindCommand(&GameClient()->m_Binds, AutoUnfreezeToggleCommand);
+				if(AutoUnfreezeBindResult.m_Bind.m_Key != KEY_UNKNOWN)
+					GameClient()->m_Binds.Bind(AutoUnfreezeBindResult.m_Bind.m_Key, AutoUnfreezeToggleCommand, false, AutoUnfreezeBindResult.m_Bind.m_ModifierMask);
+			}
 			Inner.HSplitTop(4.0f, nullptr, &Inner);
 			Inner.HSplitTop(LineSize * 2.1f, &Label, &Inner);
-			Ui()->DoLabel(&Label, Localize("Автоматически стреляет лазером для анфриза."), 14.0f, TEXTALIGN_ML);
+			Ui()->DoLabel(&Label, Localize("Auto-unfreeze wallshot prediction with release tick."), 14.0f, TEXTALIGN_ML);
 		}
 		{
 			CUIRect Inner;
@@ -3514,10 +3560,6 @@ void CMenus::RenderSettingsDDNet(CUIRect MainView)
 	Miscellaneous.HSplitTop(5.0f, nullptr, &Miscellaneous);
 
 	Ui()->DoLabel(&Label, Localize("Miscellaneous"), 20.0f, TEXTALIGN_ML);
-
-	Miscellaneous.HSplitTop(20.0f, &Button, &Miscellaneous);
-	if(DoButton_CheckBox(&g_Config.m_ClZzAvoidJump, Localize("Avoid freeze jump"), g_Config.m_ClZzAvoidJump, &Button))
-		g_Config.m_ClZzAvoidJump ^= 1;
 
 	static CButtonContainer s_ButtonTimeout;
 	Miscellaneous.HSplitTop(20.0f, &Button, &Miscellaneous);
