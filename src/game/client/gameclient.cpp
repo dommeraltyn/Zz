@@ -728,6 +728,8 @@ struct SCompanionLocalEval
 {
 	bool m_DummyDangerEnd = false;
 	bool m_OwnerDangerEnd = false;
+	int m_FirstDummyDangerTick = 999;
+	int m_FirstOwnerDangerTick = 999;
 	bool m_DummySafeEnd = false;
 	bool m_HookedOwner = false;
 	bool m_HookedGround = false;
@@ -2054,7 +2056,7 @@ bool CompanionBuildFightInput(CGameClient *pGameClient, int DummyCid, int OwnerC
 	return true;
 }
 
-bool CompanionSimulateAction(CGameClient *pGameClient, int DummyCid, int OwnerCid, const CNetObj_PlayerInput &BaseInput, const SCompanionLocalAction &Action, int Ticks, float HookLen, bool DummyDangerStart, bool OwnerDangerStart, SCompanionLocalEval *pEval)
+bool CompanionSimulateAction(CGameClient *pGameClient, int DummyCid, int OwnerCid, const CNetObj_PlayerInput &BaseInput, const SCompanionLocalAction &Action, int Ticks, float HookLen, bool DummyDangerStart, bool OwnerDangerStart, bool RejectNewDummyDanger, bool RejectNewOwnerDanger, SCompanionLocalEval *pEval)
 {
 	if(!pGameClient || !pEval)
 		return false;
@@ -2110,10 +2112,14 @@ bool CompanionSimulateAction(CGameClient *pGameClient, int DummyCid, int OwnerCi
 
 		const bool DummyDangerNow = CompanionCharacterDanger(pCollision, pDummy) || CompanionDangerPath(pCollision, PrevDummyPos, pDummy->GetPos());
 		const bool OwnerDangerNow = CompanionCharacterDanger(pCollision, pOwner) || CompanionDangerPath(pCollision, PrevOwnerPos, pOwner->GetPos());
+		if(DummyDangerNow && pEval->m_FirstDummyDangerTick > Tick)
+			pEval->m_FirstDummyDangerTick = Tick;
+		if(OwnerDangerNow && pEval->m_FirstOwnerDangerTick > Tick)
+			pEval->m_FirstOwnerDangerTick = Tick;
 
-		if(DummyDangerNow && !DummyDangerStart)
+		if(DummyDangerNow && !DummyDangerStart && RejectNewDummyDanger)
 			return false;
-		if(OwnerDangerNow && !OwnerDangerStart)
+		if(OwnerDangerNow && !OwnerDangerStart && RejectNewOwnerDanger)
 			return false;
 
 		pEval->m_DummyDangerEnd = DummyDangerNow;
@@ -2683,8 +2689,11 @@ bool CompanionBuildLocalInput(CGameClient *pGameClient, CNetObj_PlayerInput &Out
 	const float HookLen = CompanionHookLengthForCid(pGameClient, DummyCid);
 	const bool DummySafeNow = CompanionSafeStandPos(pCollision, DummyPos);
 	const float OwnerDistStart = distance(DummyPos, OwnerPos);
-	const int DummyDangerTick = CompanionPredictDangerTick(pGameClient, DummyCid, 14, nullptr);
+	vec2 DummyDangerPos = DummyPos;
+	const int DummyDangerTick = CompanionPredictDangerTick(pGameClient, DummyCid, 14, &DummyDangerPos);
 	const bool DummyDangerMode = DummyDangerStart || DummyDangerTick < 8;
+	const bool DummyPanicMode = !OwnerDangerMode && (DummyDangerStart || DummyDangerTick < 5);
+	const bool HasDummyDangerPos = DummyDangerTick < 999;
 
 	auto StoreCompanionPath = [&](vec2 StepPos, vec2 AnchorPos, vec2 RescuePos, bool IncludeOwner) {
 		pGameClient->CompanionClearPath();
@@ -2745,6 +2754,11 @@ bool CompanionBuildLocalInput(CGameClient *pGameClient, CNetObj_PlayerInput &Out
 		vec2 EscapeBias = length(DummyVel) > 0.001f ? -normalize(DummyVel) : normalize(DummyPos - OwnerPos);
 		if(length(EscapeBias) < 0.001f)
 			EscapeBias = vec2(0.0f, -1.0f);
+		if(HasDummyDangerPos && length(DummyPos - DummyDangerPos) > 0.001f)
+		{
+			vec2 DangerAway = normalize(DummyPos - DummyDangerPos);
+			EscapeBias = normalize(EscapeBias + DangerAway * 0.70f + vec2(0.0f, -0.45f));
+		}
 		if(!CompanionFindNearestSafePos(pCollision, DummyPos, EscapeBias, &GoalPos))
 			GoalPos = OwnerPos;
 	}
@@ -2899,16 +2913,32 @@ bool CompanionBuildLocalInput(CGameClient *pGameClient, CNetObj_PlayerInput &Out
 		AddHookAction(GoalPos - DummyPos, false, false);
 	if(OwnerDangerMode)
 		AddHookAction(OwnerPos - DummyPos, true, WantJump);
+	if(DummyPanicMode)
+	{
+		const int VelDir = DummyVel.x > 0.75f ? 1 : (DummyVel.x < -0.75f ? -1 : 0);
+		const int EscapeDir = PreferredDir != 0 ? PreferredDir : (VelDir != 0 ? -VelDir : 0);
+		const vec2 PanicGoalAim = length(GoalPos - DummyPos) > 0.001f ? normalize(GoalPos - DummyPos) : vec2(0.0f, -1.0f);
+		AddAction(EscapeDir, true, false, vec2((float)EscapeDir * 0.3f, -1.0f));
+		AddAction(-1, true, false, vec2(-0.62f, -1.0f));
+		AddAction(1, true, false, vec2(0.62f, -1.0f));
+		AddHookAction(vec2(0.0f, -1.0f), false, true);
+		AddHookAction(normalize(vec2(-0.65f, -1.0f)), false, true);
+		AddHookAction(normalize(vec2(0.65f, -1.0f)), false, true);
+		AddHookAction(PanicGoalAim, false, true);
+	}
 
 	float BestScore = 1e18f;
 	bool Found = false;
 	SCompanionLocalAction BestAction;
-	const int SimTicks = OwnerDangerMode || DummyDangerMode ? 10 : 8;
+	const int SimTicks = OwnerDangerMode ? 10 : (DummyPanicMode ? 14 : (DummyDangerMode ? 11 : 8));
+	const bool RejectNewDummyDanger = !DummyDangerStart && !DummyPanicMode;
+	const bool RejectNewOwnerDanger = !OwnerDangerStart;
+	const float DummyDangerDistStart = HasDummyDangerPos ? distance(DummyPos, DummyDangerPos) : 0.0f;
 
 	for(const SCompanionLocalAction &Action : vActions)
 	{
 		SCompanionLocalEval Eval;
-		if(!CompanionSimulateAction(pGameClient, DummyCid, OwnerCid, pGameClient->m_DummyInput, Action, SimTicks, HookLen, DummyDangerStart, OwnerDangerStart, &Eval))
+		if(!CompanionSimulateAction(pGameClient, DummyCid, OwnerCid, pGameClient->m_DummyInput, Action, SimTicks, HookLen, DummyDangerStart, OwnerDangerStart, RejectNewDummyDanger, RejectNewOwnerDanger, &Eval))
 			continue;
 
 		float Score = distance(Eval.m_DummyFinalPos, GoalPos);
@@ -2918,6 +2948,28 @@ bool CompanionBuildLocalInput(CGameClient *pGameClient, CNetObj_PlayerInput &Out
 
 		if(Eval.m_DummyDangerEnd)
 			Score += DummyDangerStart ? 120.0f : 500.0f;
+		if(DummyPanicMode)
+		{
+			if(Eval.m_DummyDangerEnd)
+				Score += 1500.0f;
+			else
+				Score -= 240.0f;
+			if(Eval.m_FirstDummyDangerTick < 999)
+				Score += (float)(SimTicks - minimum(SimTicks, Eval.m_FirstDummyDangerTick)) * 170.0f;
+			else
+				Score -= 210.0f;
+			if(!Eval.m_DummySafeEnd)
+				Score += 280.0f;
+			if(Action.m_Jump)
+				Score -= 26.0f;
+			if(Action.m_Hook && Eval.m_HookedGround)
+				Score -= 54.0f;
+			if(HasDummyDangerPos)
+			{
+				const float DangerDistEnd = distance(Eval.m_DummyFinalPos, DummyDangerPos);
+				Score -= (DangerDistEnd - DummyDangerDistStart) * 2.6f;
+			}
+		}
 		if(OwnerDangerMode)
 		{
 			const float RescueDistStart = distance(OwnerPos, RescueTargetPos);
