@@ -319,7 +319,10 @@ MACRO_CONFIG_STR(ClZzFentBotPyAddr, cl_zz_fentbot_py_addr, 256, "127.0.0.1:5555"
 MACRO_CONFIG_INT(ClZzFentBotPyTimeoutMs, cl_zz_fentbot_py_timeout_ms, 2, 0, 50, CFGFLAG_CLIENT | CFGFLAG_SAVE, "ZZetClient Fent bot Python: max wait time for inference (ms)")
 
 MACRO_CONFIG_INT(ClZzCompanionEnabled, cl_zz_companion_enabled, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "ZZetClient companion: enable dummy companion mode")
+MACRO_CONFIG_INT(ClZzCompanionToggleKey, cl_zz_companion_toggle_key, 0, 0, 512, CFGFLAG_CLIENT | CFGFLAG_SAVE, "ZZetClient companion bind key (internal)")
+MACRO_CONFIG_INT(ClZzCompanionToggleMod, cl_zz_companion_toggle_mod, 0, 0, 7, CFGFLAG_CLIENT | CFGFLAG_SAVE, "ZZetClient companion bind modifier mask (internal)")
 MACRO_CONFIG_INT(ClZzCompanionFightMode, cl_zz_companion_fight_mode, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "ZZetClient companion: combat mode, attack enemies but never the owner")
+MACRO_CONFIG_INT(ClZzCompanionNoAggroTeam, cl_zz_companion_no_aggro_team, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "ZZetClient companion: don't attack teammates and rescue them (owner has priority)")
 MACRO_CONFIG_INT(ClZzCompanionPyInfer, cl_zz_companion_py_infer, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "ZZetClient companion Python: enable localhost policy inference")
 MACRO_CONFIG_STR(ClZzCompanionPyAddr, cl_zz_companion_py_addr, 256, "127.0.0.1:5657", CFGFLAG_CLIENT | CFGFLAG_SAVE, "ZZetClient companion Python: tcp address ip:port")
 MACRO_CONFIG_INT(ClZzCompanionPyTimeoutMs, cl_zz_companion_py_timeout_ms, 2, 0, 50, CFGFLAG_CLIENT | CFGFLAG_SAVE, "ZZetClient companion Python: max wait time for inference (ms)")

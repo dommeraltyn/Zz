@@ -565,16 +565,34 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 		}
 		{
 			CUIRect Inner;
-			DoFeaturePanel(LeftView, 122.0f, Inner);
+			DoFeaturePanel(LeftView, 198.0f, Inner);
 			if(DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzCompanionEnabled, Localize("Companion"), &g_Config.m_ClZzCompanionEnabled, &Inner, LineSize))
 			{
 				if(g_Config.m_ClZzCompanionEnabled)
 					g_Config.m_ClZzCompanionPyInfer = 0;
 			}
 			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzCompanionFightMode, Localize("Fight mode"), &g_Config.m_ClZzCompanionFightMode, &Inner, LineSize);
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzCompanionNoAggroTeam, Localize("No aggro teammates + rescue"), &g_Config.m_ClZzCompanionNoAggroTeam, &Inner, LineSize);
 			Inner.HSplitTop(4.0f, nullptr, &Inner);
 			Inner.HSplitTop(LineSize, &Button, &Inner);
 			Ui()->DoScrollbarOption(&g_Config.m_ClZzCompanionFollowTiles, &g_Config.m_ClZzCompanionFollowTiles, &Button, Localize("Follow tiles"), 5, 200);
+			Inner.HSplitTop(6.0f, nullptr, &Inner);
+			Inner.HSplitTop(LineSize, &Label, &Inner);
+			Ui()->DoLabel(&Label, Localize("Companion toggle keybind"), 14.0f, TEXTALIGN_ML);
+			Inner.HSplitTop(LineSize, &Button, &Inner);
+			static CButtonContainer s_CompanionKeyReader;
+			static CButtonContainer s_CompanionKeyClear;
+			CBindSlot CurrentBindCompanion((int)g_Config.m_ClZzCompanionToggleKey, (int)g_Config.m_ClZzCompanionToggleMod);
+			const auto ResCompanion = GameClient()->m_KeyBinder.DoKeyReader(&s_CompanionKeyReader, &s_CompanionKeyClear, &Button, CurrentBindCompanion, false);
+			if(!ResCompanion.m_Aborted && (ResCompanion.m_Bind.m_Key != CurrentBindCompanion.m_Key || ResCompanion.m_Bind.m_ModifierMask != CurrentBindCompanion.m_ModifierMask))
+			{
+				constexpr const char *CompanionToggleCommand = "+zz_companion_toggle";
+				UnbindCommand(&GameClient()->m_Binds, CompanionToggleCommand);
+				g_Config.m_ClZzCompanionToggleKey = ResCompanion.m_Bind.m_Key;
+				g_Config.m_ClZzCompanionToggleMod = ResCompanion.m_Bind.m_ModifierMask;
+				if(ResCompanion.m_Bind.m_Key >= KEY_FIRST && ResCompanion.m_Bind.m_Key < KEY_LAST)
+					GameClient()->m_Binds.Bind(ResCompanion.m_Bind.m_Key, CompanionToggleCommand, false, ResCompanion.m_Bind.m_ModifierMask);
+			}
 			Inner.HSplitTop(4.0f, nullptr, &Inner);
 			Inner.HSplitTop(LineSize * 1.6f, &Label, &Inner);
 			Ui()->DoLabel(&Label, Localize("Дамми следует за основой, спасает из фриза, а в fight mode может бить только врагов."), 14.0f, TEXTALIGN_ML);

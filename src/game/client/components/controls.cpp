@@ -1261,6 +1261,12 @@ void CControls::OnConsoleInit()
 		Console()->Register("zz_aimbot_toggle", "", CFGFLAG_CLIENT, ConKeyToggle, &s_ToggleLegacy, "ZZetClient: toggle aimbot (legacy)");
 	}
 	{
+		static CInputToggleOnce s_Toggle = {&g_Config.m_ClZzCompanionEnabled, false};
+		static CInputToggle s_ToggleLegacy = {&g_Config.m_ClZzCompanionEnabled};
+		Console()->Register("+zz_companion_toggle", "", CFGFLAG_CLIENT, ConKeyToggleOnce, &s_Toggle, "ZZetClient: toggle companion");
+		Console()->Register("zz_companion_toggle", "", CFGFLAG_CLIENT, ConKeyToggle, &s_ToggleLegacy, "ZZetClient: toggle companion (legacy)");
+	}
+	{
 		static CInputToggleOnce s_Toggle = {&g_Config.m_ClZzAvoidEnabled, false};
 		static CInputToggle s_ToggleLegacy = {&g_Config.m_ClZzAvoidEnabled};
 		Console()->Register("+zz_avoid_toggle", "", CFGFLAG_CLIENT, ConKeyToggleOnce, &s_Toggle, "ZZetClient: toggle avoid freeze");
@@ -1291,6 +1297,8 @@ void CControls::OnConsoleInit()
 	// Re-apply saved keybind (if any).
 	if(g_Config.m_ClZzAimbotKey >= KEY_FIRST && g_Config.m_ClZzAimbotKey < KEY_LAST)
 		GameClient()->m_Binds.Bind(g_Config.m_ClZzAimbotKey, "+zz_aimbot_toggle", false, g_Config.m_ClZzAimbotMod);
+	if(g_Config.m_ClZzCompanionToggleKey >= KEY_FIRST && g_Config.m_ClZzCompanionToggleKey < KEY_LAST)
+		GameClient()->m_Binds.Bind(g_Config.m_ClZzCompanionToggleKey, "+zz_companion_toggle", false, g_Config.m_ClZzCompanionToggleMod);
 	if(g_Config.m_ClZzAvoidToggleKey >= KEY_FIRST && g_Config.m_ClZzAvoidToggleKey < KEY_LAST)
 		GameClient()->m_Binds.Bind(g_Config.m_ClZzAvoidToggleKey, "+zz_avoid_toggle", false, g_Config.m_ClZzAvoidToggleMod);
 	if(g_Config.m_ClZzBalanceBotKey >= KEY_FIRST && g_Config.m_ClZzBalanceBotKey < KEY_LAST)
