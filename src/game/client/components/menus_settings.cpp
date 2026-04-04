@@ -565,6 +565,22 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 		}
 		{
 			CUIRect Inner;
+			DoFeaturePanel(LeftView, 122.0f, Inner);
+			if(DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzCompanionEnabled, Localize("Companion"), &g_Config.m_ClZzCompanionEnabled, &Inner, LineSize))
+			{
+				if(g_Config.m_ClZzCompanionEnabled)
+					g_Config.m_ClZzCompanionPyInfer = 0;
+			}
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzCompanionFightMode, Localize("Fight mode"), &g_Config.m_ClZzCompanionFightMode, &Inner, LineSize);
+			Inner.HSplitTop(4.0f, nullptr, &Inner);
+			Inner.HSplitTop(LineSize, &Button, &Inner);
+			Ui()->DoScrollbarOption(&g_Config.m_ClZzCompanionFollowTiles, &g_Config.m_ClZzCompanionFollowTiles, &Button, Localize("Follow tiles"), 5, 200);
+			Inner.HSplitTop(4.0f, nullptr, &Inner);
+			Inner.HSplitTop(LineSize * 1.6f, &Label, &Inner);
+			Ui()->DoLabel(&Label, Localize("Дамми следует за основой, спасает из фриза, а в fight mode может бить только врагов."), 14.0f, TEXTALIGN_ML);
+		}
+		{
+			CUIRect Inner;
 			DoFeaturePanel(LeftView, 160.0f, Inner);
 			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzFakeLag, Localize("Fake lag"), &g_Config.m_ClZzFakeLag, &Inner, LineSize);
 			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzFakeLagDrift, Localize("Drift mode"), &g_Config.m_ClZzFakeLagDrift, &Inner, LineSize);
@@ -653,7 +669,7 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 			int DerivedAiQuickMode = 0;
 			if(g_Config.m_ClZzKogAiEnabled)
 				DerivedAiQuickMode = 5;
-			else if(g_Config.m_ClZzCompanionEnabled && g_Config.m_ClZzCompanionPyInfer)
+			else if(g_Config.m_ClZzCompanionEnabled)
 				DerivedAiQuickMode = 4;
 			else if(g_Config.m_ClZzFentBotEnabled && g_Config.m_ClZzFentBotAiInfer)
 				DerivedAiQuickMode = 3;
