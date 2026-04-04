@@ -1805,6 +1805,7 @@ void CControls::OnRender()
 		m_aTargetPos[g_Config.m_ClDummy] = m_aMousePos[g_Config.m_ClDummy];
 	}
 
+	RenderCompanionPath();
 	RenderUnfreezePredict();
 }
 
@@ -1852,6 +1853,31 @@ void CControls::RenderUnfreezePredict()
 
 	if(time_get() > m_LastUnfreezeShot + time_freq() * 0.6f)
 		m_UnfreezeFound = false;
+}
+
+void CControls::RenderCompanionPath()
+{
+	if(!g_Config.m_ClZzCompanionEnabled || !GameClient()->Client()->DummyConnected())
+		return;
+
+	const int PathLen = GameClient()->CompanionPathLen();
+	if(PathLen < 2)
+		return;
+
+	Graphics()->TextureClear();
+	Graphics()->LinesBegin();
+	for(int i = 1; i < PathLen; i++)
+	{
+		const vec2 &From = GameClient()->CompanionPathPoint(i - 1);
+		const vec2 &To = GameClient()->CompanionPathPoint(i);
+		if(i == PathLen - 1)
+			Graphics()->SetColor(1.0f, 0.85f, 0.15f, 0.95f);
+		else
+			Graphics()->SetColor(0.15f, 0.95f, 1.0f, 0.9f);
+		IGraphics::CLineItem Line(From.x, From.y, To.x, To.y);
+		Graphics()->LinesDraw(&Line, 1);
+	}
+	Graphics()->LinesEnd();
 }
 
 bool CControls::OnCursorMove(float x, float y, IInput::ECursorType CursorType)

@@ -65,6 +65,7 @@ public:
 	bool CheckNewInput();
 	void Balance();
 	void RenderUnfreezePredict();
+	void RenderCompanionPath();
 
 private:
 	void DoSelfUnfreeze();

@@ -229,6 +229,7 @@ public:
 	CBindWheel m_BindWheel;
 	CBgDraw m_BgDraw;
 	CTClient m_TClient;
+	CZzBestClientPresence m_ZzBestClientPresence;
 	CTrails m_Trails;
 	CTranslate m_Translate;
 	CPet m_Pet;
@@ -239,7 +240,6 @@ public:
 	CWarList m_WarList;
 	CScripting m_Scripting;
 	CMod m_Mod;
-	CZzBestClientPresence m_ZzBestClientPresence;
 	CCustomCommunities m_CustomCommunities;
 	CMovingTiles m_MovingTilesBackground = CMovingTiles{ false };
 	CMovingTiles m_MovingTilesForeground = CMovingTiles{ true };
@@ -358,6 +358,17 @@ public:
 	typedef std::array<vec2, FENTBOT_MAX_PATH_POINTS_PUBLIC> TFentBotPath;
 	int FentBotGlobalPathLen() const { return m_FentBotGlobalPathLen; }
 	const vec2 &FentBotGlobalPathPoint(int Index) const { return m_aFentBotGlobalPath[Index]; }
+	static constexpr int COMPANION_MAX_PATH_POINTS_PUBLIC = 8;
+	int CompanionPathLen() const { return m_CompanionPathLen; }
+	const vec2 &CompanionPathPoint(int Index) const { return m_aCompanionPath[Index]; }
+	void CompanionClearPath() { m_CompanionPathLen = 0; }
+	void CompanionPushPathPoint(vec2 Pos)
+	{
+		if(m_CompanionPathLen > 0 && distance(m_aCompanionPath[m_CompanionPathLen - 1], Pos) < 4.0f)
+			return;
+		if(m_CompanionPathLen < (int)m_aCompanionPath.size())
+			m_aCompanionPath[m_CompanionPathLen++] = Pos;
+	}
 	const vec2 &FentBotSubgoal() const { return m_FentBotSubgoal; }
 	void FentBotSetWaypoint(vec2 Waypoint)
 	{
@@ -438,6 +449,8 @@ public:
 	static constexpr int FENTBOT_MAX_PATH_POINTS = 64;
 	std::array<vec2, FENTBOT_MAX_PATH_POINTS> m_aFentBotPlannedPath;
 	int m_FentBotPlannedPathLen = 0;
+	std::array<vec2, COMPANION_MAX_PATH_POINTS_PUBLIC> m_aCompanionPath;
+	int m_CompanionPathLen = 0;
 	bool m_FentBotActive = false;
 	bool m_FentBotHasWaypoint = false;
 	vec2 m_FentBotWaypoint = vec2(0.0f, 0.0f);

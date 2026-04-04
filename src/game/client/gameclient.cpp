@@ -712,6 +712,2047 @@ bool CGameClient::FentBotPyInferAction(int DummyIndex, const vec2 &LocalPos, con
 	return true;
 }
 
+namespace
+{
+struct SCompanionLocalAction
+{
+	int m_Direction = 0;
+	bool m_Jump = false;
+	bool m_Hook = false;
+	bool m_HookOwner = false;
+	vec2 m_AimDir = vec2(0.0f, -1.0f);
+	vec2 m_HookPos = vec2(0.0f, 0.0f);
+};
+
+struct SCompanionLocalEval
+{
+	bool m_DummyDangerEnd = false;
+	bool m_OwnerDangerEnd = false;
+	bool m_DummySafeEnd = false;
+	bool m_HookedOwner = false;
+	bool m_HookedGround = false;
+	bool m_CanHammerOwnerEnd = false;
+	bool m_CanHookOwnerEnd = false;
+	vec2 m_DummyFinalPos = vec2(0.0f, 0.0f);
+	vec2 m_OwnerFinalPos = vec2(0.0f, 0.0f);
+};
+
+struct SCompanionAvoidEval
+{
+	bool m_HasDummyDanger = false;
+	int m_FirstDummyDangerTick = 999;
+	bool m_DummySafeEnd = false;
+	bool m_HookedOwner = false;
+	bool m_HookedGround = false;
+	bool m_CanHammerOwnerEnd = false;
+	bool m_CanHookOwnerEnd = false;
+	bool m_OwnerDangerEnd = false;
+	vec2 m_DummyFinalPos = vec2(0.0f, 0.0f);
+	vec2 m_OwnerFinalPos = vec2(0.0f, 0.0f);
+};
+
+struct SCompanionFightEval
+{
+	bool m_DummyDangerEnd = false;
+	bool m_DummySafeEnd = false;
+	bool m_HookedTarget = false;
+	bool m_HookedGround = false;
+	bool m_CanHammerTargetEnd = false;
+	bool m_CanHookTargetEnd = false;
+	vec2 m_DummyFinalPos = vec2(0.0f, 0.0f);
+	vec2 m_TargetFinalPos = vec2(0.0f, 0.0f);
+};
+
+bool CompanionDangerTile(int Tile)
+{
+	return Tile == TILE_FREEZE || Tile == TILE_DFREEZE || Tile == TILE_LFREEZE || Tile == TILE_DEATH;
+}
+
+bool CompanionDangerIndex(const CCollision *pCollision, int Index)
+{
+	if(!pCollision || Index < 0)
+		return false;
+
+	if(CompanionDangerTile(pCollision->GetTileIndex(Index)) ||
+		CompanionDangerTile(pCollision->GetFrontTileIndex(Index)) ||
+		CompanionDangerTile(pCollision->GetSwitchType(Index)))
+	{
+		return true;
+	}
+
+	return pCollision->IsTeleport(Index) != 0 ||
+		pCollision->IsEvilTeleport(Index) != 0 ||
+		pCollision->IsCheckTeleport(Index) ||
+		pCollision->IsCheckEvilTeleport(Index);
+}
+
+bool CompanionDangerPath(const CCollision *pCollision, vec2 From, vec2 To)
+{
+	if(!pCollision)
+		return false;
+
+	const int Samples = std::max(1, round_to_int(distance(From, To) / 6.0f));
+	for(int i = 0; i <= Samples; i++)
+	{
+		const float T = Samples > 0 ? (float)i / (float)Samples : 0.0f;
+		const vec2 Pos = mix(From, To, T);
+		if(CompanionDangerIndex(pCollision, pCollision->GetPureMapIndex(Pos)))
+			return true;
+	}
+	return false;
+}
+
+bool CompanionDangerPos(const CCollision *pCollision, vec2 Pos)
+{
+	return CompanionDangerIndex(pCollision, pCollision->GetPureMapIndex(Pos));
+}
+
+bool CompanionCharacterDanger(const CCollision *pCollision, const CCharacter *pCharacter)
+{
+	if(!pCharacter)
+		return true;
+	if(pCharacter->m_FreezeTime > 0 || pCharacter->Core()->m_FreezeEnd != 0 || pCharacter->Core()->m_IsInFreeze || pCharacter->Core()->m_DeepFrozen)
+		return true;
+	return CompanionDangerPos(pCollision, pCharacter->GetPos());
+}
+
+bool CompanionSafeStandPos(const CCollision *pCollision, vec2 Pos)
+{
+	if(!pCollision)
+		return false;
+
+	const vec2 aOffsets[] = {
+		vec2(0.0f, 0.0f),
+		vec2(0.0f, -14.0f),
+		vec2(0.0f, 14.0f),
+		vec2(-12.0f, 0.0f),
+		vec2(12.0f, 0.0f),
+	};
+
+	for(const vec2 &Offset : aOffsets)
+	{
+		const vec2 TestPos = Pos + Offset;
+		const int Index = pCollision->GetPureMapIndex(TestPos);
+		if(Index < 0)
+			return false;
+		if(CompanionDangerIndex(pCollision, Index))
+			return false;
+
+		const int Tile = pCollision->GetTileIndex(Index);
+		const int FrontTile = pCollision->GetFrontTileIndex(Index);
+		if(Tile == TILE_SOLID || Tile == TILE_NOHOOK || FrontTile == TILE_SOLID || FrontTile == TILE_NOHOOK)
+			return false;
+	}
+	return true;
+}
+
+bool CompanionFindNearestSafePos(const CCollision *pCollision, vec2 Center, vec2 BiasDir, vec2 *pOutPos)
+{
+	if(!pCollision || !pOutPos)
+		return false;
+
+	const int CenterIndex = pCollision->GetPureMapIndex(Center);
+	if(CenterIndex < 0)
+		return false;
+
+	const int W = pCollision->GetWidth();
+	const int H = pCollision->GetHeight();
+	const int Cx = CenterIndex % W;
+	const int Cy = CenterIndex / W;
+	const vec2 Bias = length(BiasDir) > 0.001f ? normalize(BiasDir) : vec2(0.0f, 0.0f);
+
+	bool Found = false;
+	float BestScore = 1e18f;
+	vec2 BestPos = Center;
+
+	for(int Radius = 0; Radius <= 6; Radius++)
+	{
+		for(int Dy = -Radius; Dy <= Radius; Dy++)
+		{
+			for(int Dx = -Radius; Dx <= Radius; Dx++)
+			{
+				if(Radius != 0 && absolute(Dx) != Radius && absolute(Dy) != Radius)
+					continue;
+
+				const int Tx = std::clamp(Cx + Dx, 0, std::max(0, W - 1));
+				const int Ty = std::clamp(Cy + Dy, 0, std::max(0, H - 1));
+				const vec2 Pos = vec2(Tx * 32.0f + 16.0f, Ty * 32.0f + 16.0f);
+				if(!CompanionSafeStandPos(pCollision, Pos))
+					continue;
+
+				float Score = distance(Pos, Center);
+				if(length(Bias) > 0.001f)
+				{
+					const vec2 Dir = normalize(Pos - Center);
+					Score -= dot(Dir, Bias) * 12.0f;
+				}
+				if(!Found || Score < BestScore)
+				{
+					Found = true;
+					BestScore = Score;
+					BestPos = Pos;
+				}
+			}
+		}
+		if(Found)
+			break;
+	}
+
+	if(!Found)
+		return false;
+
+	*pOutPos = BestPos;
+	return true;
+}
+
+bool CompanionBuildPathRoute(const CCollision *pCollision, vec2 StartPos, vec2 GoalPos, vec2 *pOutStep, vec2 *pOutPoints, int MaxPoints, int *pOutNumPoints)
+{
+	if(!pCollision || !pOutStep)
+		return false;
+
+	const int StartIndex = pCollision->GetPureMapIndex(StartPos);
+	const int GoalIndex = pCollision->GetPureMapIndex(GoalPos);
+	if(StartIndex < 0 || GoalIndex < 0)
+		return false;
+
+	auto WritePoints = [&](const std::vector<vec2> &vPoints) {
+		if(pOutNumPoints)
+			*pOutNumPoints = 0;
+		if(!pOutPoints || MaxPoints <= 0 || !pOutNumPoints)
+			return;
+		const int Count = std::min((int)vPoints.size(), MaxPoints);
+		for(int i = 0; i < Count; i++)
+			pOutPoints[i] = vPoints[i];
+		*pOutNumPoints = Count;
+	};
+
+	if(!CompanionDangerPath(pCollision, StartPos, GoalPos) && pCollision->IntersectLine(StartPos, GoalPos, nullptr, nullptr) == 0)
+	{
+		*pOutStep = GoalPos;
+		WritePoints({StartPos, GoalPos});
+		return true;
+	}
+
+	const int W = pCollision->GetWidth();
+	const int H = pCollision->GetHeight();
+	const int StartX = StartIndex % W;
+	const int StartY = StartIndex / W;
+	const int GoalX = GoalIndex % W;
+	const int GoalY = GoalIndex / W;
+	const int Margin = 10;
+	const int MinX = std::max(0, minimum(StartX, GoalX) - Margin);
+	const int MaxX = std::min(W - 1, maximum(StartX, GoalX) + Margin);
+	const int MinY = std::max(0, minimum(StartY, GoalY) - Margin);
+	const int MaxY = std::min(H - 1, maximum(StartY, GoalY) + Margin);
+	const int BoxW = MaxX - MinX + 1;
+	const int BoxH = MaxY - MinY + 1;
+	if(BoxW <= 0 || BoxH <= 0)
+		return false;
+
+	auto LocalIndex = [&](int X, int Y) {
+		return (Y - MinY) * BoxW + (X - MinX);
+	};
+	auto TileCenter = [&](int X, int Y) {
+		return vec2(X * 32.0f + 16.0f, Y * 32.0f + 16.0f);
+	};
+	auto Passable = [&](int X, int Y) {
+		if(X < MinX || X > MaxX || Y < MinY || Y > MaxY)
+			return false;
+		return CompanionSafeStandPos(pCollision, TileCenter(X, Y));
+	};
+
+	if(!Passable(StartX, StartY) || !Passable(GoalX, GoalY))
+		return false;
+
+	const int StartLocal = LocalIndex(StartX, StartY);
+	const int GoalLocal = LocalIndex(GoalX, GoalY);
+	std::vector<int> vParent(BoxW * BoxH, -1);
+	std::vector<int> vQueue;
+	vQueue.reserve(BoxW * BoxH);
+	vParent[StartLocal] = StartLocal;
+	vQueue.push_back(StartLocal);
+	size_t Head = 0;
+
+	while(Head < vQueue.size() && vParent[GoalLocal] == -1)
+	{
+		const int Cur = vQueue[Head++];
+		const int LocalX = Cur % BoxW;
+		const int LocalY = Cur / BoxW;
+		const int X = MinX + LocalX;
+		const int Y = MinY + LocalY;
+		static const int s_aDx[4] = {1, -1, 0, 0};
+		static const int s_aDy[4] = {0, 0, 1, -1};
+		for(int Dir = 0; Dir < 4; Dir++)
+		{
+			const int Nx = X + s_aDx[Dir];
+			const int Ny = Y + s_aDy[Dir];
+			if(!Passable(Nx, Ny))
+				continue;
+			const int Next = LocalIndex(Nx, Ny);
+			if(vParent[Next] != -1)
+				continue;
+			vParent[Next] = Cur;
+			vQueue.push_back(Next);
+		}
+	}
+
+	if(vParent[GoalLocal] == -1)
+		return false;
+
+	std::vector<int> vPath;
+	for(int Cur = GoalLocal;; Cur = vParent[Cur])
+	{
+		vPath.push_back(Cur);
+		if(Cur == StartLocal)
+			break;
+	}
+	std::reverse(vPath.begin(), vPath.end());
+
+	std::vector<vec2> vPoints;
+	vPoints.reserve(vPath.size() + 1);
+	vPoints.push_back(StartPos);
+	for(size_t i = 1; i < vPath.size(); i++)
+	{
+		const int Node = vPath[i];
+		const int NodeX = MinX + (Node % BoxW);
+		const int NodeY = MinY + (Node / BoxW);
+		vPoints.push_back(TileCenter(NodeX, NodeY));
+	}
+	if(vPoints.empty() || distance(vPoints.back(), GoalPos) > 4.0f)
+		vPoints.push_back(GoalPos);
+
+	vec2 Lookahead = vPoints.size() >= 2 ? vPoints[1] : GoalPos;
+	float Travel = 0.0f;
+	for(size_t i = 1; i < vPoints.size(); i++)
+	{
+		Travel += distance(vPoints[i - 1], vPoints[i]);
+		Lookahead = vPoints[i];
+		if(vPoints[i].y < StartPos.y - 10.0f || Travel >= 96.0f || i >= 4)
+			break;
+	}
+
+	*pOutStep = Lookahead;
+	WritePoints(vPoints);
+	return true;
+}
+
+bool CompanionBuildPathStep(const CCollision *pCollision, vec2 StartPos, vec2 GoalPos, vec2 *pOutStep)
+{
+	return CompanionBuildPathRoute(pCollision, StartPos, GoalPos, pOutStep, nullptr, 0, nullptr);
+}
+
+bool CompanionFindLocalViaPos(const CCollision *pCollision, vec2 StartPos, vec2 GoalPos, vec2 *pOutVia)
+{
+	if(!pCollision || !pOutVia)
+		return false;
+
+	if(!CompanionDangerPath(pCollision, StartPos, GoalPos) && pCollision->IntersectLine(StartPos, GoalPos, nullptr, nullptr) == 0)
+		return false;
+
+	const int StartIndex = pCollision->GetPureMapIndex(StartPos);
+	if(StartIndex < 0)
+		return false;
+
+	const int W = pCollision->GetWidth();
+	const int H = pCollision->GetHeight();
+	const int StartX = StartIndex % W;
+	const int StartY = StartIndex / W;
+	bool Found = false;
+	float BestScore = 1e18f;
+	vec2 BestPos = StartPos;
+
+	for(int Radius = 1; Radius <= 8; Radius++)
+	{
+		for(int Dy = -Radius; Dy <= Radius; Dy++)
+		{
+			for(int Dx = -Radius; Dx <= Radius; Dx++)
+			{
+				if(absolute(Dx) != Radius && absolute(Dy) != Radius)
+					continue;
+				const int Tx = std::clamp(StartX + Dx, 0, std::max(0, W - 1));
+				const int Ty = std::clamp(StartY + Dy, 0, std::max(0, H - 1));
+				const vec2 Pos = vec2(Tx * 32.0f + 16.0f, Ty * 32.0f + 16.0f);
+				if(!CompanionSafeStandPos(pCollision, Pos))
+					continue;
+				if(CompanionDangerPath(pCollision, StartPos, Pos))
+					continue;
+				if(pCollision->IntersectLine(StartPos, Pos, nullptr, nullptr) != 0)
+					continue;
+
+				const float Progress = distance(StartPos, GoalPos) - distance(Pos, GoalPos);
+				if(Progress < 12.0f)
+					continue;
+
+				float Score = distance(Pos, GoalPos) + distance(StartPos, Pos) * 0.30f;
+				if(pCollision->IntersectLine(Pos, GoalPos, nullptr, nullptr) == 0 && !CompanionDangerPath(pCollision, Pos, GoalPos))
+					Score -= 24.0f;
+				if(Pos.y > StartPos.y + 28.0f)
+					Score += 18.0f;
+				if(!Found || Score < BestScore)
+				{
+					Found = true;
+					BestScore = Score;
+					BestPos = Pos;
+				}
+			}
+		}
+		if(Found)
+			break;
+	}
+
+	if(!Found)
+		return false;
+
+	*pOutVia = BestPos;
+	return true;
+}
+
+float CompanionAnchorTravelScore(const CCollision *pCollision, vec2 StartPos, vec2 GoalPos)
+{
+	float Score = distance(StartPos, GoalPos);
+
+	vec2 StepPos;
+	if(CompanionBuildPathStep(pCollision, StartPos, GoalPos, &StepPos))
+	{
+		Score -= 22.0f;
+		Score += distance(StartPos, StepPos) * 0.10f;
+	}
+	else
+	{
+		vec2 ViaPos;
+		if(CompanionFindLocalViaPos(pCollision, StartPos, GoalPos, &ViaPos))
+		{
+			Score -= 8.0f;
+			Score += distance(StartPos, ViaPos) * 0.18f;
+		}
+		else
+		{
+			Score += 80.0f;
+		}
+	}
+
+	return Score;
+}
+
+int CompanionPredictDangerTick(CGameClient *pGameClient, int ClientId, int MaxTicks, vec2 *pOutDangerPos)
+{
+	if(!pGameClient || ClientId < 0)
+		return MaxTicks;
+
+	CGameWorld FutureWorld;
+	FutureWorld.CopyWorld(&pGameClient->m_RegularPredictedWorld);
+	const CCollision *pCollision = FutureWorld.Collision();
+	CCharacter *pCharacter = FutureWorld.GetCharacterById(ClientId);
+	if(!pCollision || !pCharacter)
+		return MaxTicks;
+
+	if(CompanionCharacterDanger(pCollision, pCharacter))
+	{
+		if(pOutDangerPos)
+			*pOutDangerPos = pCharacter->GetPos();
+		return 0;
+	}
+
+	for(int Tick = 0; Tick < MaxTicks; Tick++)
+	{
+		pCharacter = FutureWorld.GetCharacterById(ClientId);
+		if(!pCharacter)
+			break;
+		const vec2 PrevPos = pCharacter->GetPos();
+		FutureWorld.Tick();
+		pCharacter = FutureWorld.GetCharacterById(ClientId);
+		if(!pCharacter)
+			break;
+		if(CompanionCharacterDanger(pCollision, pCharacter) || CompanionDangerPath(pCollision, PrevPos, pCharacter->GetPos()))
+		{
+			if(pOutDangerPos)
+				*pOutDangerPos = pCharacter->GetPos();
+			return Tick + 1;
+		}
+	}
+
+	return MaxTicks;
+}
+
+float CompanionPointSegmentDistance(vec2 Point, vec2 From, vec2 To)
+{
+	const vec2 Segment = To - From;
+	const float LenSq = dot(Segment, Segment);
+	if(LenSq < 0.0001f)
+		return distance(Point, From);
+	float T = dot(Point - From, Segment) / LenSq;
+	T = std::clamp(T, 0.0f, 1.0f);
+	return distance(Point, From + Segment * T);
+}
+
+bool CompanionResolveHookTarget(CGameClient *pGameClient, vec2 DummyPos, vec2 AimDir, float HookLen, int OwnerCid, vec2 OwnerPos, bool AllowOwner, vec2 *pOutHookPos, bool *pOutHooksOwner)
+{
+	if(!pGameClient || !pOutHookPos || !pOutHooksOwner)
+		return false;
+
+	AimDir = length(AimDir) > 0.001f ? normalize(AimDir) : vec2(0.0f, -1.0f);
+	*pOutHooksOwner = false;
+
+	if(AllowOwner)
+	{
+		const vec2 SegmentEnd = DummyPos + AimDir * HookLen;
+		if(distance(DummyPos, OwnerPos) <= HookLen + CCharacterCore::PhysicalSize() &&
+			CompanionPointSegmentDistance(OwnerPos, DummyPos, SegmentEnd) <= CCharacterCore::PhysicalSize() * 1.15f)
+		{
+			if(pGameClient->Collision()->IntersectLine(DummyPos, OwnerPos, nullptr, nullptr) == 0)
+			{
+				*pOutHookPos = OwnerPos;
+				*pOutHooksOwner = true;
+				return true;
+			}
+		}
+	}
+
+	vec2 HitPos;
+	int TeleNr = 0;
+	const int Hit = pGameClient->Collision()->IntersectLineTeleHook(DummyPos, DummyPos + AimDir * HookLen, &HitPos, nullptr, &TeleNr);
+	if(Hit == 0 || Hit == TILE_NOHOOK || Hit == TILE_TELEINHOOK)
+		return false;
+	if(distance(DummyPos, HitPos) < 16.0f)
+		return false;
+
+	*pOutHookPos = HitPos;
+	return true;
+}
+
+bool CompanionCanHookOwnerFrom(CGameClient *pGameClient, vec2 FromPos, int OwnerCid, vec2 OwnerPos, float HookLen, vec2 *pOutAimDir)
+{
+	vec2 HookPos;
+	bool HooksOwner = false;
+	if(!CompanionResolveHookTarget(pGameClient, FromPos, OwnerPos - FromPos, HookLen, OwnerCid, OwnerPos, true, &HookPos, &HooksOwner) || !HooksOwner)
+		return false;
+	if(pOutAimDir)
+		*pOutAimDir = normalize(OwnerPos - FromPos);
+	return true;
+}
+
+bool CompanionCanHammerOwnerNow(CGameClient *pGameClient, int DummyCid, int OwnerCid, vec2 DummyPos, vec2 OwnerPos, vec2 *pOutAimDir)
+{
+	if(!pGameClient)
+		return false;
+	CCharacter *pDummyPredChar = pGameClient->m_RegularPredictedWorld.GetCharacterById(DummyCid);
+	if(!pDummyPredChar || !pDummyPredChar->CanCollide(OwnerCid))
+		return false;
+	const CCollision *pCollision = pGameClient->Collision();
+	if(!pCollision)
+		return false;
+
+	const float Prox = CCharacterCore::PhysicalSize();
+	if(distance(DummyPos, OwnerPos) > Prox * 2.65f)
+		return false;
+	const vec2 aAimPoints[] = {
+		OwnerPos,
+		OwnerPos + vec2(0.0f, Prox * 0.5f),
+		OwnerPos - vec2(0.0f, Prox * 0.5f),
+		OwnerPos + vec2(Prox * 0.35f, 0.0f),
+		OwnerPos - vec2(Prox * 0.35f, 0.0f),
+		OwnerPos + vec2(Prox * 0.22f, Prox * 0.35f),
+		OwnerPos + vec2(-Prox * 0.22f, Prox * 0.35f),
+		OwnerPos + vec2(Prox * 0.22f, -Prox * 0.35f),
+		OwnerPos + vec2(-Prox * 0.22f, -Prox * 0.35f),
+	};
+
+	for(const vec2 &AimPoint : aAimPoints)
+	{
+		vec2 Dir = AimPoint - DummyPos;
+		const float Dist = length(Dir);
+		if(Dist < 0.001f)
+			continue;
+		Dir *= 1.0f / Dist;
+		const vec2 ProbePos = DummyPos + Dir * Prox * 1.10f;
+		if(pCollision->IntersectLine(DummyPos, ProbePos, nullptr, nullptr) != 0)
+			continue;
+		for(const vec2 &TargetPoint : aAimPoints)
+		{
+			if(distance(ProbePos, TargetPoint) > Prox * 0.95f)
+				continue;
+			if(pOutAimDir)
+				*pOutAimDir = Dir;
+			return true;
+		}
+	}
+	return false;
+}
+
+bool CompanionFindHammerAnchor(CGameClient *pGameClient, vec2 DummyPos, int DummyCid, int OwnerCid, vec2 OwnerPos, vec2 *pOutAnchor)
+{
+	if(!pGameClient || !pOutAnchor)
+		return false;
+
+	const CCollision *pCollision = pGameClient->Collision();
+	if(!pCollision)
+		return false;
+
+	const int OwnerIndex = pCollision->GetPureMapIndex(OwnerPos);
+	if(OwnerIndex < 0)
+		return false;
+
+	const int W = pCollision->GetWidth();
+	const int H = pCollision->GetHeight();
+	const int CenterX = OwnerIndex % W;
+	const int CenterY = OwnerIndex / W;
+	bool Found = false;
+	float BestScore = 1e18f;
+	vec2 BestPos = DummyPos;
+
+	for(int Radius = 0; Radius <= 6; Radius++)
+	{
+		for(int Dy = -Radius; Dy <= Radius; Dy++)
+		{
+			for(int Dx = -Radius; Dx <= Radius; Dx++)
+			{
+				if(Radius != 0 && absolute(Dx) != Radius && absolute(Dy) != Radius)
+					continue;
+
+				const int Tx = std::clamp(CenterX + Dx, 0, std::max(0, W - 1));
+				const int Ty = std::clamp(CenterY + Dy, 0, std::max(0, H - 1));
+				const vec2 Pos = vec2(Tx * 32.0f + 16.0f, Ty * 32.0f + 16.0f);
+				if(!CompanionSafeStandPos(pCollision, Pos))
+					continue;
+
+				vec2 AimDir;
+				if(!CompanionCanHammerOwnerNow(pGameClient, DummyCid, OwnerCid, Pos, OwnerPos, &AimDir))
+					continue;
+
+				float Score = distance(Pos, DummyPos);
+				Score += distance(Pos, OwnerPos) * 0.35f;
+				if(Pos.y > OwnerPos.y + 28.0f)
+					Score += 18.0f;
+				if(Pos.y < OwnerPos.y - 8.0f)
+					Score -= 8.0f;
+				if(!Found || Score < BestScore)
+				{
+					Found = true;
+					BestScore = Score;
+					BestPos = Pos;
+				}
+			}
+		}
+		if(Found)
+			break;
+	}
+
+	if(!Found)
+		return false;
+
+	*pOutAnchor = BestPos;
+	return true;
+}
+
+bool CompanionFindFollowAnchor(CGameClient *pGameClient, vec2 DummyPos, vec2 OwnerPos, vec2 OwnerVel, float FollowRadius, float TrailDistance, vec2 *pOutAnchor)
+{
+	if(!pGameClient || !pOutAnchor)
+		return false;
+
+	const CCollision *pCollision = pGameClient->Collision();
+	if(!pCollision)
+		return false;
+
+	vec2 TrailDir = length(OwnerVel) > 0.001f ? normalize(OwnerVel) : normalize(OwnerPos - DummyPos);
+	if(length(TrailDir) < 0.001f)
+		TrailDir = vec2(1.0f, 0.0f);
+	const vec2 DesiredPos = OwnerPos - TrailDir * TrailDistance;
+
+	int DesiredIndex = pCollision->GetPureMapIndex(DesiredPos);
+	if(DesiredIndex < 0)
+		DesiredIndex = pCollision->GetPureMapIndex(OwnerPos);
+	if(DesiredIndex < 0)
+		return false;
+
+	const int W = pCollision->GetWidth();
+	const int H = pCollision->GetHeight();
+	const int CenterX = DesiredIndex % W;
+	const int CenterY = DesiredIndex / W;
+	bool Found = false;
+	float BestScore = 1e18f;
+	vec2 BestPos = OwnerPos;
+
+	for(int Radius = 0; Radius <= 10; Radius++)
+	{
+		for(int Dy = -Radius; Dy <= Radius; Dy++)
+		{
+			for(int Dx = -Radius; Dx <= Radius; Dx++)
+			{
+				if(Radius != 0 && absolute(Dx) != Radius && absolute(Dy) != Radius)
+					continue;
+
+				const int Tx = std::clamp(CenterX + Dx, 0, std::max(0, W - 1));
+				const int Ty = std::clamp(CenterY + Dy, 0, std::max(0, H - 1));
+				const vec2 Pos = vec2(Tx * 32.0f + 16.0f, Ty * 32.0f + 16.0f);
+				if(!CompanionSafeStandPos(pCollision, Pos))
+					continue;
+
+				const float DistToOwner = distance(Pos, OwnerPos);
+				if(DistToOwner > FollowRadius * 1.15f)
+					continue;
+
+				float Score = CompanionAnchorTravelScore(pCollision, DummyPos, Pos);
+				Score += distance(Pos, DesiredPos) * 0.90f;
+				Score += DistToOwner * 0.18f;
+				if(DistToOwner < 28.0f)
+					Score += (28.0f - DistToOwner) * 1.6f;
+
+				if(length(Pos - OwnerPos) > 0.001f)
+				{
+					const vec2 OwnerToPos = normalize(Pos - OwnerPos);
+					Score += maximum(0.0f, dot(OwnerToPos, TrailDir)) * 28.0f;
+					Score -= maximum(0.0f, -dot(OwnerToPos, TrailDir)) * 12.0f;
+				}
+
+				if(!CompanionDangerPath(pCollision, Pos, OwnerPos) && pCollision->IntersectLine(Pos, OwnerPos, nullptr, nullptr) == 0)
+					Score -= 12.0f;
+				if(Pos.y > OwnerPos.y + 36.0f)
+					Score += 10.0f;
+
+				if(!Found || Score < BestScore)
+				{
+					Found = true;
+					BestScore = Score;
+					BestPos = Pos;
+				}
+			}
+		}
+		if(Found)
+			break;
+	}
+
+	if(!Found)
+		return false;
+
+	*pOutAnchor = BestPos;
+	return true;
+}
+
+bool CompanionFindRescueAnchor(CGameClient *pGameClient, vec2 DummyPos, int OwnerCid, vec2 OwnerPos, float HookLen, vec2 *pOutAnchor)
+{
+	if(!pGameClient || !pOutAnchor)
+		return false;
+
+	const CCollision *pCollision = pGameClient->Collision();
+	if(!pCollision)
+		return false;
+
+	const int OwnerIndex = pCollision->GetPureMapIndex(OwnerPos);
+	if(OwnerIndex < 0)
+		return false;
+
+	const int W = pCollision->GetWidth();
+	const int H = pCollision->GetHeight();
+	const int CenterX = OwnerIndex % W;
+	const int CenterY = OwnerIndex / W;
+	bool Found = false;
+	float BestScore = 1e18f;
+	vec2 BestPos = DummyPos;
+
+	for(int Radius = 0; Radius <= 8; Radius++)
+	{
+		for(int Dy = -Radius; Dy <= Radius; Dy++)
+		{
+			for(int Dx = -Radius; Dx <= Radius; Dx++)
+			{
+				if(Radius != 0 && absolute(Dx) != Radius && absolute(Dy) != Radius)
+					continue;
+
+				const int Tx = std::clamp(CenterX + Dx, 0, std::max(0, W - 1));
+				const int Ty = std::clamp(CenterY + Dy, 0, std::max(0, H - 1));
+				const vec2 Pos = vec2(Tx * 32.0f + 16.0f, Ty * 32.0f + 16.0f);
+				if(!CompanionSafeStandPos(pCollision, Pos))
+					continue;
+
+				vec2 AimDir;
+				if(!CompanionCanHookOwnerFrom(pGameClient, Pos, OwnerCid, OwnerPos, HookLen, &AimDir))
+					continue;
+
+				float Score = distance(Pos, DummyPos);
+				Score += maximum(0.0f, 48.0f - distance(Pos, OwnerPos)) * 0.8f;
+				if(Pos.y < OwnerPos.y)
+					Score -= 20.0f;
+				if(Found && Score >= BestScore)
+					continue;
+				BestScore = Score;
+				BestPos = Pos;
+				Found = true;
+			}
+		}
+	}
+
+	if(!Found)
+		return false;
+	*pOutAnchor = BestPos;
+	return true;
+}
+
+bool CompanionFindFightTarget(CGameClient *pGameClient, int DummyCid, int OwnerCid, vec2 DummyPos, vec2 OwnerPos, float MaxDummyDist, float MaxOwnerDist, int *pOutTargetCid, vec2 *pOutTargetPos)
+{
+	if(!pGameClient || !pOutTargetCid || !pOutTargetPos)
+		return false;
+
+	const CCollision *pCollision = pGameClient->Collision();
+	CCharacter *pDummyChar = pGameClient->m_RegularPredictedWorld.GetCharacterById(DummyCid);
+	if(!pCollision || !pDummyChar)
+		return false;
+
+	bool Found = false;
+	float BestScore = 1e18f;
+	int BestCid = -1;
+	vec2 BestPos = DummyPos;
+
+	for(int ClientId = 0; ClientId < MAX_CLIENTS; ClientId++)
+	{
+		if(ClientId == DummyCid || ClientId == OwnerCid)
+			continue;
+
+		CCharacter *pTargetChar = pGameClient->m_RegularPredictedWorld.GetCharacterById(ClientId);
+		if(!pTargetChar || !pDummyChar->CanCollide(ClientId))
+			continue;
+		if(pTargetChar->m_FreezeTime > 0 || pTargetChar->Core()->m_FreezeEnd != 0 || pTargetChar->Core()->m_IsInFreeze || pTargetChar->Core()->m_DeepFrozen)
+			continue;
+
+		const vec2 TargetPos = pTargetChar->GetPos();
+		const float DistDummy = distance(DummyPos, TargetPos);
+		const float DistOwner = distance(OwnerPos, TargetPos);
+		if(DistDummy > MaxDummyDist || DistOwner > MaxOwnerDist)
+			continue;
+		if(pCollision->IntersectLine(DummyPos, TargetPos, nullptr, nullptr) != 0)
+			continue;
+		if(CompanionDangerPath(pCollision, DummyPos, TargetPos) && DistDummy > 96.0f)
+			continue;
+
+		float Score = DistDummy + DistOwner * 0.30f;
+		if(pGameClient->m_aClients[ClientId].m_Friend)
+			Score += 140.0f;
+		if(!Found || Score < BestScore)
+		{
+			Found = true;
+			BestScore = Score;
+			BestCid = ClientId;
+			BestPos = TargetPos;
+		}
+	}
+
+	if(!Found)
+		return false;
+
+	*pOutTargetCid = BestCid;
+	*pOutTargetPos = BestPos;
+	return true;
+}
+
+bool CompanionSimulateFightInput(CGameClient *pGameClient, int DummyCid, int TargetCid, const CNetObj_PlayerInput &Input, int Ticks, float HookLen, SCompanionFightEval *pEval)
+{
+	if(!pGameClient || !pEval)
+		return false;
+
+	CGameWorld SimWorld;
+	SimWorld.CopyWorld(&pGameClient->m_RegularPredictedWorld);
+	const CCollision *pCollision = SimWorld.Collision();
+	if(!pCollision)
+		return false;
+
+	for(int Tick = 0; Tick < Ticks; Tick++)
+	{
+		CCharacter *pDummy = SimWorld.GetCharacterById(DummyCid);
+		CCharacter *pTarget = SimWorld.GetCharacterById(TargetCid);
+		if(!pDummy || !pTarget)
+			return false;
+
+		const vec2 PrevDummyPos = pDummy->GetPos();
+		const vec2 PrevTargetPos = pTarget->GetPos();
+
+		pDummy->ResetInput();
+		pDummy->SetInput(&Input);
+
+		SimWorld.Tick();
+
+		pDummy = SimWorld.GetCharacterById(DummyCid);
+		pTarget = SimWorld.GetCharacterById(TargetCid);
+		if(!pDummy || !pTarget)
+			return false;
+
+		if(pDummy->Core()->HookedPlayer() == TargetCid)
+			pEval->m_HookedTarget = true;
+		if(pDummy->Core()->m_HookState == HOOK_GRABBED && pDummy->Core()->HookedPlayer() == -1)
+			pEval->m_HookedGround = true;
+
+		pEval->m_DummyFinalPos = pDummy->GetPos();
+		pEval->m_TargetFinalPos = pTarget->GetPos();
+		if(CompanionCharacterDanger(pCollision, pDummy) || CompanionDangerPath(pCollision, PrevDummyPos, pDummy->GetPos()))
+			pEval->m_DummyDangerEnd = true;
+
+		(void)PrevTargetPos;
+	}
+
+	pEval->m_DummySafeEnd = CompanionSafeStandPos(pCollision, pEval->m_DummyFinalPos);
+	vec2 AimDir;
+	pEval->m_CanHammerTargetEnd = CompanionCanHammerOwnerNow(pGameClient, DummyCid, TargetCid, pEval->m_DummyFinalPos, pEval->m_TargetFinalPos, &AimDir);
+	pEval->m_CanHookTargetEnd = CompanionCanHookOwnerFrom(pGameClient, pEval->m_DummyFinalPos, TargetCid, pEval->m_TargetFinalPos, HookLen, &AimDir);
+	return true;
+}
+
+bool CompanionBuildFightInput(CGameClient *pGameClient, int DummyCid, int OwnerCid, CNetObj_PlayerInput &Out)
+{
+	if(!pGameClient)
+		return false;
+
+	const CCollision *pCollision = pGameClient->Collision();
+	CCharacter *pDummyChar = pGameClient->m_RegularPredictedWorld.GetCharacterById(DummyCid);
+	CCharacter *pOwnerChar = pGameClient->m_RegularPredictedWorld.GetCharacterById(OwnerCid);
+	if(!pCollision || !pDummyChar || !pOwnerChar)
+		return false;
+
+	const vec2 DummyPos = pDummyChar->GetPos();
+	const vec2 OwnerPos = pOwnerChar->GetPos();
+	const bool DummySafeNow = CompanionSafeStandPos(pCollision, DummyPos);
+	const vec2 DummyVel = pDummyChar->Core()->m_Vel;
+
+	int TargetCid = -1;
+	vec2 TargetPos;
+	if(!CompanionFindFightTarget(pGameClient, DummyCid, OwnerCid, DummyPos, OwnerPos, 420.0f, 480.0f, &TargetCid, &TargetPos))
+		return false;
+
+	const vec2 AimToTarget = TargetPos - DummyPos;
+	if(length(AimToTarget) < 0.001f)
+		return false;
+
+	auto OwnerWouldBeHit = [&](vec2 ToPos, float Radius) {
+		if(distance(DummyPos, OwnerPos) >= distance(DummyPos, ToPos) - 4.0f)
+			return false;
+		return CompanionPointSegmentDistance(OwnerPos, DummyPos, ToPos) <= Radius;
+	};
+
+	const float HookLen = (float)pGameClient->m_aTuning[1].m_HookLength;
+	const bool HammerReady = pDummyChar->GetReloadTimer() <= 0 && !pDummyChar->HammerHitDisabled();
+	vec2 HammerAimDir(0.0f, -1.0f);
+	const bool CanHammerTarget = HammerReady && CompanionCanHammerOwnerNow(pGameClient, DummyCid, TargetCid, DummyPos, TargetPos, &HammerAimDir);
+	vec2 HookAimDir(0.0f, -1.0f);
+	const bool CanHookTarget = CompanionCanHookOwnerFrom(pGameClient, DummyPos, TargetCid, TargetPos, HookLen, &HookAimDir);
+	const int FightDir = fabsf(TargetPos.x - DummyPos.x) > 10.0f ? (TargetPos.x > DummyPos.x ? 1 : -1) : 0;
+	const bool WantJump = TargetPos.y < DummyPos.y - 22.0f || DummyVel.y > 6.5f;
+
+	auto BuildInput = [&](int Direction, bool Jump, bool Hook, bool FireHammer, vec2 AimDir) {
+		CNetObj_PlayerInput Input = pGameClient->m_DummyInput;
+		Input.m_PlayerFlags = pGameClient->m_DummyInput.m_PlayerFlags;
+		Input.m_Direction = std::clamp(Direction, -1, 1);
+		Input.m_Jump = Jump ? 1 : 0;
+		Input.m_Hook = Hook ? 1 : 0;
+		Input.m_WantedWeapon = WEAPON_HAMMER + 1;
+		Input.m_NextWeapon = 0;
+		Input.m_PrevWeapon = 0;
+		AimDir = length(AimDir) > 0.001f ? normalize(AimDir) : vec2(0.0f, -1.0f);
+		Input.m_TargetX = round_to_int(AimDir.x * 1000.0f);
+		Input.m_TargetY = round_to_int(AimDir.y * 1000.0f);
+		if(Input.m_TargetX == 0 && Input.m_TargetY == 0)
+			Input.m_TargetY = -1;
+		if(FireHammer)
+		{
+			int Fire = pGameClient->m_DummyInput.m_Fire;
+			Fire = (Fire + 2) | 1;
+			Fire &= INPUT_STATE_MASK;
+			Input.m_Fire = Fire;
+		}
+		else
+		{
+			Input.m_Fire = 0;
+		}
+		return Input;
+	};
+
+	struct SFightCandidate
+	{
+		CNetObj_PlayerInput m_Input;
+		float m_Bias = 0.0f;
+		bool m_UsesHammer = false;
+	};
+	std::vector<SFightCandidate> vCandidates;
+	vCandidates.reserve(24);
+	auto PushCandidate = [&](const CNetObj_PlayerInput &Input, float Bias, bool UsesHammer) {
+		for(const SFightCandidate &Existing : vCandidates)
+		{
+			if(Existing.m_Input.m_Direction != Input.m_Direction || Existing.m_Input.m_Jump != Input.m_Jump || Existing.m_Input.m_Hook != Input.m_Hook)
+				continue;
+			if(((Existing.m_Input.m_Fire & 1) != 0) != ((Input.m_Fire & 1) != 0))
+				continue;
+			const vec2 ExistingAim((float)Existing.m_Input.m_TargetX, (float)Existing.m_Input.m_TargetY);
+			const vec2 NewAim((float)Input.m_TargetX, (float)Input.m_TargetY);
+			if(distance(ExistingAim, NewAim) < 18.0f)
+				return;
+		}
+		vCandidates.push_back({Input, Bias, UsesHammer});
+	};
+
+	auto AddBlockHookCandidate = [&](vec2 AimDir, float Bias, bool PreferJump) {
+		vec2 HookPos;
+		bool HooksTarget = false;
+		if(!CompanionResolveHookTarget(pGameClient, DummyPos, AimDir, HookLen, TargetCid, TargetPos, false, &HookPos, &HooksTarget) || HooksTarget)
+			return;
+		if(OwnerWouldBeHit(HookPos, CCharacterCore::PhysicalSize() * 0.95f))
+			return;
+		const float HookDist = distance(DummyPos, HookPos);
+		if(HookDist < 18.0f || HookDist > HookLen + 4.0f)
+			return;
+		if(DummySafeNow && HookPos.y > DummyPos.y + 26.0f)
+			return;
+		const int MoveDir = FightDir != 0 ? FightDir : (HookPos.x > DummyPos.x ? 1 : (HookPos.x < DummyPos.x ? -1 : 0));
+		PushCandidate(BuildInput(MoveDir, PreferJump, true, false, HookPos - DummyPos), Bias, false);
+		PushCandidate(BuildInput(0, PreferJump, true, false, HookPos - DummyPos), Bias + 18.0f, false);
+	};
+
+	PushCandidate(BuildInput(FightDir, false, false, false, AimToTarget), 0.0f, false);
+	PushCandidate(BuildInput(0, false, false, false, AimToTarget), 14.0f, false);
+	if(WantJump)
+	{
+		PushCandidate(BuildInput(FightDir, true, false, false, AimToTarget), 8.0f, false);
+		PushCandidate(BuildInput(0, true, false, false, AimToTarget), 22.0f, false);
+	}
+
+	if(CanHammerTarget && !OwnerWouldBeHit(TargetPos, CCharacterCore::PhysicalSize() * 1.05f))
+	{
+		PushCandidate(BuildInput(FightDir, false, false, true, HammerAimDir), -220.0f, true);
+		PushCandidate(BuildInput(0, false, false, true, HammerAimDir), -160.0f, true);
+	}
+
+	if(CanHookTarget && DummySafeNow && !OwnerWouldBeHit(TargetPos, CCharacterCore::PhysicalSize() * 1.15f))
+	{
+		PushCandidate(BuildInput(FightDir, false, true, false, HookAimDir), -120.0f, false);
+		PushCandidate(BuildInput(0, false, true, false, HookAimDir), -78.0f, false);
+	}
+
+	AddBlockHookCandidate(vec2(0.0f, -1.0f), -34.0f, false);
+	AddBlockHookCandidate(normalize(vec2((float)FightDir * 0.35f, -1.0f)), -44.0f, false);
+	AddBlockHookCandidate(normalize(vec2((float)FightDir * 0.18f, -1.0f)), -28.0f, true);
+	AddBlockHookCandidate(AimToTarget, -18.0f, WantJump);
+
+	const float StartTargetDist = distance(DummyPos, TargetPos);
+	const float StartOwnerDist = distance(DummyPos, OwnerPos);
+	float BestScore = 1e18f;
+	bool Found = false;
+	CNetObj_PlayerInput BestInput = pGameClient->m_DummyInput;
+
+	for(const SFightCandidate &Candidate : vCandidates)
+	{
+		SCompanionFightEval Eval;
+		if(!CompanionSimulateFightInput(pGameClient, DummyCid, TargetCid, Candidate.m_Input, 8, HookLen, &Eval))
+			continue;
+
+		const float EndTargetDist = distance(Eval.m_DummyFinalPos, Eval.m_TargetFinalPos);
+		const float TargetProgress = StartTargetDist - EndTargetDist;
+		const float OwnerDistEnd = distance(Eval.m_DummyFinalPos, OwnerPos);
+
+		float Score = EndTargetDist * 1.45f;
+		Score -= TargetProgress * 3.2f;
+		Score += Candidate.m_Bias;
+		Score += OwnerDistEnd * 0.18f;
+
+		if(Eval.m_DummyDangerEnd)
+			Score += 3400.0f;
+		if(!Eval.m_DummySafeEnd)
+			Score += 260.0f;
+		if(OwnerDistEnd > StartOwnerDist + 110.0f)
+			Score += 180.0f;
+		if(Candidate.m_Input.m_Jump != 0)
+			Score += 18.0f;
+		if(Candidate.m_Input.m_Hook != 0)
+			Score += 14.0f;
+		if(Candidate.m_Input.m_Hook != 0 && !Eval.m_HookedTarget && !Eval.m_HookedGround && !Eval.m_CanHammerTargetEnd && !Eval.m_CanHookTargetEnd)
+			Score += 135.0f;
+		if(Eval.m_HookedTarget)
+			Score -= 165.0f;
+		if(Eval.m_HookedTarget && Eval.m_HookedGround)
+			Score -= 80.0f;
+		if(Eval.m_CanHammerTargetEnd)
+			Score -= 210.0f;
+		else if(Eval.m_CanHookTargetEnd)
+			Score -= 95.0f;
+		if(Candidate.m_UsesHammer)
+			Score -= 95.0f;
+		if(DummySafeNow && Candidate.m_Input.m_Jump != 0 && !Eval.m_CanHammerTargetEnd && !Eval.m_HookedTarget)
+			Score += 44.0f;
+		if(Candidate.m_Input.m_Hook != 0 && !Eval.m_HookedGround && !Eval.m_HookedTarget && Candidate.m_Input.m_TargetY > -350)
+			Score += 46.0f;
+
+		if(!Found || Score < BestScore)
+		{
+			Found = true;
+			BestScore = Score;
+			BestInput = Candidate.m_Input;
+		}
+	}
+
+	if(!Found)
+		return false;
+
+	Out = BestInput;
+	return true;
+}
+
+bool CompanionSimulateAction(CGameClient *pGameClient, int DummyCid, int OwnerCid, const CNetObj_PlayerInput &BaseInput, const SCompanionLocalAction &Action, int Ticks, float HookLen, bool DummyDangerStart, bool OwnerDangerStart, SCompanionLocalEval *pEval)
+{
+	if(!pGameClient || !pEval)
+		return false;
+
+	CGameWorld SimWorld;
+	SimWorld.CopyWorld(&pGameClient->m_RegularPredictedWorld);
+	const CCollision *pCollision = SimWorld.Collision();
+
+	for(int Tick = 0; Tick < Ticks; Tick++)
+	{
+		CCharacter *pDummy = SimWorld.GetCharacterById(DummyCid);
+		CCharacter *pOwner = SimWorld.GetCharacterById(OwnerCid);
+		if(!pDummy || !pOwner)
+			return false;
+
+		const vec2 PrevDummyPos = pDummy->GetPos();
+		const vec2 PrevOwnerPos = pOwner->GetPos();
+
+		CNetObj_PlayerInput Input = BaseInput;
+		Input.m_Direction = Action.m_Direction;
+		Input.m_Jump = Action.m_Jump ? 1 : 0;
+		Input.m_Hook = Action.m_Hook ? 1 : 0;
+
+		vec2 Aim = Action.m_AimDir;
+		if(Action.m_Hook)
+		{
+			if(Action.m_HookOwner)
+				Aim = pOwner->GetPos() - pDummy->GetPos();
+			else
+				Aim = Action.m_HookPos - pDummy->GetPos();
+		}
+		if(length(Aim) < 0.001f)
+			Aim = vec2(0.0f, -1.0f);
+		Input.m_TargetX = round_to_int(Aim.x);
+		Input.m_TargetY = round_to_int(Aim.y);
+		if(Input.m_TargetX == 0 && Input.m_TargetY == 0)
+			Input.m_TargetY = -1;
+
+		pDummy->OnDirectInput(&Input);
+		SimWorld.m_GameTick++;
+		pDummy->OnPredictedInput(&Input);
+		SimWorld.Tick();
+
+		pDummy = SimWorld.GetCharacterById(DummyCid);
+		pOwner = SimWorld.GetCharacterById(OwnerCid);
+		if(!pDummy || !pOwner)
+			return false;
+
+		if(pDummy->Core()->HookedPlayer() == OwnerCid)
+			pEval->m_HookedOwner = true;
+		if(pDummy->Core()->m_HookState == HOOK_GRABBED && pDummy->Core()->HookedPlayer() == -1)
+			pEval->m_HookedGround = true;
+
+		const bool DummyDangerNow = CompanionCharacterDanger(pCollision, pDummy) || CompanionDangerPath(pCollision, PrevDummyPos, pDummy->GetPos());
+		const bool OwnerDangerNow = CompanionCharacterDanger(pCollision, pOwner) || CompanionDangerPath(pCollision, PrevOwnerPos, pOwner->GetPos());
+
+		if(DummyDangerNow && !DummyDangerStart)
+			return false;
+		if(OwnerDangerNow && !OwnerDangerStart)
+			return false;
+
+		pEval->m_DummyDangerEnd = DummyDangerNow;
+		pEval->m_OwnerDangerEnd = OwnerDangerNow;
+		pEval->m_DummyFinalPos = pDummy->GetPos();
+		pEval->m_OwnerFinalPos = pOwner->GetPos();
+	}
+
+	pEval->m_DummySafeEnd = CompanionSafeStandPos(pCollision, pEval->m_DummyFinalPos);
+	vec2 RescueAim;
+	pEval->m_CanHammerOwnerEnd = CompanionCanHammerOwnerNow(pGameClient, DummyCid, OwnerCid, pEval->m_DummyFinalPos, pEval->m_OwnerFinalPos, &RescueAim);
+	pEval->m_CanHookOwnerEnd = CompanionCanHookOwnerFrom(pGameClient, pEval->m_DummyFinalPos, OwnerCid, pEval->m_OwnerFinalPos, HookLen, &RescueAim);
+
+	return true;
+}
+
+bool CompanionSimulateConstantInput(CGameClient *pGameClient, int DummyCid, int OwnerCid, const CNetObj_PlayerInput &BaseInput, int Ticks, float HookLen, SCompanionAvoidEval *pEval)
+{
+	if(!pGameClient || !pEval)
+		return false;
+
+	CGameWorld SimWorld;
+	SimWorld.CopyWorld(&pGameClient->m_RegularPredictedWorld);
+	const CCollision *pCollision = SimWorld.Collision();
+	if(!pCollision)
+		return false;
+
+	CNetObj_PlayerInput Input = BaseInput;
+	if(Input.m_TargetX == 0 && Input.m_TargetY == 0)
+		Input.m_TargetY = -1;
+
+	for(int Tick = 0; Tick < Ticks; Tick++)
+	{
+		CCharacter *pDummy = SimWorld.GetCharacterById(DummyCid);
+		CCharacter *pOwner = SimWorld.GetCharacterById(OwnerCid);
+		if(!pDummy || !pOwner)
+			return false;
+
+		const vec2 PrevDummyPos = pDummy->GetPos();
+		const vec2 PrevOwnerPos = pOwner->GetPos();
+
+		pDummy->OnDirectInput(&Input);
+		SimWorld.m_GameTick++;
+		pDummy->OnPredictedInput(&Input);
+		SimWorld.Tick();
+
+		pDummy = SimWorld.GetCharacterById(DummyCid);
+		pOwner = SimWorld.GetCharacterById(OwnerCid);
+		if(!pDummy || !pOwner)
+			return false;
+
+		if(pDummy->Core()->HookedPlayer() == OwnerCid)
+			pEval->m_HookedOwner = true;
+		if(pDummy->Core()->m_HookState == HOOK_GRABBED && pDummy->Core()->HookedPlayer() == -1)
+			pEval->m_HookedGround = true;
+
+		const bool DummyDangerNow = CompanionCharacterDanger(pCollision, pDummy) || CompanionDangerPath(pCollision, PrevDummyPos, pDummy->GetPos());
+		const bool OwnerDangerNow = CompanionCharacterDanger(pCollision, pOwner) || CompanionDangerPath(pCollision, PrevOwnerPos, pOwner->GetPos());
+		if(DummyDangerNow && !pEval->m_HasDummyDanger)
+		{
+			pEval->m_HasDummyDanger = true;
+			pEval->m_FirstDummyDangerTick = Tick + 1;
+		}
+		pEval->m_OwnerDangerEnd = OwnerDangerNow;
+		pEval->m_DummyFinalPos = pDummy->GetPos();
+		pEval->m_OwnerFinalPos = pOwner->GetPos();
+	}
+
+	pEval->m_DummySafeEnd = CompanionSafeStandPos(pCollision, pEval->m_DummyFinalPos);
+	vec2 RescueAim;
+	pEval->m_CanHammerOwnerEnd = CompanionCanHammerOwnerNow(pGameClient, DummyCid, OwnerCid, pEval->m_DummyFinalPos, pEval->m_OwnerFinalPos, &RescueAim);
+	pEval->m_CanHookOwnerEnd = CompanionCanHookOwnerFrom(pGameClient, pEval->m_DummyFinalPos, OwnerCid, pEval->m_OwnerFinalPos, HookLen, &RescueAim);
+	return true;
+}
+
+bool CompanionApplyAvoidRefine(CGameClient *pGameClient, int DummyCid, int OwnerCid, vec2 GoalPos, bool OwnerDangerMode, CNetObj_PlayerInput &InOut)
+{
+	if(!pGameClient)
+		return false;
+
+	const CCollision *pCollision = pGameClient->Collision();
+	CCharacter *pDummyChar = pGameClient->m_RegularPredictedWorld.GetCharacterById(DummyCid);
+	CCharacter *pOwnerChar = pGameClient->m_RegularPredictedWorld.GetCharacterById(OwnerCid);
+	if(!pCollision || !pDummyChar || !pOwnerChar)
+		return false;
+
+	const vec2 DummyPos = pDummyChar->GetPos();
+	const vec2 OwnerPos = pOwnerChar->GetPos();
+	const vec2 GoalDir = length(GoalPos - DummyPos) > 0.001f ? normalize(GoalPos - DummyPos) : vec2(0.0f, -1.0f);
+	const float HookLen = (float)pGameClient->m_aTuning[1].m_HookLength;
+	const int SimTicks = OwnerDangerMode ? 12 : 10;
+
+	SCompanionAvoidEval BaseEval;
+	if(!CompanionSimulateConstantInput(pGameClient, DummyCid, OwnerCid, InOut, SimTicks, HookLen, &BaseEval))
+		return false;
+
+	if(OwnerDangerMode && (BaseEval.m_HookedOwner || BaseEval.m_CanHammerOwnerEnd || BaseEval.m_CanHookOwnerEnd))
+		return false;
+
+	const bool NeedRefine = BaseEval.m_HasDummyDanger || (!BaseEval.m_DummySafeEnd && OwnerDangerMode);
+	if(!NeedRefine)
+		return false;
+
+	struct SCandidate
+	{
+		CNetObj_PlayerInput m_Input;
+		float m_Bias = 0.0f;
+	};
+	std::vector<SCandidate> vCandidates;
+	vCandidates.reserve(24);
+
+	auto PushCandidate = [&](const CNetObj_PlayerInput &Input, float Bias) {
+		for(const SCandidate &Existing : vCandidates)
+		{
+			if(Existing.m_Input.m_Direction != Input.m_Direction || Existing.m_Input.m_Jump != Input.m_Jump || Existing.m_Input.m_Hook != Input.m_Hook)
+				continue;
+			const vec2 ExistingAim((float)Existing.m_Input.m_TargetX, (float)Existing.m_Input.m_TargetY);
+			const vec2 NewAim((float)Input.m_TargetX, (float)Input.m_TargetY);
+			if(distance(ExistingAim, NewAim) < 18.0f)
+				return;
+		}
+		vCandidates.push_back({Input, Bias});
+	};
+
+	auto BuildInput = [&](int Direction, int Jump, int Hook, const vec2 *pAimDir) {
+		CNetObj_PlayerInput Candidate = InOut;
+		Candidate.m_Direction = std::clamp(Direction, -1, 1);
+		Candidate.m_Jump = Jump ? 1 : 0;
+		Candidate.m_Hook = Hook ? 1 : 0;
+		if(pAimDir)
+		{
+			vec2 Aim = length(*pAimDir) > 0.001f ? normalize(*pAimDir) : vec2(0.0f, -1.0f);
+			Candidate.m_TargetX = round_to_int(Aim.x * 1000.0f);
+			Candidate.m_TargetY = round_to_int(Aim.y * 1000.0f);
+		}
+		if(Candidate.m_TargetX == 0 && Candidate.m_TargetY == 0)
+			Candidate.m_TargetY = -1;
+		return Candidate;
+	};
+
+	PushCandidate(InOut, 0.0f);
+	PushCandidate(BuildInput(InOut.m_Direction, 0, 0, nullptr), 12.0f);
+	PushCandidate(BuildInput(0, 0, 0, nullptr), 18.0f);
+	PushCandidate(BuildInput(fabsf(GoalPos.x - DummyPos.x) > 8.0f ? (GoalPos.x > DummyPos.x ? 1 : -1) : 0, 0, 0, &GoalDir), 10.0f);
+	PushCandidate(BuildInput(0, 0, InOut.m_Hook != 0 ? 0 : 1, &GoalDir), 20.0f);
+
+	const bool HasAirJump = (pDummyChar->Core()->m_Jumped & 2) == 0;
+	if(InOut.m_Jump != 0 || HasAirJump)
+		PushCandidate(BuildInput(InOut.m_Direction, 1, 0, &GoalDir), 26.0f);
+
+	auto AddHookAim = [&](vec2 AimDir, bool AllowOwner, float Bias) {
+		vec2 HookPos;
+		bool HooksOwner = false;
+		if(!CompanionResolveHookTarget(pGameClient, DummyPos, AimDir, HookLen, OwnerCid, OwnerPos, AllowOwner, &HookPos, &HooksOwner))
+			return;
+		if(!HooksOwner && distance(DummyPos, HookPos) > HookLen + 4.0f)
+			return;
+		const vec2 HookAim = HooksOwner ? (OwnerPos - DummyPos) : (HookPos - DummyPos);
+		PushCandidate(BuildInput(InOut.m_Direction, 0, 1, &HookAim), Bias);
+		PushCandidate(BuildInput(0, 0, 1, &HookAim), Bias + 4.0f);
+	};
+
+	AddHookAim(vec2(0.0f, -1.0f), false, 8.0f);
+	AddHookAim(normalize(vec2((GoalDir.x >= 0.0f ? 0.28f : -0.28f), -1.0f)), false, 10.0f);
+	AddHookAim(normalize(vec2((GoalDir.x >= 0.0f ? -0.28f : 0.28f), -1.0f)), false, 14.0f);
+	AddHookAim(GoalDir, false, 16.0f);
+	if(OwnerDangerMode)
+		AddHookAim(OwnerPos - DummyPos, true, 6.0f);
+
+	float BestScore = 1e18f;
+	bool FoundBetter = false;
+	CNetObj_PlayerInput BestInput = InOut;
+
+	for(const SCandidate &Candidate : vCandidates)
+	{
+		SCompanionAvoidEval Eval;
+		if(!CompanionSimulateConstantInput(pGameClient, DummyCid, OwnerCid, Candidate.m_Input, SimTicks, HookLen, &Eval))
+			continue;
+
+		float Score = distance(Eval.m_DummyFinalPos, GoalPos);
+		if(Eval.m_HasDummyDanger)
+			Score += 3200.0f + (float)(SimTicks - Eval.m_FirstDummyDangerTick) * 160.0f;
+		if(!Eval.m_DummySafeEnd)
+			Score += 200.0f;
+		if(Candidate.m_Input.m_Hook != 0)
+			Score += 18.0f;
+		if(Candidate.m_Input.m_Jump != 0)
+			Score += 26.0f;
+		if(Candidate.m_Input.m_Hook != 0 && !Eval.m_HookedGround && !Eval.m_HookedOwner)
+			Score += 90.0f;
+		Score += Candidate.m_Bias;
+
+		if(OwnerDangerMode)
+		{
+			Score += distance(Eval.m_OwnerFinalPos, GoalPos) * 0.35f;
+			if(Eval.m_OwnerDangerEnd)
+				Score += 180.0f;
+			if(Eval.m_HookedOwner)
+				Score -= 85.0f;
+			if(Eval.m_CanHammerOwnerEnd)
+				Score -= 180.0f;
+			else if(Eval.m_CanHookOwnerEnd)
+				Score -= 120.0f;
+			else
+				Score += 120.0f;
+			if(BaseEval.m_HookedOwner && !Eval.m_HookedOwner)
+				Score += 260.0f;
+		}
+
+		if(Eval.m_HasDummyDanger != BaseEval.m_HasDummyDanger)
+			Score += Eval.m_HasDummyDanger ? 900.0f : -900.0f;
+		else if(Eval.m_HasDummyDanger && BaseEval.m_HasDummyDanger)
+			Score += (float)(BaseEval.m_FirstDummyDangerTick - Eval.m_FirstDummyDangerTick) * 140.0f;
+
+		if(Score + 0.001f < BestScore)
+		{
+			BestScore = Score;
+			BestInput = Candidate.m_Input;
+			FoundBetter = true;
+		}
+	}
+
+	if(!FoundBetter)
+		return false;
+
+	InOut = BestInput;
+	return true;
+}
+
+bool CompanionBuildDirectRescueInput(CGameClient *pGameClient, int DummyCid, int OwnerCid, vec2 RescueTargetPos, CNetObj_PlayerInput &Out)
+{
+	if(!pGameClient)
+		return false;
+
+	const CCollision *pCollision = pGameClient->Collision();
+	CCharacter *pDummyChar = pGameClient->m_RegularPredictedWorld.GetCharacterById(DummyCid);
+	CCharacter *pOwnerChar = pGameClient->m_RegularPredictedWorld.GetCharacterById(OwnerCid);
+	if(!pCollision || !pDummyChar || !pOwnerChar)
+		return false;
+
+	const vec2 DummyPos = pDummyChar->GetPos();
+	const vec2 OwnerPos = pOwnerChar->GetPos();
+	const float HookLen = (float)pGameClient->m_aTuning[1].m_HookLength;
+	const bool DummySafeNow = CompanionSafeStandPos(pCollision, DummyPos);
+	const bool HookingOwnerNow = pDummyChar->Core()->HookedPlayer() == OwnerCid;
+	const bool HammerReady = pDummyChar->GetReloadTimer() <= 0 && !pDummyChar->HammerHitDisabled();
+	const bool OwnerFrozenStart = pOwnerChar->m_FreezeTime > 0 || pOwnerChar->Core()->m_FreezeEnd != 0 || pOwnerChar->Core()->m_IsInFreeze || pOwnerChar->Core()->m_DeepFrozen;
+	const bool OwnerBelowDummy = OwnerPos.y > DummyPos.y + 14.0f;
+	const bool OwnerCloseNow = distance(DummyPos, OwnerPos) < HookLen * 0.72f;
+	const int DirToOwner = fabsf(OwnerPos.x - DummyPos.x) > 10.0f ? (OwnerPos.x > DummyPos.x ? 1 : -1) : 0;
+
+	vec2 HammerAimDir(0.0f, -1.0f);
+	const bool CanHammerOwnerNow = HammerReady && CompanionCanHammerOwnerNow(pGameClient, DummyCid, OwnerCid, DummyPos, OwnerPos, &HammerAimDir);
+	vec2 HookOwnerAimDir(0.0f, -1.0f);
+	const bool CanHookOwnerNow = CompanionCanHookOwnerFrom(pGameClient, DummyPos, OwnerCid, OwnerPos, HookLen, &HookOwnerAimDir);
+	const bool PreferHammerRescue = DummySafeNow && CanHammerOwnerNow;
+	const float RescueDistStart = distance(OwnerPos, RescueTargetPos);
+
+	const int DirToTarget = fabsf(RescueTargetPos.x - DummyPos.x) > 10.0f ? (RescueTargetPos.x > DummyPos.x ? 1 : -1) : 0;
+	const int AwayFromOwner = fabsf(DummyPos.x - OwnerPos.x) > 10.0f ? (DummyPos.x > OwnerPos.x ? 1 : -1) : 0;
+	const int RescueDir = AwayFromOwner != 0 ? AwayFromOwner : DirToTarget;
+
+	auto BuildInput = [&](int Direction, bool Jump, bool Hook, bool FireHammer, vec2 AimDir) {
+		CNetObj_PlayerInput Input = pGameClient->m_DummyInput;
+		Input.m_PlayerFlags = pGameClient->m_DummyInput.m_PlayerFlags;
+		Input.m_Direction = std::clamp(Direction, -1, 1);
+		Input.m_Jump = Jump ? 1 : 0;
+		Input.m_Hook = Hook ? 1 : 0;
+		Input.m_WantedWeapon = WEAPON_HAMMER + 1;
+		Input.m_NextWeapon = 0;
+		Input.m_PrevWeapon = 0;
+		AimDir = length(AimDir) > 0.001f ? normalize(AimDir) : vec2(0.0f, -1.0f);
+		Input.m_TargetX = round_to_int(AimDir.x * 1000.0f);
+		Input.m_TargetY = round_to_int(AimDir.y * 1000.0f);
+		if(Input.m_TargetX == 0 && Input.m_TargetY == 0)
+			Input.m_TargetY = -1;
+		if(FireHammer)
+		{
+			int Fire = pGameClient->m_DummyInput.m_Fire;
+			Fire = (Fire + 2) | 1;
+			Fire &= INPUT_STATE_MASK;
+			Input.m_Fire = Fire;
+		}
+		else
+		{
+			Input.m_Fire = 0;
+		}
+		return Input;
+	};
+
+	struct SRescueCandidate
+	{
+		CNetObj_PlayerInput m_Input;
+		float m_Bias = 0.0f;
+		bool m_UsesHammer = false;
+	};
+	std::vector<SRescueCandidate> vCandidates;
+	vCandidates.reserve(24);
+	auto PushCandidate = [&](const CNetObj_PlayerInput &Input, float Bias, bool UsesHammer) {
+		for(const SRescueCandidate &Existing : vCandidates)
+		{
+			if(Existing.m_Input.m_Direction != Input.m_Direction || Existing.m_Input.m_Jump != Input.m_Jump || Existing.m_Input.m_Hook != Input.m_Hook)
+				continue;
+			if(((Existing.m_Input.m_Fire & 1) != 0) != ((Input.m_Fire & 1) != 0))
+				continue;
+			const vec2 ExistingAim((float)Existing.m_Input.m_TargetX, (float)Existing.m_Input.m_TargetY);
+			const vec2 NewAim((float)Input.m_TargetX, (float)Input.m_TargetY);
+			if(distance(ExistingAim, NewAim) < 18.0f)
+				return;
+		}
+		vCandidates.push_back({Input, Bias, UsesHammer});
+	};
+
+	auto AddBlockHookCandidate = [&](vec2 AimDir, float Bias, bool PreferJump) {
+		vec2 HookPos;
+		bool HooksOwner = false;
+		if(!CompanionResolveHookTarget(pGameClient, DummyPos, AimDir, HookLen, OwnerCid, OwnerPos, false, &HookPos, &HooksOwner) || HooksOwner)
+			return;
+
+		const float HookDist = distance(DummyPos, HookPos);
+		if(HookDist < 20.0f || HookDist > HookLen + 4.0f)
+			return;
+		if(DummySafeNow && HookPos.y > DummyPos.y + 18.0f)
+			return;
+		if(HookPos.y > DummyPos.y + 56.0f)
+			return;
+
+		const vec2 HookAim = HookPos - DummyPos;
+		const int MoveDir = RescueDir != 0 ? RescueDir : (HookPos.x > DummyPos.x ? 1 : (HookPos.x < DummyPos.x ? -1 : 0));
+		PushCandidate(BuildInput(MoveDir, PreferJump, true, false, HookAim), Bias, false);
+		PushCandidate(BuildInput(0, PreferJump, true, false, HookAim), Bias + 18.0f, false);
+	};
+
+	if(CanHammerOwnerNow)
+	{
+		PushCandidate(BuildInput(0, false, false, true, HammerAimDir), -220.0f, true);
+		PushCandidate(BuildInput(RescueDir, false, false, true, HammerAimDir), -180.0f, true);
+		if(DirToOwner != 0)
+			PushCandidate(BuildInput(DirToOwner, false, false, true, HammerAimDir), -205.0f, true);
+	}
+
+	if((HookingOwnerNow || CanHookOwnerNow) && !PreferHammerRescue)
+	{
+		const vec2 AimDir = OwnerPos - DummyPos;
+		PushCandidate(BuildInput(RescueDir, false, true, false, AimDir), -150.0f, false);
+		PushCandidate(BuildInput(0, false, true, false, AimDir), -100.0f, false);
+		if(!DummySafeNow)
+			PushCandidate(BuildInput(RescueDir, true, true, false, AimDir), -60.0f, false);
+	}
+
+	if(HookingOwnerNow && !PreferHammerRescue)
+		PushCandidate(BuildInput(RescueDir, false, false, false, OwnerPos - DummyPos), 30.0f, false);
+
+	if(OwnerFrozenStart || OwnerCloseNow || DummySafeNow)
+	{
+		if(DirToOwner != 0)
+			PushCandidate(BuildInput(DirToOwner, false, false, false, OwnerPos - DummyPos), OwnerFrozenStart ? -140.0f : -62.0f, false);
+		PushCandidate(BuildInput(RescueDir, false, false, false, OwnerPos - DummyPos), OwnerFrozenStart ? -110.0f : -48.0f, false);
+		PushCandidate(BuildInput(DirToTarget, false, false, false, RescueTargetPos - DummyPos), OwnerFrozenStart ? -88.0f : -36.0f, false);
+		PushCandidate(BuildInput(0, false, false, false, OwnerPos - DummyPos), OwnerFrozenStart ? -42.0f : -12.0f, false);
+		if(OwnerBelowDummy && !DummySafeNow)
+			PushCandidate(BuildInput(RescueDir, false, false, false, vec2(0.0f, -1.0f)), -18.0f, false);
+	}
+
+	if(!PreferHammerRescue)
+	{
+		AddBlockHookCandidate(vec2(0.0f, -1.0f), -120.0f, false);
+		AddBlockHookCandidate(normalize(vec2(0.35f, -1.0f)), -96.0f, false);
+		AddBlockHookCandidate(normalize(vec2(-0.35f, -1.0f)), -96.0f, false);
+		AddBlockHookCandidate(RescueTargetPos - DummyPos, -82.0f, false);
+		AddBlockHookCandidate(OwnerPos - DummyPos, -70.0f, false);
+		if(!DummySafeNow)
+		{
+			AddBlockHookCandidate(normalize(vec2(0.20f, -1.0f)), -58.0f, true);
+			AddBlockHookCandidate(normalize(vec2(-0.20f, -1.0f)), -58.0f, true);
+		}
+	}
+
+	const int RescueSimTicks = OwnerFrozenStart ? 18 : 14;
+
+	auto EvaluateRescueScore = [&](const CNetObj_PlayerInput &Input, float Bias, bool UsesHammer, float *pOutScore) {
+		SCompanionAvoidEval Eval;
+		if(!CompanionSimulateConstantInput(pGameClient, DummyCid, OwnerCid, Input, RescueSimTicks, HookLen, &Eval))
+			return false;
+
+		const float RescueDistEnd = distance(Eval.m_OwnerFinalPos, RescueTargetPos);
+		const float RescueProgress = RescueDistStart - RescueDistEnd;
+		const float DummyMoveDist = distance(Eval.m_DummyFinalPos, DummyPos);
+		const float DummyDrop = Eval.m_DummyFinalPos.y - DummyPos.y;
+		const bool RescueReadyEnd = Eval.m_CanHammerOwnerEnd || Eval.m_CanHookOwnerEnd;
+		const bool StableDragEnd = Eval.m_HookedOwner && Eval.m_HookedGround && Eval.m_DummySafeEnd;
+
+		float Score = RescueDistEnd * 1.25f;
+		Score += distance(Eval.m_DummyFinalPos, RescueTargetPos) * 0.20f;
+		Score -= RescueProgress * 5.4f;
+		Score += Bias;
+
+		if(Eval.m_HasDummyDanger)
+			Score += 6400.0f + (float)(RescueSimTicks - Eval.m_FirstDummyDangerTick) * 260.0f;
+		if(!Eval.m_DummySafeEnd)
+			Score += 760.0f;
+		if(Eval.m_OwnerDangerEnd)
+		{
+			float CarryPenalty = 520.0f;
+			if(RescueProgress > 18.0f && Eval.m_DummySafeEnd && (StableDragEnd || RescueReadyEnd))
+				CarryPenalty *= 0.18f;
+			else if(RescueProgress > 10.0f && Eval.m_DummySafeEnd && (Eval.m_HookedOwner || RescueReadyEnd))
+				CarryPenalty *= 0.42f;
+			else if(RescueProgress > 5.0f && Eval.m_DummySafeEnd)
+				CarryPenalty *= 0.65f;
+			Score += CarryPenalty;
+		}
+		else
+		{
+			Score -= 260.0f;
+		}
+
+		if(Eval.m_HookedOwner)
+			Score -= 150.0f;
+		if(StableDragEnd)
+			Score -= 240.0f;
+		else if(Eval.m_HookedOwner && Eval.m_DummySafeEnd)
+			Score -= 105.0f;
+		if(Eval.m_CanHammerOwnerEnd)
+			Score -= 260.0f;
+		else if(Eval.m_CanHookOwnerEnd)
+			Score -= 175.0f;
+		if(Eval.m_HookedGround && RescueReadyEnd)
+			Score -= 65.0f;
+		if(UsesHammer)
+			Score -= 130.0f;
+
+		if((Input.m_Hook != 0) && !Eval.m_HookedOwner && !Eval.m_HookedGround && !RescueReadyEnd)
+			Score += 260.0f;
+		if(DummySafeNow)
+		{
+			if(Input.m_Jump != 0 && !StableDragEnd && !RescueReadyEnd)
+				Score += 340.0f;
+			if(DummyDrop > 12.0f && !StableDragEnd && !RescueReadyEnd)
+				Score += 280.0f + DummyDrop * 4.0f;
+			if(DummyMoveDist > 34.0f && RescueProgress < 6.0f && !StableDragEnd && !RescueReadyEnd)
+				Score += 260.0f;
+			if((Input.m_Hook != 0) && !Eval.m_HookedGround && !Eval.m_HookedOwner && RescueProgress < 6.0f)
+				Score += 220.0f;
+		}
+		if(HookingOwnerNow && Input.m_Hook == 0 && RescueProgress < 8.0f && !Eval.m_CanHammerOwnerEnd)
+			Score += 180.0f;
+		if(PreferHammerRescue)
+		{
+			if(Input.m_Hook != 0)
+				Score += 520.0f;
+			if(!UsesHammer && !Eval.m_CanHammerOwnerEnd && Input.m_Direction != DirToOwner)
+				Score += 90.0f;
+		}
+		if(OwnerFrozenStart)
+		{
+			if(Eval.m_CanHammerOwnerEnd)
+				Score -= 280.0f;
+			else if(Eval.m_CanHookOwnerEnd)
+				Score -= 170.0f;
+			if(Eval.m_HookedOwner && Eval.m_DummySafeEnd)
+				Score -= 120.0f;
+			if(DummySafeNow && !Eval.m_DummySafeEnd && !Eval.m_HookedOwner && !Eval.m_CanHammerOwnerEnd && !Eval.m_CanHookOwnerEnd)
+				Score += 280.0f;
+			if(DummySafeNow && DummyMoveDist > 52.0f && !Eval.m_HookedOwner && !Eval.m_CanHammerOwnerEnd && !Eval.m_CanHookOwnerEnd)
+				Score += 180.0f;
+			if(DummySafeNow && Input.m_Jump != 0 && !Eval.m_CanHammerOwnerEnd && !Eval.m_CanHookOwnerEnd)
+				Score += 220.0f;
+		}
+
+		*pOutScore = Score;
+		return true;
+	};
+
+	float BaseScore = 0.0f;
+	const bool HasBaseScore = EvaluateRescueScore(pGameClient->m_DummyInput, 120.0f, false, &BaseScore);
+
+	float BestScore = 1e18f;
+	bool Found = false;
+	CNetObj_PlayerInput BestInput = pGameClient->m_DummyInput;
+
+	for(const SRescueCandidate &Candidate : vCandidates)
+	{
+		float Score = 0.0f;
+		if(!EvaluateRescueScore(Candidate.m_Input, Candidate.m_Bias, Candidate.m_UsesHammer, &Score))
+			continue;
+
+		if(!Found || Score < BestScore)
+		{
+			Found = true;
+			BestScore = Score;
+			BestInput = Candidate.m_Input;
+		}
+	}
+
+	if(!Found)
+		return false;
+	if(HasBaseScore && BestScore + 0.001f >= BaseScore)
+		return false;
+
+	Out = BestInput;
+	return true;
+}
+
+bool CompanionBuildLocalInput(CGameClient *pGameClient, CNetObj_PlayerInput &Out)
+{
+	if(!pGameClient || !pGameClient->Client()->DummyConnected())
+		return false;
+
+	const int OwnerCid = pGameClient->m_aLocalIds[0];
+	const int DummyCid = pGameClient->m_aLocalIds[1];
+	if(OwnerCid < 0 || DummyCid < 0)
+		return false;
+
+	CCharacter *pDummyChar = pGameClient->m_RegularPredictedWorld.GetCharacterById(DummyCid);
+	CCharacter *pOwnerChar = pGameClient->m_RegularPredictedWorld.GetCharacterById(OwnerCid);
+	if(!pDummyChar || !pOwnerChar)
+		return false;
+
+	const CCollision *pCollision = pGameClient->Collision();
+	if(!pCollision)
+		return false;
+
+	const vec2 DummyPos = pDummyChar->GetPos();
+	const vec2 DummyVel = pDummyChar->Core()->m_Vel;
+	const vec2 OwnerPos = pOwnerChar->GetPos();
+	const vec2 OwnerVel = pOwnerChar->Core()->m_Vel;
+	const bool OwnerDangerStart = CompanionCharacterDanger(pCollision, pOwnerChar);
+	const bool DummyDangerStart = CompanionCharacterDanger(pCollision, pDummyChar);
+	const bool OwnerFrozenStart = pOwnerChar->m_FreezeTime > 0 || pOwnerChar->Core()->m_FreezeEnd != 0 || pOwnerChar->Core()->m_IsInFreeze || pOwnerChar->Core()->m_DeepFrozen;
+	const bool HookingOwnerNow = pDummyChar->Core()->HookedPlayer() == OwnerCid;
+	const float FollowRadius = (float)std::clamp(g_Config.m_ClZzCompanionFollowTiles, 5, 200) * 32.0f;
+	const float HookLen = (float)pGameClient->m_aTuning[1].m_HookLength;
+	const bool DummySafeNow = CompanionSafeStandPos(pCollision, DummyPos);
+	const float OwnerDistStart = distance(DummyPos, OwnerPos);
+	const int OwnerDangerTick = CompanionPredictDangerTick(pGameClient, OwnerCid, 18, nullptr);
+	const int DummyDangerTick = CompanionPredictDangerTick(pGameClient, DummyCid, 14, nullptr);
+	const bool OwnerDangerMode = OwnerDangerStart || OwnerDangerTick < 13;
+	const bool DummyDangerMode = DummyDangerStart || DummyDangerTick < 8;
+
+	auto StoreCompanionPath = [&](vec2 StepPos, vec2 AnchorPos, vec2 RescuePos, bool IncludeOwner) {
+		pGameClient->CompanionClearPath();
+		pGameClient->CompanionPushPathPoint(DummyPos);
+		pGameClient->CompanionPushPathPoint(StepPos);
+		pGameClient->CompanionPushPathPoint(AnchorPos);
+		pGameClient->CompanionPushPathPoint(RescuePos);
+		if(IncludeOwner)
+			pGameClient->CompanionPushPathPoint(OwnerPos);
+	};
+
+	vec2 HammerAimDir(0.0f, -1.0f);
+	const bool HammerReady = pDummyChar->GetReloadTimer() <= 0 && !pDummyChar->HammerHitDisabled();
+	const bool CanHammerOwnerNow = HammerReady && CompanionCanHammerOwnerNow(pGameClient, DummyCid, OwnerCid, DummyPos, OwnerPos, &HammerAimDir);
+	vec2 HookOwnerAimDir(0.0f, -1.0f);
+	const bool CanHookOwnerNow = CompanionCanHookOwnerFrom(pGameClient, DummyPos, OwnerCid, OwnerPos, HookLen, &HookOwnerAimDir);
+	vec2 ImmediateRescueTarget = OwnerPos;
+	{
+		vec2 RescueBias = length(DummyPos - OwnerPos) > 0.001f ? normalize(DummyPos - OwnerPos) : vec2(0.0f, -1.0f);
+		CompanionFindNearestSafePos(pCollision, OwnerPos, RescueBias, &ImmediateRescueTarget);
+	}
+	if(OwnerDangerMode && (DummySafeNow || HookingOwnerNow || CanHammerOwnerNow || CanHookOwnerNow))
+	{
+		if(CompanionBuildDirectRescueInput(pGameClient, DummyCid, OwnerCid, ImmediateRescueTarget, Out))
+		{
+			vec2 ImmediateStep = ImmediateRescueTarget;
+			if(!CompanionBuildPathStep(pCollision, DummyPos, ImmediateRescueTarget, &ImmediateStep))
+			{
+				if(!CompanionFindLocalViaPos(pCollision, DummyPos, ImmediateRescueTarget, &ImmediateStep))
+					ImmediateStep = ImmediateRescueTarget;
+			}
+			StoreCompanionPath(ImmediateStep, ImmediateRescueTarget, ImmediateRescueTarget, true);
+			return true;
+		}
+	}
+
+	if(g_Config.m_ClZzCompanionFightMode && !OwnerDangerMode && !DummyDangerMode)
+	{
+		if(CompanionBuildFightInput(pGameClient, DummyCid, OwnerCid, Out))
+		{
+			pGameClient->CompanionClearPath();
+			pGameClient->CompanionPushPathPoint(DummyPos);
+			pGameClient->CompanionPushPathPoint(OwnerPos);
+			return true;
+		}
+	}
+
+	vec2 GoalPos = OwnerPos;
+	vec2 RescueTargetPos = OwnerPos;
+	vec2 SafeOwnerPos = OwnerPos;
+	vec2 BiasDir = normalize(vec2(OwnerPos.x - DummyPos.x, OwnerPos.y - DummyPos.y));
+	if(length(BiasDir) < 0.001f)
+		BiasDir = vec2(0.0f, -1.0f);
+	vec2 MoveGoalPos = GoalPos;
+
+	if(DummyDangerMode && !OwnerDangerMode)
+	{
+		vec2 EscapeBias = length(DummyVel) > 0.001f ? -normalize(DummyVel) : normalize(DummyPos - OwnerPos);
+		if(length(EscapeBias) < 0.001f)
+			EscapeBias = vec2(0.0f, -1.0f);
+		if(!CompanionFindNearestSafePos(pCollision, DummyPos, EscapeBias, &GoalPos))
+			GoalPos = OwnerPos;
+	}
+	else if(OwnerDangerMode)
+	{
+		bool FoundAnchor = false;
+		float BestAnchorScore = 1e18f;
+		vec2 BestAnchor = OwnerPos;
+		auto ConsiderAnchor = [&](vec2 AnchorPos, bool HammerAnchor) {
+			float Score = CompanionAnchorTravelScore(pCollision, DummyPos, AnchorPos);
+			Score += distance(AnchorPos, OwnerPos) * 0.15f;
+			if(HammerAnchor)
+				Score -= 26.0f;
+			if(AnchorPos.y < OwnerPos.y + 12.0f)
+				Score -= 12.0f;
+			if(AnchorPos.y > OwnerPos.y + 36.0f)
+				Score += 20.0f;
+			if(!FoundAnchor || Score < BestAnchorScore)
+			{
+				FoundAnchor = true;
+				BestAnchorScore = Score;
+				BestAnchor = AnchorPos;
+			}
+		};
+
+		if(DummySafeNow && !DummyDangerMode)
+		{
+			float Score = distance(DummyPos, OwnerPos) * 0.12f;
+			if(DummyPos.y < OwnerPos.y + 18.0f)
+				Score -= 18.0f;
+			if(CanHammerOwnerNow)
+				Score -= 60.0f;
+			else if(CanHookOwnerNow)
+				Score -= 42.0f;
+			ConsiderAnchor(DummyPos, CanHammerOwnerNow);
+			if(Score < BestAnchorScore)
+			{
+				FoundAnchor = true;
+				BestAnchorScore = Score;
+				BestAnchor = DummyPos;
+			}
+		}
+
+		vec2 HammerAnchor;
+		if(HammerReady && CompanionFindHammerAnchor(pGameClient, DummyPos, DummyCid, OwnerCid, OwnerPos, &HammerAnchor))
+			ConsiderAnchor(HammerAnchor, true);
+
+		vec2 RescueAnchor;
+		if(CompanionFindRescueAnchor(pGameClient, DummyPos, OwnerCid, OwnerPos, HookLen, &RescueAnchor))
+			ConsiderAnchor(RescueAnchor, false);
+
+		if(FoundAnchor)
+			GoalPos = BestAnchor;
+		else if(!CompanionFindNearestSafePos(pCollision, OwnerPos, BiasDir, &SafeOwnerPos))
+			GoalPos = OwnerPos - vec2(0.0f, 48.0f);
+		else
+			GoalPos = SafeOwnerPos;
+
+		const vec2 RescueBias = length(GoalPos - OwnerPos) > 0.001f ? normalize(GoalPos - OwnerPos) : BiasDir;
+		if(!CompanionFindNearestSafePos(pCollision, OwnerPos, RescueBias, &RescueTargetPos))
+			RescueTargetPos = GoalPos;
+	}
+	else if(distance(DummyPos, OwnerPos) > FollowRadius)
+	{
+		if(!CompanionFindFollowAnchor(pGameClient, DummyPos, OwnerPos, OwnerVel, FollowRadius, 64.0f, &GoalPos))
+		{
+			vec2 TrailDir = length(OwnerVel) > 0.001f ? normalize(OwnerVel) : normalize(OwnerPos - DummyPos);
+			if(length(TrailDir) < 0.001f)
+				TrailDir = vec2(1.0f, 0.0f);
+			vec2 FollowPos = OwnerPos - TrailDir * 64.0f;
+			if(CompanionFindNearestSafePos(pCollision, FollowPos, -TrailDir, &GoalPos))
+			{
+			}
+			else
+			{
+				GoalPos = OwnerPos;
+			}
+		}
+	}
+	else
+	{
+		if(!CompanionFindFollowAnchor(pGameClient, DummyPos, OwnerPos, OwnerVel, FollowRadius, 56.0f, &GoalPos))
+		{
+			vec2 TrailDir = length(OwnerVel) > 0.001f ? normalize(OwnerVel) : normalize(OwnerPos - DummyPos);
+			if(length(TrailDir) < 0.001f)
+				TrailDir = vec2(1.0f, 0.0f);
+			vec2 FollowPos = OwnerPos - TrailDir * 56.0f;
+			if(CompanionFindNearestSafePos(pCollision, FollowPos, -TrailDir, &GoalPos))
+			{
+			}
+		}
+	}
+
+	if(!CompanionBuildPathStep(pCollision, DummyPos, GoalPos, &MoveGoalPos))
+	{
+		if(!CompanionFindLocalViaPos(pCollision, DummyPos, GoalPos, &MoveGoalPos))
+			MoveGoalPos = GoalPos;
+	}
+
+	const vec2 GoalDir = length(MoveGoalPos - DummyPos) > 0.001f ? normalize(MoveGoalPos - DummyPos) : vec2(0.0f, -1.0f);
+	const int PreferredDir = absolute(MoveGoalPos.x - DummyPos.x) > 8.0f ? (MoveGoalPos.x > DummyPos.x ? 1 : -1) : 0;
+	const bool WantJump = (!OwnerFrozenStart && (MoveGoalPos.y < DummyPos.y - 18.0f || DummyDangerMode || DummyVel.y > 6.5f)) || (OwnerDangerMode && MoveGoalPos.y < DummyPos.y - 28.0f && !DummySafeNow);
+	const bool PathNeedsBypass = distance(MoveGoalPos, GoalPos) > 28.0f;
+	const bool FollowHookAllowed = OwnerDangerMode || DummyDangerMode || OwnerDistStart > FollowRadius * 1.10f || GoalDir.y < -0.35f || DummyVel.y > 8.0f || PathNeedsBypass;
+
+	std::vector<SCompanionLocalAction> vActions;
+	vActions.reserve(24);
+	auto AddAction = [&](int Direction, bool Jump, bool Hook, vec2 AimDir, bool HookOwner = false, vec2 HookPos = vec2(0.0f, 0.0f)) {
+		SCompanionLocalAction Candidate;
+		Candidate.m_Direction = std::clamp(Direction, -1, 1);
+		Candidate.m_Jump = Jump;
+		Candidate.m_Hook = Hook;
+		Candidate.m_HookOwner = HookOwner;
+		Candidate.m_AimDir = length(AimDir) > 0.001f ? normalize(AimDir) : vec2(0.0f, -1.0f);
+		Candidate.m_HookPos = HookPos;
+		for(const SCompanionLocalAction &Existing : vActions)
+		{
+			if(Existing.m_Direction != Candidate.m_Direction || Existing.m_Jump != Candidate.m_Jump || Existing.m_Hook != Candidate.m_Hook || Existing.m_HookOwner != Candidate.m_HookOwner)
+				continue;
+			if(distance(Existing.m_AimDir, Candidate.m_AimDir) < 0.02f && distance(Existing.m_HookPos, Candidate.m_HookPos) < 6.0f)
+				return;
+		}
+		vActions.push_back(Candidate);
+	};
+
+	AddAction(PreferredDir, false, false, GoalDir);
+	AddAction(0, false, false, GoalDir);
+	if(WantJump)
+	{
+		AddAction(PreferredDir, true, false, GoalDir);
+		AddAction(0, true, false, GoalDir);
+	}
+
+	auto AddHookAction = [&](vec2 AimDir, bool AllowOwner, bool PreferJump) {
+		vec2 HookPos;
+		bool HooksOwner = false;
+		if(!CompanionResolveHookTarget(pGameClient, DummyPos, AimDir, HookLen, OwnerCid, OwnerPos, AllowOwner, &HookPos, &HooksOwner))
+			return;
+		AddAction(PreferredDir, PreferJump, true, AimDir, HooksOwner, HookPos);
+		AddAction(0, PreferJump, true, AimDir, HooksOwner, HookPos);
+	};
+
+	if(OwnerDangerMode || DummyDangerMode || GoalDir.y < -0.12f || DummyVel.y > 6.5f)
+	{
+		AddHookAction(vec2(0.0f, -1.0f), false, false);
+		AddHookAction(normalize(vec2((float)PreferredDir * 0.35f, -1.0f)), false, false);
+		AddHookAction(normalize(vec2((float)PreferredDir * 0.2f, -1.0f)), false, true);
+	}
+	if(FollowHookAllowed)
+		AddHookAction(GoalDir, OwnerDangerMode, WantJump);
+	if(OwnerDangerMode)
+		AddHookAction(GoalPos - DummyPos, false, false);
+	if(OwnerDangerMode)
+		AddHookAction(OwnerPos - DummyPos, true, WantJump);
+
+	float BestScore = 1e18f;
+	bool Found = false;
+	SCompanionLocalAction BestAction;
+	const int SimTicks = OwnerDangerMode || DummyDangerMode ? 10 : 8;
+
+	for(const SCompanionLocalAction &Action : vActions)
+	{
+		SCompanionLocalEval Eval;
+		if(!CompanionSimulateAction(pGameClient, DummyCid, OwnerCid, pGameClient->m_DummyInput, Action, SimTicks, HookLen, DummyDangerStart, OwnerDangerStart, &Eval))
+			continue;
+
+		float Score = distance(Eval.m_DummyFinalPos, GoalPos);
+		Score += Action.m_Jump ? 6.0f : 0.0f;
+		Score += Action.m_Hook ? 10.0f : 0.0f;
+		Score += (Action.m_Hook && !Action.m_HookOwner) ? distance(DummyPos, Action.m_HookPos) * 0.05f : 0.0f;
+
+		if(Eval.m_DummyDangerEnd)
+			Score += DummyDangerStart ? 120.0f : 500.0f;
+		if(OwnerDangerMode)
+		{
+			const float RescueDistStart = distance(OwnerPos, RescueTargetPos);
+			const float RescueDistEnd = distance(Eval.m_OwnerFinalPos, RescueTargetPos);
+			const float RescueProgress = RescueDistStart - RescueDistEnd;
+			const float DummyDrop = Eval.m_DummyFinalPos.y - DummyPos.y;
+			Score += distance(Eval.m_OwnerFinalPos, OwnerPos) * 0.25f;
+			Score += RescueDistEnd * 0.55f;
+			Score -= RescueProgress * 3.8f;
+			if(Eval.m_OwnerDangerEnd)
+			{
+				float CarryPenalty = OwnerDangerStart ? 180.0f : 300.0f;
+				if(RescueProgress > 12.0f && Eval.m_DummySafeEnd && (Eval.m_HookedOwner || Eval.m_CanHammerOwnerEnd || Eval.m_CanHookOwnerEnd))
+					CarryPenalty *= 0.30f;
+				else if(RescueProgress > 6.0f && Eval.m_DummySafeEnd)
+					CarryPenalty *= 0.55f;
+				Score += CarryPenalty;
+			}
+			else
+				Score -= 120.0f;
+			if(Eval.m_HookedOwner)
+				Score -= 75.0f;
+			if(Eval.m_HookedOwner && RescueProgress > 4.0f)
+				Score -= 45.0f;
+			if(Eval.m_HookedOwner && Eval.m_HookedGround && Eval.m_DummySafeEnd)
+				Score -= 155.0f;
+			else if(Eval.m_HookedOwner && Eval.m_DummySafeEnd)
+				Score -= 70.0f;
+			if(Eval.m_CanHammerOwnerEnd)
+				Score -= 190.0f;
+			else if(Eval.m_CanHookOwnerEnd)
+				Score -= 135.0f;
+			else
+				Score += 45.0f;
+			if(Eval.m_DummySafeEnd && (Eval.m_CanHammerOwnerEnd || Eval.m_CanHookOwnerEnd))
+				Score -= 55.0f;
+			if(Eval.m_HookedGround && (Eval.m_CanHammerOwnerEnd || Eval.m_CanHookOwnerEnd))
+				Score -= 40.0f;
+			if(!Eval.m_DummySafeEnd)
+				Score += 70.0f;
+			if(Action.m_Jump)
+				Score += 28.0f;
+			if(Action.m_Hook && !Action.m_HookOwner)
+				Score += 32.0f;
+			if(DummySafeNow && !DummyDangerMode)
+			{
+				if(Action.m_Jump && !Eval.m_HookedOwner && !Eval.m_CanHammerOwnerEnd && !Eval.m_CanHookOwnerEnd)
+					Score += 120.0f;
+				if(DummyDrop > 18.0f && !Eval.m_HookedOwner && !Eval.m_CanHammerOwnerEnd && !Eval.m_CanHookOwnerEnd)
+					Score += 160.0f + DummyDrop * 2.0f;
+				if(distance(Eval.m_DummyFinalPos, DummyPos) > 40.0f && !Eval.m_HookedOwner && !Eval.m_CanHammerOwnerEnd && !Eval.m_CanHookOwnerEnd)
+					Score += 70.0f;
+			}
+		}
+		else
+		{
+			const float OwnerDistEnd = distance(Eval.m_DummyFinalPos, Eval.m_OwnerFinalPos);
+			const float OwnerProgress = OwnerDistStart - OwnerDistEnd;
+			Score += distance(Eval.m_DummyFinalPos, GoalPos) * 0.30f;
+			Score += OwnerDistEnd * 0.38f;
+			Score -= OwnerProgress * 2.6f;
+			if(!Eval.m_DummySafeEnd)
+				Score += 55.0f;
+			if(OwnerDistStart > FollowRadius * 0.85f && OwnerProgress < 4.0f)
+				Score += 90.0f;
+			else if(OwnerDistStart > FollowRadius * 0.55f && OwnerProgress < 2.0f)
+				Score += 28.0f;
+			if(Action.m_Direction == 0 && OwnerDistStart > FollowRadius * 0.65f)
+				Score += 22.0f;
+			if(Action.m_Hook && Eval.m_HookedGround && OwnerProgress > 10.0f)
+				Score -= 16.0f;
+			if(Eval.m_HookedOwner)
+				Score += 110.0f;
+			if(Action.m_Hook)
+				Score += 36.0f;
+			if(Action.m_Hook && !Eval.m_HookedGround)
+				Score += 32.0f;
+			if(Action.m_HookOwner)
+				Score += 180.0f;
+		}
+
+		if(PreferredDir != 0 && Action.m_Direction == -PreferredDir)
+			Score += 35.0f;
+		if(Action.m_Hook && !Action.m_HookOwner && Action.m_AimDir.y > -0.25f)
+			Score += 65.0f;
+		if(Action.m_Hook && Action.m_HookOwner == false && Action.m_AimDir.y < -0.75f)
+			Score -= 8.0f;
+		if(Action.m_Hook && !Eval.m_HookedGround && !Eval.m_HookedOwner)
+			Score += 80.0f;
+
+		if(!Found || Score < BestScore)
+		{
+			Found = true;
+			BestScore = Score;
+			BestAction = Action;
+		}
+	}
+
+	if(!Found)
+		return false;
+
+	Out = pGameClient->m_DummyInput;
+	Out.m_PlayerFlags = pGameClient->m_DummyInput.m_PlayerFlags;
+	Out.m_Direction = BestAction.m_Direction;
+	if(BestAction.m_Jump)
+		Out.m_Jump = (Out.m_Jump + 2) | 1;
+	else
+		Out.m_Jump = 0;
+	Out.m_Hook = BestAction.m_Hook ? 1 : 0;
+	Out.m_Fire = 0;
+	Out.m_NextWeapon = 0;
+	Out.m_PrevWeapon = 0;
+
+	vec2 Aim = BestAction.m_AimDir;
+	if(BestAction.m_Hook)
+		Aim = BestAction.m_HookOwner ? (OwnerPos - DummyPos) : (BestAction.m_HookPos - DummyPos);
+	if(length(Aim) < 0.001f)
+		Aim = GoalDir;
+	Out.m_TargetX = round_to_int(Aim.x * 1000.0f);
+	Out.m_TargetY = round_to_int(Aim.y * 1000.0f);
+	if(Out.m_TargetX == 0 && Out.m_TargetY == 0)
+		Out.m_TargetY = -1;
+
+	StoreCompanionPath(MoveGoalPos, GoalPos, OwnerDangerMode ? RescueTargetPos : GoalPos, true);
+
+	CompanionApplyAvoidRefine(pGameClient, DummyCid, OwnerCid, GoalPos, OwnerDangerMode, Out);
+
+	return true;
+}
+} // namespace
+
 bool CGameClient::CompanionPyInferAction(int DummyIndex, const vec2 &DummyPos, const vec2 &DummyVel, const vec2 &Goal, int &OutAction)
 {
 	OutAction = -1;
@@ -4968,80 +7009,112 @@ int CGameClient::OnSnapInput(int *pData, bool Dummy, bool Force)
 		return 0;
 	}
 
-	if(g_Config.m_ClZzCompanionEnabled && g_Config.m_ClZzCompanionPyInfer && Client()->DummyConnected())
+	if(g_Config.m_ClZzCompanionEnabled && Client()->DummyConnected())
 	{
-		static int64_t s_CompanionSnapDbg = 0;
-		auto SnapDbg = [&](const char *pMsg) {
-			const int64_t Now = time_get();
-			if(s_CompanionSnapDbg != 0 && Now - s_CompanionSnapDbg < time_freq())
-				return;
-			s_CompanionSnapDbg = Now;
-			Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "zz/companion", pMsg);
-		};
-
-		const int DummyTee = !g_Config.m_ClDummy;
-		const int LocalTee = g_Config.m_ClDummy;
-		if(m_aLocalIds[DummyTee] >= 0 && m_aLocalIds[LocalTee] >= 0)
+		if(!g_Config.m_ClZzCompanionPyInfer)
 		{
-			const int DummyCid = m_aLocalIds[DummyTee];
-			const int OwnerCid = m_aLocalIds[LocalTee];
-			const vec2 DummyPos = m_aClients[DummyCid].m_RegularPredicted.m_Pos;
-			const vec2 DummyVel = m_aClients[DummyCid].m_RegularPredicted.m_Vel;
-			const vec2 OwnerPos = m_aClients[OwnerCid].m_RegularPredicted.m_Pos;
-			const float FollowR = (float)std::clamp(g_Config.m_ClZzCompanionFollowTiles, 1, 200) * 32.0f;
-			vec2 Goal = DummyPos;
-			const float Dist = distance(DummyPos, OwnerPos);
-			if(Dist > FollowR)
-				Goal = OwnerPos;
-			char aDbg[256];
-			str_format(aDbg, sizeof(aDbg), "DummyConnected=1 cl_dummy=%d localIdMain=%d localIdDummy=%d dist=%.1f goalToOwner=%d", g_Config.m_ClDummy, m_aLocalIds[LocalTee], m_aLocalIds[DummyTee], Dist, Dist > FollowR ? 1 : 0);
-			SnapDbg(aDbg);
-
-			int ActionId = -1;
-			if(CompanionPyInferAction(g_Config.m_ClDummy, DummyPos, DummyVel, Goal, ActionId))
+			static int s_CompanionCacheTick = -1;
+			static bool s_CompanionCacheComputed = false;
+			static bool s_CompanionCacheHasInput = false;
+			static CNetObj_PlayerInput s_CompanionCacheInput{};
+			const int CacheTick = Client()->GameTick(1);
+			if(s_CompanionCacheComputed && s_CompanionCacheTick == CacheTick)
 			{
-				char aDbg2[128];
-				str_format(aDbg2, sizeof(aDbg2), "inference ok action=%d", ActionId);
-				SnapDbg(aDbg2);
-				static const vec2 s_aAimCands5[] = {
-					vec2(0.0f, -1.0f),
-					normalize(vec2(-0.4f, -1.0f)),
-					normalize(vec2(0.4f, -1.0f)),
-					vec2(-1.0f, 0.0f),
-					vec2(1.0f, 0.0f),
-				};
-				const int AimCount = (int)std::size(s_aAimCands5);
-				const int AimIndex = ActionId % AimCount;
-				int Tmp = ActionId / AimCount;
-				const int HookBit = Tmp & 1;
-				Tmp >>= 1;
-				const int JumpBit = Tmp & 1;
-				Tmp >>= 1;
-				const int DirIndex = Tmp;
-				const int Dir = std::clamp(DirIndex - 1, -1, 1);
+				if(s_CompanionCacheHasInput)
+				{
+					mem_copy(pData, &s_CompanionCacheInput, sizeof(s_CompanionCacheInput));
+					return sizeof(s_CompanionCacheInput);
+				}
+			}
 
-				CNetObj_PlayerInput Out = m_DummyInput;
-				Out.m_PlayerFlags = m_DummyInput.m_PlayerFlags;
-				Out.m_Direction = Dir;
-				const vec2 OutAim = s_aAimCands5[AimIndex];
-				Out.m_TargetX = (int)round_to_int(OutAim.x * 1000.0f);
-				Out.m_TargetY = (int)round_to_int(OutAim.y * 1000.0f);
-				if(!Out.m_TargetX && !Out.m_TargetY)
-					Out.m_TargetY = -1;
-				Out.m_Hook = HookBit ? 1 : 0;
-				if(JumpBit)
-					Out.m_Jump = (Out.m_Jump + 2) | 1;
+			CNetObj_PlayerInput Out;
+			const bool HasCompanionInput = CompanionBuildLocalInput(this, Out);
+			s_CompanionCacheTick = CacheTick;
+			s_CompanionCacheComputed = true;
+			s_CompanionCacheHasInput = HasCompanionInput;
+			if(HasCompanionInput)
+			{
+				s_CompanionCacheInput = Out;
 				mem_copy(pData, &Out, sizeof(Out));
 				return sizeof(Out);
 			}
-			else
-			{
-				SnapDbg("inference failed");
-			}
+			CompanionClearPath();
 		}
 		else
 		{
-			SnapDbg("companion: local ids not ready");
+			static int64_t s_CompanionSnapDbg = 0;
+			auto SnapDbg = [&](const char *pMsg) {
+				const int64_t Now = time_get();
+				if(s_CompanionSnapDbg != 0 && Now - s_CompanionSnapDbg < time_freq())
+					return;
+				s_CompanionSnapDbg = Now;
+				Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "zz/companion", pMsg);
+			};
+
+			const int DummyTee = !g_Config.m_ClDummy;
+			const int LocalTee = g_Config.m_ClDummy;
+			if(m_aLocalIds[DummyTee] >= 0 && m_aLocalIds[LocalTee] >= 0)
+			{
+				const int DummyCid = m_aLocalIds[DummyTee];
+				const int OwnerCid = m_aLocalIds[LocalTee];
+				const vec2 DummyPos = m_aClients[DummyCid].m_RegularPredicted.m_Pos;
+				const vec2 DummyVel = m_aClients[DummyCid].m_RegularPredicted.m_Vel;
+				const vec2 OwnerPos = m_aClients[OwnerCid].m_RegularPredicted.m_Pos;
+				const float FollowR = (float)std::clamp(g_Config.m_ClZzCompanionFollowTiles, 1, 200) * 32.0f;
+				vec2 Goal = DummyPos;
+				const float Dist = distance(DummyPos, OwnerPos);
+				if(Dist > FollowR)
+					Goal = OwnerPos;
+				char aDbg[256];
+				str_format(aDbg, sizeof(aDbg), "DummyConnected=1 cl_dummy=%d localIdMain=%d localIdDummy=%d dist=%.1f goalToOwner=%d", g_Config.m_ClDummy, m_aLocalIds[LocalTee], m_aLocalIds[DummyTee], Dist, Dist > FollowR ? 1 : 0);
+				SnapDbg(aDbg);
+
+				int ActionId = -1;
+				if(CompanionPyInferAction(g_Config.m_ClDummy, DummyPos, DummyVel, Goal, ActionId))
+				{
+					char aDbg2[128];
+					str_format(aDbg2, sizeof(aDbg2), "inference ok action=%d", ActionId);
+					SnapDbg(aDbg2);
+					static const vec2 s_aAimCands5[] = {
+						vec2(0.0f, -1.0f),
+						normalize(vec2(-0.4f, -1.0f)),
+						normalize(vec2(0.4f, -1.0f)),
+						vec2(-1.0f, 0.0f),
+						vec2(1.0f, 0.0f),
+					};
+					const int AimCount = (int)std::size(s_aAimCands5);
+					const int AimIndex = ActionId % AimCount;
+					int Tmp = ActionId / AimCount;
+					const int HookBit = Tmp & 1;
+					Tmp >>= 1;
+					const int JumpBit = Tmp & 1;
+					Tmp >>= 1;
+					const int DirIndex = Tmp;
+					const int Dir = std::clamp(DirIndex - 1, -1, 1);
+
+					CNetObj_PlayerInput Out = m_DummyInput;
+					Out.m_PlayerFlags = m_DummyInput.m_PlayerFlags;
+					Out.m_Direction = Dir;
+					const vec2 OutAim = s_aAimCands5[AimIndex];
+					Out.m_TargetX = (int)round_to_int(OutAim.x * 1000.0f);
+					Out.m_TargetY = (int)round_to_int(OutAim.y * 1000.0f);
+					if(!Out.m_TargetX && !Out.m_TargetY)
+						Out.m_TargetY = -1;
+					Out.m_Hook = HookBit ? 1 : 0;
+					if(JumpBit)
+						Out.m_Jump = (Out.m_Jump + 2) | 1;
+					mem_copy(pData, &Out, sizeof(Out));
+					return sizeof(Out);
+				}
+				else
+				{
+					SnapDbg("inference failed");
+				}
+			}
+			else
+			{
+				SnapDbg("companion: local ids not ready");
+			}
 		}
 	}
 
