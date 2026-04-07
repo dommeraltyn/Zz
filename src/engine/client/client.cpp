@@ -215,16 +215,7 @@ int CClient::SendMsgActive(CMsgPacker *pMsg, int Flags)
 void CClient::SendTClientInfo(int Conn)
 {
 	CMsgPacker Msg(NETMSG_IAMTATER, true);
-	if(GIT_SHORTREV_HASH)
-	{
-		char aBuf[128];
-		str_format(aBuf, sizeof(aBuf), "%s %s (%s) built on " __DATE__ ", " __TIME__, SERVER_CLIENT_NAME, SERVER_CLIENT_RELEASE_VERSION, GIT_SHORTREV_HASH);
-		Msg.AddString(aBuf);
-	}
-	else
-	{
-		Msg.AddString(SERVER_CLIENT_RELEASE_VERSION " built on " __DATE__ ", " __TIME__);
-	}
+	Msg.AddString(TCLIENT_VERSION " built on " __DATE__ ", " __TIME__);
 	SendMsg(Conn, &Msg, MSGFLAG_VITAL);
 }
 
@@ -563,6 +554,7 @@ void CClient::OnEnterGame(bool Dummy)
 	m_aPredIntraTick[Dummy] = 0.0f;
 	m_aGameTime[Dummy].Init(0);
 	m_PredictedTime.Init(0);
+	m_TranslationContext.m_aLocalClientId[Dummy] = -1;
 
 	if(!Dummy)
 	{
@@ -945,7 +937,23 @@ void CClient::DummyDisconnect(const char *pReason)
 	m_aRconAuthed[1] = 0;
 	m_aapSnapshots[1][SNAP_CURRENT] = nullptr;
 	m_aapSnapshots[1][SNAP_PREV] = nullptr;
+	m_aSnapshotStorage[1].PurgeAll();
 	m_aReceivedSnapshots[1] = 0;
+	m_aSnapshotParts[1] = 0;
+	m_aSnapshotIncomingDataSize[1] = 0;
+	m_aAckGameTick[1] = -1;
+	m_aCurrentRecvTick[1] = 0;
+	m_aPrevGameTick[1] = 0;
+	m_aCurGameTick[1] = 0;
+	m_aGameIntraTick[1] = 0.0f;
+	m_aGameTickTime[1] = 0.0f;
+	m_aGameIntraTickSincePrev[1] = 0.0f;
+	m_aPredTick[1] = 0;
+	m_aPredIntraTick[1] = 0.0f;
+	m_aDidPostConnect[1] = false;
+	m_aExecuteOnJoinDone[1] = false;
+	m_TranslationContext.m_aLocalClientId[1] = -1;
+	m_DummySendConnInfo = false;
 	m_DummyConnected = false;
 	m_DummyConnecting = false;
 	m_DummyReconnectOnReload = false;
@@ -2773,7 +2781,8 @@ void CClient::PumpNetwork()
 			m_aNetClient[CONN_DUMMY].Update();
 			SendReady(CONN_DUMMY);
 			GameClient()->SendDummyInfo(true);
-			SendEnterGame(CONN_DUMMY);
+			// Do not send enter-game preemptively for dummy.
+			// Keep the same handshake as main: wait for SV_READYTOENTER and call EnterGame there.
 		}
 	}
 

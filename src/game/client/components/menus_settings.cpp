@@ -330,13 +330,14 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 		// Left: Aimbot
 		{
 			CUIRect Inner;
-			DoFeaturePanel(Left, 190.0f, Inner);
+			DoFeaturePanel(Left, 210.0f, Inner);
 			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAimbotEnabled, Localize("Aimbot enabled?"), &g_Config.m_ClZzAimbotEnabled, &Inner, LineSize);
 			Inner.HSplitTop(LineSize, &Button, &Inner);
 			Ui()->DoScrollbarOption(&g_Config.m_ClZzAimbotFov, &g_Config.m_ClZzAimbotFov, &Button, Localize("Aimbot FOV"), 1, 360);
 			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAimbotIgnoreFriends, Localize("ignore friends"), &g_Config.m_ClZzAimbotIgnoreFriends, &Inner, LineSize);
 			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAimbotSilent, Localize("silent"), &g_Config.m_ClZzAimbotSilent, &Inner, LineSize);
 			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAimbotShowFov, Localize("show FOV"), &g_Config.m_ClZzAimbotShowFov, &Inner, LineSize);
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAimbotGlowTarget, Localize("Glow target"), &g_Config.m_ClZzAimbotGlowTarget, &Inner, LineSize);
 
 			Inner.HSplitTop(5.0f, nullptr, &Inner);
 			Inner.HSplitTop(LineSize, &Label, &Inner);
@@ -433,7 +434,7 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 
 		{
 			CUIRect Inner;
-			DoFeaturePanel(Left, 180.0f, Inner);
+			DoFeaturePanel(Left, 165.0f, Inner);
 			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAvoidEnabled, Localize("Avoid enabled?"), &g_Config.m_ClZzAvoidEnabled, &Inner, LineSize);
 			Inner.HSplitTop(LineSize, &Button, &Inner);
 			Ui()->DoScrollbarOption(&g_Config.m_ClZzAvoidMode, &g_Config.m_ClZzAvoidMode, &Button, Localize("Mode"), 0, 1);
@@ -445,7 +446,7 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 				Ui()->DoScrollbarOption(&g_Config.m_ClZzAvoidPredTicks, &g_Config.m_ClZzAvoidPredTicks, &Button, Localize("Blatant pred ticks"), 1, 30);
 				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAvoidJump, Localize("Blatant jump"), &g_Config.m_ClZzAvoidJump, &Inner, LineSize);
 				Inner.HSplitTop(LineSize * 2.0f, &Label, &Inner);
-				Ui()->DoLabel(&Label, Localize("Jump is used only at 100% freeze risk (freeze in 1 tile)."), 14.0f, TEXTALIGN_ML);
+				Ui()->DoLabel(&Label, Localize("Jump is used only at super-critical freeze risk in the last moment."), 14.0f, TEXTALIGN_ML);
 			}
 		}
 
@@ -489,6 +490,15 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 		pFeatureScrollRegion = &s_MiscScrollRegion;
 
 		// Left: independent misc features
+		{
+			CUIRect Inner;
+			DoFeaturePanel(LeftView, 98.0f, Inner);
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzFastHammer, Localize("Fast hammer"), &g_Config.m_ClZzFastHammer, &Inner, LineSize);
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzFastGun, Localize("Fast gun"), &g_Config.m_ClZzFastGun, &Inner, LineSize);
+			Inner.HSplitTop(4.0f, nullptr, &Inner);
+			Inner.HSplitTop(LineSize * 1.6f, &Label, &Inner);
+			Ui()->DoLabel(&Label, Localize("При зажатом fire: 1 тик нажат, 1 тик отпущен (по текущему оружию)."), 14.0f, TEXTALIGN_ML);
+		}
 		{
 			CUIRect Inner;
 			DoFeaturePanel(LeftView, 72.0f, Inner);
@@ -565,18 +575,39 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 		}
 		{
 			CUIRect Inner;
-			DoFeaturePanel(LeftView, 220.0f, Inner);
+			DoFeaturePanel(LeftView, 300.0f, Inner);
 			if(DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzCompanionEnabled, Localize("Companion"), &g_Config.m_ClZzCompanionEnabled, &Inner, LineSize))
 			{
 				if(g_Config.m_ClZzCompanionEnabled)
 					g_Config.m_ClZzCompanionPyInfer = 0;
 			}
-			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzCompanionFightMode, Localize("Fight mode"), &g_Config.m_ClZzCompanionFightMode, &Inner, LineSize);
-			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzCompanionNoAggroTeam, Localize("No aggro teammates + rescue"), &g_Config.m_ClZzCompanionNoAggroTeam, &Inner, LineSize);
-			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzCompanionHitOnlyWars, Localize("Hit only wars"), &g_Config.m_ClZzCompanionHitOnlyWars, &Inner, LineSize);
-			Inner.HSplitTop(4.0f, nullptr, &Inner);
 			Inner.HSplitTop(LineSize, &Button, &Inner);
-			Ui()->DoScrollbarOption(&g_Config.m_ClZzCompanionFollowTiles, &g_Config.m_ClZzCompanionFollowTiles, &Button, Localize("Follow tiles"), 5, 200);
+			Ui()->DoScrollbarOption(&g_Config.m_ClZzCompanionMode, &g_Config.m_ClZzCompanionMode, &Button, Localize("Mode"), 0, 1);
+			Inner.HSplitTop(LineSize, &Label, &Inner);
+			Ui()->DoLabel(&Label, Localize("0 = PvP mode, 1 = Gores mode"), 14.0f, TEXTALIGN_ML);
+
+			if(g_Config.m_ClZzCompanionMode == 0)
+			{
+				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzCompanionFightMode, Localize("Fight mode"), &g_Config.m_ClZzCompanionFightMode, &Inner, LineSize);
+				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzCompanionNoAggroTeam, Localize("No aggro teammates + rescue"), &g_Config.m_ClZzCompanionNoAggroTeam, &Inner, LineSize);
+				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzCompanionHitOnlyWars, Localize("Hit only wars"), &g_Config.m_ClZzCompanionHitOnlyWars, &Inner, LineSize);
+				Inner.HSplitTop(4.0f, nullptr, &Inner);
+				Inner.HSplitTop(LineSize, &Button, &Inner);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzCompanionFollowTiles, &g_Config.m_ClZzCompanionFollowTiles, &Button, Localize("Follow tiles"), 5, 200);
+			}
+			else
+			{
+				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzCompanionGoresRescueAll, Localize("Rescue all (owner priority)"), &g_Config.m_ClZzCompanionGoresRescueAll, &Inner, LineSize);
+				Inner.HSplitTop(4.0f, nullptr, &Inner);
+				Inner.HSplitTop(LineSize, &Button, &Inner);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzCompanionGoresMinTiles, &g_Config.m_ClZzCompanionGoresMinTiles, &Button, Localize("Min distance (tiles)"), 3, 20);
+				Inner.HSplitTop(LineSize, &Button, &Inner);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzCompanionGoresMaxTiles, &g_Config.m_ClZzCompanionGoresMaxTiles, &Button, Localize("Max distance (tiles)"), 4, 30);
+				if(g_Config.m_ClZzCompanionGoresMaxTiles < g_Config.m_ClZzCompanionGoresMinTiles)
+					g_Config.m_ClZzCompanionGoresMaxTiles = g_Config.m_ClZzCompanionGoresMinTiles;
+			}
+
+			Inner.HSplitTop(4.0f, nullptr, &Inner);
 			Inner.HSplitTop(6.0f, nullptr, &Inner);
 			Inner.HSplitTop(LineSize, &Label, &Inner);
 			Ui()->DoLabel(&Label, Localize("Companion toggle keybind"), 14.0f, TEXTALIGN_ML);
@@ -596,7 +627,10 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 			}
 			Inner.HSplitTop(4.0f, nullptr, &Inner);
 			Inner.HSplitTop(LineSize * 1.6f, &Label, &Inner);
-			Ui()->DoLabel(&Label, Localize("!team = тиммейты (не бить/спасать), !war = враги для режима Hit only wars."), 14.0f, TEXTALIGN_ML);
+			if(g_Config.m_ClZzCompanionMode == 0)
+				Ui()->DoLabel(&Label, Localize("PvP: !team = тиммейты, !war = враги для Hit only wars."), 14.0f, TEXTALIGN_ML);
+			else
+				Ui()->DoLabel(&Label, Localize("Gores: держит 4-12 тайлов, спасает игроков и проходит узкие туннели."), 14.0f, TEXTALIGN_ML);
 		}
 		{
 			CUIRect Inner;
@@ -623,6 +657,21 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 			Inner.HSplitTop(4.0f, nullptr, &Inner);
 			Inner.HSplitTop(LineSize * 2.0f, &Label, &Inner);
 			Ui()->DoLabel(&Label, Localize("Создает лаги для игроков с antiping через переключение A/D."), 14.0f, TEXTALIGN_ML);
+		}
+		{
+			CUIRect Inner;
+			DoFeaturePanel(LeftView, 192.0f, Inner);
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzFakeAimEnabled, Localize("Fake aim"), &g_Config.m_ClZzFakeAimEnabled, &Inner, LineSize);
+			Inner.HSplitTop(LineSize, &Button, &Inner);
+			Ui()->DoScrollbarOption(&g_Config.m_ClZzFakeAimMode, &g_Config.m_ClZzFakeAimMode, &Button, Localize("Fake aim mode"), 1, 3);
+			Inner.HSplitTop(LineSize, &Label, &Inner);
+			Ui()->DoLabel(&Label, Localize("1 = spin, 2 = robot, 3 = random"), 14.0f, TEXTALIGN_ML);
+			Inner.HSplitTop(LineSize, &Button, &Inner);
+			Ui()->DoScrollbarOption(&g_Config.m_ClZzFakeAimSpinSpeed, &g_Config.m_ClZzFakeAimSpinSpeed, &Button, Localize("Spin speed"), 1, 7200);
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzFakeAimShowAim, Localize("Show aim"), &g_Config.m_ClZzFakeAimShowAim, &Inner, LineSize);
+			Inner.HSplitTop(4.0f, nullptr, &Inner);
+			Inner.HSplitTop(LineSize * 2.0f, &Label, &Inner);
+			Ui()->DoLabel(&Label, Localize("Реальный аим отправляется только на тик события (выстрел/хук), дальше снова fake aim."), 14.0f, TEXTALIGN_ML);
 		}
 
 		// Right: misc helpers
@@ -818,7 +867,9 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 	{
 		const float LineSize = 20.0f;
 		CUIRect Inner;
-		DoFeaturePanel(MainView, 172.0f, Inner);
+		DoFeaturePanel(MainView, 320.0f, Inner);
+		static CButtonContainer s_IslandColorResetId;
+		static CButtonContainer s_WatermarkColorResetId;
 		DoButton_CheckBoxAutoVMarginAndSet(
 			&g_Config.m_ClZzWatermarkEnabled,
 			Localize("Показывать ватермарку ZZClient Free"),
@@ -837,9 +888,41 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 			&g_Config.m_ClZzWatermarkRainbowEnabled,
 			&Inner,
 			LineSize);
+		DoButton_CheckBoxAutoVMarginAndSet(
+			&g_Config.m_ClZzIslandColorApplyWhenPlayerActive,
+			Localize("Островок: применять цвет даже когда плеер активен"),
+			&g_Config.m_ClZzIslandColorApplyWhenPlayerActive,
+			&Inner,
+			LineSize);
+		DoButton_CheckBoxAutoVMarginAndSet(
+			&g_Config.m_ClZzWatermarkColorApplyWhenPlayerActive,
+			Localize("Ватермарка: применять цвет даже когда плеер активен"),
+			&g_Config.m_ClZzWatermarkColorApplyWhenPlayerActive,
+			&Inner,
+			LineSize);
+		DoLine_ColorPicker(
+			&s_IslandColorResetId,
+			25.0f,
+			13.0f,
+			4.0f,
+			&Inner,
+			Localize("Цвет островка"),
+			&g_Config.m_ClZzIslandColor,
+			ColorRGBA(0.32f, 0.72f, 1.0f, 1.0f),
+			false);
+		DoLine_ColorPicker(
+			&s_WatermarkColorResetId,
+			25.0f,
+			13.0f,
+			4.0f,
+			&Inner,
+			Localize("Цвет ватермарки"),
+			&g_Config.m_ClZzWatermarkColor,
+			ColorRGBA(0.32f, 0.72f, 1.0f, 1.0f),
+			false);
 		Inner.HSplitTop(6.0f, nullptr, &Inner);
-		Inner.HSplitTop(LineSize * 1.8f, &Label, &Inner);
-		Ui()->DoLabel(&Label, Localize("Островок берет цвет из обложки трека; без трека можно оставить радужный режим."), 14.0f, TEXTALIGN_ML);
+		Inner.HSplitTop(LineSize * 2.4f, &Label, &Inner);
+		Ui()->DoLabel(&Label, Localize("Если rainbow выключен, используется выбранный цвет. При включенном флаге цвет форсится даже при активном плеере."), 14.0f, TEXTALIGN_ML);
 	}
 	else if(s_SubTab == 7)
 	{
@@ -852,7 +935,7 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 		const float InnerTabWidth = InnerTabBar.w / 2.0f;
 		const char *apInnerTabNames[] = {
 			Localize("BestClient"),
-			Localize("Test")};
+			Localize("Voice Chat")};
 		for(int i = 0; i < 2; i++)
 		{
 			InnerTabBar.VSplitLeft(InnerTabWidth, &InnerTabButton, &InnerTabBar);
@@ -910,12 +993,19 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 		else
 		{
 			CUIRect Inner;
-			DoFeaturePanel(MainView, 90.0f, Inner);
-			Inner.HSplitTop(LineSize, &Label, &Inner);
-			Ui()->DoLabel(&Label, Localize("Test"), 14.0f, TEXTALIGN_ML);
-			Inner.HSplitTop(4.0f, nullptr, &Inner);
-			Inner.HSplitTop(LineSize, &Label, &Inner);
-			Ui()->DoLabel(&Label, Localize("Пока пусто."), 14.0f, TEXTALIGN_ML);
+			DoFeaturePanel(MainView, maximum(140.0f, MainView.h - 4.0f), Inner);
+
+			CUIRect Row;
+			Inner.HSplitTop(20.0f, &Row, &Inner);
+			Ui()->DoLabel(&Row, Localize("Voice chat panel and settings"), 14.0f, TEXTALIGN_ML);
+
+			Inner.HSplitTop(6.0f, nullptr, &Inner);
+			Inner.HSplitTop(18.0f, &Row, &Inner);
+			Ui()->DoLabel(&Row, Localize("Open voice panel using bind below (toggle_voice_panel)."), 12.0f, TEXTALIGN_ML);
+
+			Inner.HSplitTop(8.0f, nullptr, &Inner);
+			Inner.HSplitTop(120.0f, &Row, &Inner);
+			GameClient()->m_VoiceChat.RenderMenuControlBinds(Row);
 		}
 	}
 	TextRender()->TextColor(OldTextColor);

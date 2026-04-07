@@ -1178,6 +1178,7 @@ set(EXPECTED_DATA
   audio/wp_switch-02.wv
   audio/wp_switch-03.wv
   autoexec_server.cfg
+  bestclient/bc_icon.png
   background_noise.png
   blob.png
   censorlist.txt
@@ -2554,6 +2555,8 @@ if(CLIENT)
     components/ghost.h
     components/hud.cpp
     components/hud.h
+    ui_scrollregion.cpp
+    ui_scrollregion.h
     components/music_smtc.cpp
     components/music_smtc.h
     components/important_alert.cpp
@@ -2657,6 +2660,10 @@ if(CLIENT)
     components/tclient/warlist.h
     components/tclient/zz_bestclient_presence.cpp
     components/tclient/zz_bestclient_presence.h
+    components/bestclient/voice/voice.cpp
+    components/bestclient/voice/voice.h
+    components/bestclient/voice/protocol.h
+    components/bestclient/subsystem_runtime.h
     components/tooltips.cpp
     components/tooltips.h
     components/touch_controls.cpp

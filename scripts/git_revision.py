@@ -1,11 +1,8 @@
 import os
-import subprocess
 
 git_hash = os.environ.get("DDNET_GIT_SHORTREV_HASH")
-try:
-	git_hash = git_hash or subprocess.check_output(["git", "rev-parse", "--short=32", "HEAD"], stderr=subprocess.DEVNULL).decode().strip()
-except (FileNotFoundError, subprocess.CalledProcessError):
-	pass
+if not git_hash:
+	git_hash = "4e4269396b97d06879c11ae3b9696c3dc1a06084"
 if git_hash is not None:
 	definition = f'"{git_hash}"'
 else:

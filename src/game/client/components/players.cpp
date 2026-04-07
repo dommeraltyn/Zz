@@ -115,6 +115,8 @@ float CPlayers::GetPlayerTargetAngle(
 	{
 		// TClient
 		vec2 Direction = GameClient()->m_Controls.m_aMousePos[g_Config.m_ClDummy];
+		if(GameClient()->ZzFakeAimVisualActive(g_Config.m_ClDummy))
+			Direction = GameClient()->ZzFakeAimVisualDir(g_Config.m_ClDummy) * 1000.0f;
 		if(g_Config.m_TcScaleMouseDistance)
 		{
 			const int MaxDistance = g_Config.m_ClDyncam ? g_Config.m_ClDyncamMaxDistance : g_Config.m_ClMouseMaxDistance;
@@ -1124,7 +1126,10 @@ void CPlayers::RenderPlayerGhost(
 	{
 		// just use the direct input if it's the local player we are rendering
 		vec2 Pos = GameClient()->m_Controls.m_aMousePos[g_Config.m_ClDummy];
-		if(g_Config.m_TcScaleMouseDistance)
+		const bool FakeAimVisual = GameClient()->ZzFakeAimVisualActive(g_Config.m_ClDummy);
+		if(FakeAimVisual)
+			Pos = GameClient()->ZzFakeAimVisualDir(g_Config.m_ClDummy) * 1000.0f;
+		if(g_Config.m_TcScaleMouseDistance && !FakeAimVisual)
 		{
 			const int MaxDistance = g_Config.m_ClDyncam ? g_Config.m_ClDyncamMaxDistance : g_Config.m_ClMouseMaxDistance;
 			if(MaxDistance > 5 && MaxDistance < 1000) // Don't scale if angle bind or reduces precision

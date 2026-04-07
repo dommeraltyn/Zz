@@ -11,6 +11,7 @@
 #include <engine/shared/config.h>
 #include <engine/textrender.h>
 
+#include <generated/client_data.h>
 #include <generated/client_data7.h>
 #include <generated/protocol.h>
 
@@ -767,6 +768,25 @@ void CScoreboard::RenderScoreboard(CUIRect Scoreboard, int Team, int CountStart,
 					TextRender()->TextColor(GameClient()->m_WarList.GetNameplateColor(pInfo->m_ClientId));
 
 				TextRender()->TextEx(&Cursor, ClientData.m_aName);
+				if(GameClient()->m_ZzBestClientPresence.IsBestClientPlayerOnCurrentServer(ClientData.m_aName))
+				{
+					const float IconSize = FontSize * 0.9f;
+					const float IconSpacing = 4.0f;
+					CUIRect IconRect;
+					IconRect.x = Cursor.m_X + IconSpacing;
+					IconRect.y = Row.y + (Row.h - IconSize) / 2.0f;
+					IconRect.w = IconSize;
+					IconRect.h = IconSize;
+
+					Graphics()->TextureSet(g_pData->m_aImages[IMAGE_BCICON].m_Id);
+					Graphics()->QuadsBegin();
+					Graphics()->SetColor(1.0f, 0.82f, 0.25f, TextColor.a);
+					Graphics()->QuadsSetSubset(0.0f, 0.0f, 1.0f, 1.0f);
+					IGraphics::CQuadItem Quad(IconRect.x, IconRect.y, IconRect.w, IconRect.h);
+					Graphics()->QuadsDrawTL(&Quad, 1);
+					Graphics()->QuadsEnd();
+					Graphics()->SetColor(1.0f, 1.0f, 1.0f, 1.0f);
+				}
 
 				// ready / watching
 				if(Client()->IsSixup() && Client()->m_TranslationContext.m_aClients[pInfo->m_ClientId].m_PlayerFlags7 & protocol7::PLAYERFLAG_READY)

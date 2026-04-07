@@ -16,6 +16,8 @@
 #include <engine/shared/localization.h>
 #include <engine/textrender.h>
 
+#include <generated/client_data.h>
+
 #include <game/client/animstate.h>
 #include <game/client/components/countryflags.h>
 #include <game/client/gameclient.h>
@@ -130,6 +132,7 @@ void CMenus::RenderServerbrowserServerList(CUIRect View, bool &WasListboxItemAct
 		COL_GAMETYPE,
 		COL_MAP,
 		COL_FRIENDS,
+		COL_BESTCLIENT,
 		COL_PLAYERS,
 		COL_PING,
 	};
@@ -148,6 +151,7 @@ void CMenus::RenderServerbrowserServerList(CUIRect View, bool &WasListboxItemAct
 		UI_ELEM_FINISH_ICON,
 		UI_ELEM_PLAYERS,
 		UI_ELEM_FRIEND_ICON,
+		UI_ELEM_BESTCLIENT_ICON,
 		UI_ELEM_PING,
 		UI_ELEM_KEY_ICON,
 		NUM_UI_ELEMS,
@@ -162,6 +166,7 @@ void CMenus::RenderServerbrowserServerList(CUIRect View, bool &WasListboxItemAct
 		{COL_GAMETYPE, IServerBrowser::SORT_GAMETYPE, Localizable("Type"), 1, 50.0f, {0}},
 		{COL_MAP, IServerBrowser::SORT_MAP, Localizable("Map"), 1, 120.0f + (Headers.w - 480) / 8, {0}},
 		{COL_FRIENDS, IServerBrowser::SORT_NUMFRIENDS, "", 1, 20.0f, {0}},
+		{COL_BESTCLIENT, -1, "", 1, 26.0f, {0}},
 		{COL_PLAYERS, IServerBrowser::SORT_NUMPLAYERS, Localizable("Players"), 1, 60.0f, {0}},
 		{-1, -1, "", 1, 4.0f, {0}},
 		{COL_PING, IServerBrowser::SORT_PING, Localizable("Ping"), 1, 40.0f, {0}},
@@ -226,6 +231,10 @@ void CMenus::RenderServerbrowserServerList(CUIRect View, bool &WasListboxItemAct
 			Ui()->DoLabel(&Col.m_Rect, FontIcon::HEART, 14.0f, TEXTALIGN_MC);
 			TextRender()->SetRenderFlags(0);
 			TextRender()->SetFontPreset(EFontPreset::DEFAULT_FONT);
+		}
+		else if(Col.m_Id == COL_BESTCLIENT)
+		{
+			Ui()->DoLabel(&Col.m_Rect, "BC", 9.0f, TEXTALIGN_MC);
 		}
 	}
 
@@ -458,6 +467,17 @@ void CMenus::RenderServerbrowserServerList(CUIRect View, bool &WasListboxItemAct
 						Ui()->DoLabel(&Button, aTemp, 9.0f, TEXTALIGN_MC);
 						TextRender()->TextColor(TextRender()->DefaultTextColor());
 					}
+				}
+			}
+			else if(Id == COL_BESTCLIENT)
+			{
+				const int NumBestClientPlayers = GameClient()->m_ZzBestClientPresence.CountBestClientPlayersOnServer(pItem);
+				if(NumBestClientPlayers > 0)
+				{
+					str_format(aTemp, sizeof(aTemp), "BC%d", NumBestClientPlayers);
+					TextRender()->TextColor(1.0f, 0.82f, 0.25f, 1.0f);
+					Ui()->DoLabelStreamed(*pUiElement->Rect(UI_ELEM_BESTCLIENT_ICON), &Button, aTemp, 9.0f, TEXTALIGN_MC);
+					TextRender()->TextColor(TextRender()->DefaultTextColor());
 				}
 			}
 			else if(Id == COL_PLAYERS)
@@ -1425,6 +1445,25 @@ void CMenus::RenderServerbrowserInfoScoreboard(CUIRect View, const CServerInfo *
 			});
 		if(!Printed)
 			TextRender()->TextEx(&NameCursor, pName, -1);
+		if(GameClient()->m_ZzBestClientPresence.IsBestClientPlayerOnServer(pSelectedServer, CurrentClient.m_aName))
+		{
+			const float IconSize = FontSize * 0.9f;
+			const float IconSpacing = 4.0f;
+			CUIRect IconRect;
+			IconRect.x = NameCursor.m_X + IconSpacing;
+			IconRect.y = Name.y + (Name.h - IconSize) / 2.0f;
+			IconRect.w = IconSize;
+			IconRect.h = IconSize;
+
+			Graphics()->TextureSet(g_pData->m_aImages[IMAGE_BCICON].m_Id);
+			Graphics()->QuadsBegin();
+			Graphics()->SetColor(1.0f, 0.82f, 0.25f, 1.0f);
+			Graphics()->QuadsSetSubset(0.0f, 0.0f, 1.0f, 1.0f);
+			IGraphics::CQuadItem Quad(IconRect.x, IconRect.y, IconRect.w, IconRect.h);
+			Graphics()->QuadsDrawTL(&Quad, 1);
+			Graphics()->QuadsEnd();
+			Graphics()->SetColor(1.0f, 1.0f, 1.0f, 1.0f);
+		}
 
 		// clan
 		CTextCursor ClanCursor;

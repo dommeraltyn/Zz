@@ -1708,7 +1708,10 @@ int CControls::SnapInput(int *pData)
 			Send = Send || time_get() > m_LastSendTime + time_freq() / TickSpeed;
 		}
 		// Keep hook aimbot responsive on every game tick instead of only the default 25 Hz send cadence.
-		if(g_Config.m_ClZzAimbotEnabled && InputToSend.m_Hook && !m_ZzAutoUnfreezeOverridesInput)
+		const bool HookTryingToAttach = GameClient()->m_Snap.m_pLocalCharacter &&
+			(GameClient()->m_Snap.m_pLocalCharacter->m_HookState != HOOK_FLYING &&
+				GameClient()->m_Snap.m_pLocalCharacter->m_HookState != HOOK_GRABBED);
+		if(g_Config.m_ClZzAimbotEnabled && InputToSend.m_Hook && HookTryingToAttach && !m_ZzAutoUnfreezeOverridesInput)
 		{
 			const int TickSpeed = maximum(1, Client()->GameTickSpeed());
 			Send = Send || time_get() > m_LastSendTime + time_freq() / TickSpeed;

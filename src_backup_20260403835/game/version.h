@@ -6,7 +6,7 @@
 // ddnet
 #define GAME_NAME "DDNet"
 #define DDNET_VERSION_NUMBER 19070
-#define DDNET_VERSION_STR "DDNet 19.7 (cc0ba8caad2df9be8c50ff37ca6868b9a0e0680f)"
+#define DDNET_VERSION_STR "TClient 10.8.7"
 extern const char *GIT_SHORTREV_HASH;
 #ifndef GAME_RELEASE_VERSION_INTERNAL
 #define GAME_RELEASE_VERSION_INTERNAL 19.8

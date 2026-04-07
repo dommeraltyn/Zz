@@ -88,6 +88,7 @@
 #include "components/tclient/translate.h"
 #include "components/tclient/warlist.h"
 #include "components/tclient/zz_bestclient_presence.h"
+#include "components/bestclient/voice/voice.h"
 #include "components/tooltips.h"
 #include "components/touch_controls.h"
 #include "components/voting.h"
@@ -230,6 +231,7 @@ public:
 	CBgDraw m_BgDraw;
 	CTClient m_TClient;
 	CZzBestClientPresence m_ZzBestClientPresence;
+	CVoiceChat m_VoiceChat;
 	CTrails m_Trails;
 	CTranslate m_Translate;
 	CPet m_Pet;
@@ -370,6 +372,9 @@ public:
 			m_aCompanionPath[m_CompanionPathLen++] = Pos;
 	}
 	const vec2 &FentBotSubgoal() const { return m_FentBotSubgoal; }
+	int ZzAimbotGlowTargetId(int DummyIndex) const { return in_range(DummyIndex, NUM_DUMMIES - 1) ? m_aZzAimbotGlowTargetId[DummyIndex] : -1; }
+	bool ZzFakeAimVisualActive(int DummyIndex) const { return in_range(DummyIndex, NUM_DUMMIES - 1) ? m_aZzFakeAimVisualActive[DummyIndex] : false; }
+	vec2 ZzFakeAimVisualDir(int DummyIndex) const { return in_range(DummyIndex, NUM_DUMMIES - 1) ? m_aZzFakeAimVisualDir[DummyIndex] : vec2(1.0f, 0.0f); }
 	void FentBotSetWaypoint(vec2 Waypoint)
 	{
 		m_FentBotWaypoint = Waypoint;
@@ -924,6 +929,9 @@ public:
 	CNetObj_PlayerInput m_DummyInput;
 	CNetObj_PlayerInput m_HammerInput;
 	unsigned int m_DummyFire;
+	std::array<int, NUM_DUMMIES> m_aZzAimbotGlowTargetId = {-1, -1};
+	std::array<vec2, NUM_DUMMIES> m_aZzFakeAimVisualDir = {vec2(1.0f, 0.0f), vec2(1.0f, 0.0f)};
+	std::array<bool, NUM_DUMMIES> m_aZzFakeAimVisualActive = {false, false};
 	bool m_ReceivedDDNetPlayer;
 	bool m_ReceivedDDNetPlayerFinishTimes;
 	bool m_ReceivedDDNetPlayerFinishTimesMillis;

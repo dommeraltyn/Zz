@@ -242,11 +242,19 @@ void CHud::RenderGameTimer()
 		}
 
 		ColorRGBA Accent(std::clamp(Track.m_AccentR, 0.0f, 1.0f), std::clamp(Track.m_AccentG, 0.0f, 1.0f), std::clamp(Track.m_AccentB, 0.0f, 1.0f), 1.0f);
-		if(!Track.m_HasArtwork && g_Config.m_ClZzIslandRainbowEnabled)
+		ColorRGBA Accent2 = MixColors(Accent, ColorRGBA(0.12f, 0.16f, 0.22f, 1.0f), 0.35f);
+		const bool UseRainbowIsland = !Track.m_HasArtwork && g_Config.m_ClZzIslandRainbowEnabled;
+		const bool ForceIslandCustomColor = !g_Config.m_ClZzIslandRainbowEnabled && (!Playing || g_Config.m_ClZzIslandColorApplyWhenPlayerActive);
+		if(UseRainbowIsland)
+		{
 			Accent = RainbowColor(LocalTime() * 0.12f, 1.0f);
-		const ColorRGBA Accent2 = (!Track.m_HasArtwork && g_Config.m_ClZzIslandRainbowEnabled) ?
-			RainbowColor(LocalTime() * 0.12f + 0.22f, 1.0f) :
-			MixColors(Accent, ColorRGBA(0.12f, 0.16f, 0.22f, 1.0f), 0.35f);
+			Accent2 = RainbowColor(LocalTime() * 0.12f + 0.22f, 1.0f);
+		}
+		else if(ForceIslandCustomColor)
+		{
+			Accent = color_cast<ColorRGBA>(ColorHSLA(g_Config.m_ClZzIslandColor));
+			Accent2 = MixColors(Accent, ColorRGBA(0.12f, 0.16f, 0.22f, 1.0f), 0.35f);
+		}
 		const float BorderAlpha = 0.86f;
 		const ColorRGBA InnerFill = ColorRGBA(0.06f, 0.06f, 0.08f, 0.70f);
 		const ColorRGBA BorderLeft = MixColors(Accent, ColorRGBA(1.0f, 1.0f, 1.0f, 1.0f), 0.22f).WithAlpha(BorderAlpha);
@@ -2380,12 +2388,18 @@ void CHud::RenderZzWatermark()
 	const float Corner = BoxH * 0.43f;
 
 	const auto Track = GameClient()->m_MusicSMTC.GetTrackInfo();
+	const bool Playing = Track.m_Available && Track.m_Playing;
 	ColorRGBA Accent(std::clamp(Track.m_AccentR, 0.0f, 1.0f), std::clamp(Track.m_AccentG, 0.0f, 1.0f), std::clamp(Track.m_AccentB, 0.0f, 1.0f), 1.0f);
 	ColorRGBA Accent2 = MixColors(Accent, ColorRGBA(0.10f, 0.14f, 0.20f, 1.0f), 0.42f);
 	if(g_Config.m_ClZzWatermarkRainbowEnabled)
 	{
 		Accent = RainbowColor(LocalTime() * 0.10f, 1.0f);
 		Accent2 = RainbowColor(LocalTime() * 0.10f + 0.20f, 1.0f);
+	}
+	else if(!Playing || g_Config.m_ClZzWatermarkColorApplyWhenPlayerActive)
+	{
+		Accent = color_cast<ColorRGBA>(ColorHSLA(g_Config.m_ClZzWatermarkColor));
+		Accent2 = MixColors(Accent, ColorRGBA(0.10f, 0.14f, 0.20f, 1.0f), 0.42f);
 	}
 	const float BorderAlpha = 0.86f;
 	const ColorRGBA InnerFill = ColorRGBA(0.06f, 0.06f, 0.08f, 0.70f);
@@ -2488,10 +2502,12 @@ void CHud::OnRender()
 	{
 		if(GameClient()->m_Snap.m_pLocalCharacter && !GameClient()->m_Snap.m_SpecInfo.m_Active && !(GameClient()->m_Snap.m_pGameInfoObj->m_GameStateFlags & GAMESTATEFLAG_GAMEOVER))
 		{
-			// ZZetClient: visual FOV
+			// ZZetClient: aimbot overlays (FOV + selected target glow)
 			const bool ShowRegularAimbotFov = g_Config.m_ClZzAimbotEnabled && g_Config.m_ClZzAimbotShowFov &&
 				GameClient()->m_Controls.m_aSaveInBlock[g_Config.m_ClDummy] == 0;
-			if(ShowRegularAimbotFov)
+			const bool ShowAimbotGlow = g_Config.m_ClZzAimbotEnabled && g_Config.m_ClZzAimbotGlowTarget &&
+				GameClient()->m_Controls.m_aSaveInBlock[g_Config.m_ClDummy] == 0;
+			if(ShowRegularAimbotFov || ShowAimbotGlow)
 			{
 				// draw in world space
 				float WorldW = 0.0f;
@@ -2503,24 +2519,56 @@ void CHud::OnRender()
 				const float Y1 = Y0 + WorldH;
 				Graphics()->MapScreen(X0, Y0, X1, Y1);
 
-				const vec2 LocalPos = GameClient()->m_LocalCharacterPos;
-				vec2 Aim = GameClient()->m_Controls.m_aMousePos[g_Config.m_ClDummy];
-				if(length(Aim) < 0.001f)
-					Aim = vec2(1.0f, 0.0f);
-				Aim = normalize(Aim);
-				const float HalfFov = (float)g_Config.m_ClZzAimbotFov * (pi / 180.0f) * 0.5f;
-				const float Range = (float)GameClient()->m_aTuning[g_Config.m_ClDummy].m_HookLength;
-				const vec2 LeftDir = direction(angle(Aim) - HalfFov);
-				const vec2 RightDir = direction(angle(Aim) + HalfFov);
+				if(ShowRegularAimbotFov)
+				{
+					const vec2 LocalPos = GameClient()->m_LocalCharacterPos;
+					vec2 Aim = GameClient()->m_Controls.m_aMousePos[g_Config.m_ClDummy];
+					if(length(Aim) < 0.001f)
+						Aim = vec2(1.0f, 0.0f);
+					Aim = normalize(Aim);
+					const float HalfFov = (float)g_Config.m_ClZzAimbotFov * (pi / 180.0f) * 0.5f;
+					const float Range = (float)GameClient()->m_aTuning[g_Config.m_ClDummy].m_HookLength;
+					const vec2 LeftDir = direction(angle(Aim) - HalfFov);
+					const vec2 RightDir = direction(angle(Aim) + HalfFov);
 
-				IGraphics::CLineItem aLines[2] = {
-					IGraphics::CLineItem(LocalPos.x, LocalPos.y, LocalPos.x + LeftDir.x * Range, LocalPos.y + LeftDir.y * Range),
-					IGraphics::CLineItem(LocalPos.x, LocalPos.y, LocalPos.x + RightDir.x * Range, LocalPos.y + RightDir.y * Range)};
-				Graphics()->TextureClear();
-				Graphics()->LinesBegin();
-				Graphics()->SetColor(1.0f, 0.2f, 0.2f, 0.6f);
-				Graphics()->LinesDraw(aLines, 2);
-				Graphics()->LinesEnd();
+					IGraphics::CLineItem aLines[2] = {
+						IGraphics::CLineItem(LocalPos.x, LocalPos.y, LocalPos.x + LeftDir.x * Range, LocalPos.y + LeftDir.y * Range),
+						IGraphics::CLineItem(LocalPos.x, LocalPos.y, LocalPos.x + RightDir.x * Range, LocalPos.y + RightDir.y * Range)};
+					Graphics()->TextureClear();
+					Graphics()->LinesBegin();
+					Graphics()->SetColor(1.0f, 0.2f, 0.2f, 0.6f);
+					Graphics()->LinesDraw(aLines, 2);
+					Graphics()->LinesEnd();
+				}
+
+				if(ShowAimbotGlow)
+				{
+					const int TargetId = GameClient()->ZzAimbotGlowTargetId(g_Config.m_ClDummy);
+					if(in_range(TargetId, MAX_CLIENTS - 1) && GameClient()->m_Snap.m_aCharacters[TargetId].m_Active)
+					{
+						const vec2 TargetPos = GameClient()->m_aClients[TargetId].m_RegularPredicted.m_Pos;
+						const float Pulse = 0.55f + 0.45f * sinf((float)Client()->LocalTime() * 8.5f);
+						const float InnerRadius = CCharacterCore::PhysicalSize() * 0.90f;
+						const float OuterRadius = CCharacterCore::PhysicalSize() * 1.60f;
+
+						Graphics()->TextureClear();
+						Graphics()->QuadsBegin();
+						Graphics()->SetColor(1.0f, 0.03f, 0.03f, 0.16f + 0.10f * Pulse);
+						Graphics()->DrawCircle(TargetPos.x, TargetPos.y, OuterRadius, 28);
+						Graphics()->SetColor(1.0f, 0.08f, 0.08f, 0.28f + 0.14f * Pulse);
+						Graphics()->DrawCircle(TargetPos.x, TargetPos.y, InnerRadius, 24);
+						Graphics()->QuadsEnd();
+
+						const float CrossR = CCharacterCore::PhysicalSize() * 0.55f;
+						IGraphics::CLineItem aTargetLines[2] = {
+							IGraphics::CLineItem(TargetPos.x - CrossR, TargetPos.y, TargetPos.x + CrossR, TargetPos.y),
+							IGraphics::CLineItem(TargetPos.x, TargetPos.y - CrossR, TargetPos.x, TargetPos.y + CrossR)};
+						Graphics()->LinesBegin();
+						Graphics()->SetColor(1.0f, 0.20f, 0.20f, 0.80f);
+						Graphics()->LinesDraw(aTargetLines, 2);
+						Graphics()->LinesEnd();
+					}
+				}
 
 				// restore HUD screen
 				m_Width = 300.0f * Graphics()->ScreenAspect();
@@ -2657,6 +2705,8 @@ void CHud::OnRender()
 		RenderSuddenDeath();
 		if(g_Config.m_ClShowhudScore)
 			RenderScoreHud();
+		GameClient()->m_VoiceChat.RenderHudTalkingIndicator(m_Width, m_Height);
+		GameClient()->m_VoiceChat.RenderHudMuteStatusIndicator(m_Width, m_Height);
 		RenderDummyActions();
 		RenderWarmupTimer();
 		RenderTextInfo();

@@ -15,6 +15,7 @@
 #include <cctype>
 #include <cstdarg>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -23,8 +24,10 @@ namespace
 constexpr const char *LOG_SCOPE = "zz-bc-presence";
 constexpr const char *OLD_TOKEN_URL = "http://150.241.70.188:8779/token.json";
 constexpr const char *NEW_TOKEN_URL = "https://150.241.70.188:8779/token.json";
+constexpr const char *USERS_URL = "https://150.241.70.188:8779/users.json";
 constexpr int DEFAULT_INDICATOR_PORT = 8778;
 constexpr int TOKEN_REFRESH_SECONDS = 60;
+constexpr int USERS_REFRESH_SECONDS = 30;
 constexpr int HEARTBEAT_SECONDS = 5;
 
 constexpr uint32_t PROTOCOL_MAGIC = 0x42434931u; // BCI1
@@ -155,6 +158,12 @@ std::string NormalizeConfiguredNickname(const char *pRawNickname)
 
 	return std::string(pBegin, pEnd);
 }
+
+const char *GetStringField(const json_value &Json, const char *pField)
+{
+	const json_value &Field = Json[pField];
+	return Field.type == json_string ? Field.u.string.ptr : nullptr;
+}
 }
 
 CZzBestClientPresence::CZzBestClientPresence()
@@ -196,10 +205,12 @@ void CZzBestClientPresence::OnStateChange(int NewState, int OldState)
 		StopPresence(true);
 		ResetTokenState();
 	}
-	else if(NewState == IClient::STATE_ONLINE && g_Config.m_ClZzBestclientRegister)
+	else if(NewState == IClient::STATE_ONLINE)
 	{
-		DebugLog("state online -> refresh token");
-		RefreshToken(false);
+		DebugLog("state online -> refresh token/users");
+		if(g_Config.m_ClZzBestclientRegister)
+			RefreshToken(false);
+		RefreshUsers(false);
 	}
 }
 
@@ -207,7 +218,7 @@ void CZzBestClientPresence::OnUpdate()
 {
 	const bool Enabled = g_Config.m_ClZzBestclientRegister != 0;
 	const bool Online = Client()->State() == IClient::STATE_ONLINE;
-	if(Enabled && !g_Config.m_HttpAllowInsecure)
+	if(!g_Config.m_HttpAllowInsecure)
 	{
 		g_Config.m_HttpAllowInsecure = 1;
 		if(!m_ForcedAllowInsecure)
@@ -216,6 +227,22 @@ void CZzBestClientPresence::OnUpdate()
 			m_ForcedAllowInsecure = true;
 		}
 	}
+	if(m_pUsersTask && m_pUsersTask->State() == EHttpState::DONE)
+	{
+		DebugLog("users request done http_status=%d", m_pUsersTask->StatusCode());
+		FinishUsersRefresh();
+		ResetUsersTask();
+	}
+	else if(m_pUsersTask && (m_pUsersTask->State() == EHttpState::ERROR || m_pUsersTask->State() == EHttpState::ABORTED))
+	{
+		DebugLog("users request failed state=%d", (int)m_pUsersTask->State());
+		ResetUsersTask();
+	}
+
+	const int64_t Now = time_get();
+	if(!m_pUsersTask && (m_LastUsersRefreshTick == 0 || Now - m_LastUsersRefreshTick >= USERS_REFRESH_SECONDS * time_freq()))
+		RefreshUsers(false);
+
 	if(!Enabled || !Online)
 	{
 		if(m_Socket || !m_RegisteredClientIds.empty() || m_pTokenTask || m_aWebSharedToken[0] != '\0')
@@ -243,8 +270,6 @@ void CZzBestClientPresence::OnUpdate()
 			StopPresence(true);
 		ResetTokenTask();
 	}
-
-	const int64_t Now = time_get();
 	if(!m_pTokenTask && (m_LastTokenRefreshTick == 0 || Now - m_LastTokenRefreshTick >= TOKEN_REFRESH_SECONDS * time_freq()))
 		RefreshToken(false);
 
@@ -340,9 +365,137 @@ void CZzBestClientPresence::ResetTokenTask()
 	}
 }
 
+void CZzBestClientPresence::RefreshUsers(bool Force)
+{
+	if(m_pUsersTask && !m_pUsersTask->Done())
+	{
+		if(!Force)
+		{
+			DebugLog("users refresh skipped: request in progress");
+			return;
+		}
+		ResetUsersTask();
+	}
+
+	m_pUsersTask = HttpGet(USERS_URL);
+	m_pUsersTask->Timeout(CTimeout{10000, 0, 500, 5});
+	m_pUsersTask->IpResolve(IPRESOLVE::V4);
+	m_pUsersTask->VerifyPeer(false);
+	m_pUsersTask->LogProgress(HTTPLOG::FAILURE);
+	m_LastUsersRefreshTick = time_get();
+	DebugLog("users refresh start url=%s", USERS_URL);
+	Http()->Run(m_pUsersTask);
+}
+
+void CZzBestClientPresence::FinishUsersRefresh()
+{
+	if(!m_pUsersTask)
+		return;
+
+	json_value *pJson = m_pUsersTask->ResultJson();
+	if(!pJson)
+	{
+		DebugLog("users refresh completed but JSON parse failed");
+		return;
+	}
+
+	std::unordered_map<std::string, std::unordered_set<std::string>> Parsed;
+	const auto AddPlayer = [&](const char *pServerAddress, const char *pName) {
+		if(!pServerAddress || !pName || pServerAddress[0] == '\0' || pName[0] == '\0')
+			return;
+		std::string NormalizedAddress;
+		if(!NormalizeServerAddress(pServerAddress, NormalizedAddress))
+			return;
+		Parsed[NormalizedAddress].insert(pName);
+	};
+
+	std::function<void(const char *, const json_value &)> ParsePlayersValue = [&](const char *pServerAddress, const json_value &Players) {
+		if(!pServerAddress || pServerAddress[0] == '\0')
+			return;
+		if(Players.type == json_array)
+		{
+			for(unsigned int i = 0; i < Players.u.array.length; ++i)
+			{
+				const json_value &Player = *Players.u.array.values[i];
+				if(Player.type == json_string)
+					AddPlayer(pServerAddress, Player.u.string.ptr);
+				else if(Player.type == json_object)
+				{
+					if(const char *pName = GetStringField(Player, "name"))
+						AddPlayer(pServerAddress, pName);
+					else if(const char *pName = GetStringField(Player, "player_name"))
+						AddPlayer(pServerAddress, pName);
+				}
+			}
+		}
+		else if(Players.type == json_object)
+		{
+			if(const char *pName = GetStringField(Players, "name"))
+				AddPlayer(pServerAddress, pName);
+			if(const char *pName = GetStringField(Players, "player_name"))
+				AddPlayer(pServerAddress, pName);
+			for(unsigned int i = 0; i < Players.u.object.length; ++i)
+			{
+				const auto &Entry = Players.u.object.values[i];
+				if(Entry.value->type == json_object || Entry.value->type == json_array)
+					ParsePlayersValue(pServerAddress, *Entry.value);
+				else if(Entry.value->type == json_string)
+					AddPlayer(pServerAddress, Entry.value->u.string.ptr);
+			}
+		}
+	};
+
+	if(pJson->type == json_array)
+	{
+		for(unsigned int i = 0; i < pJson->u.array.length; ++i)
+		{
+			const json_value &Entry = *pJson->u.array.values[i];
+			if(Entry.type != json_object)
+				continue;
+			const char *pServerAddress = GetStringField(Entry, "server_address");
+			if(!pServerAddress)
+				pServerAddress = GetStringField(Entry, "address");
+			if(!pServerAddress)
+				pServerAddress = GetStringField(Entry, "server");
+			if(!pServerAddress)
+				continue;
+			const json_value &Players = Entry["players"];
+			if(Players.type != json_none)
+				ParsePlayersValue(pServerAddress, Players);
+			if(const char *pName = GetStringField(Entry, "name"))
+				AddPlayer(pServerAddress, pName);
+			if(const char *pName = GetStringField(Entry, "player_name"))
+				AddPlayer(pServerAddress, pName);
+		}
+	}
+	else if(pJson->type == json_object)
+	{
+		for(unsigned int i = 0; i < pJson->u.object.length; ++i)
+		{
+			const auto &Entry = pJson->u.object.values[i];
+			if(Entry.value->type == json_object || Entry.value->type == json_array)
+				ParsePlayersValue(Entry.name, *Entry.value);
+		}
+	}
+
+	json_value_free(pJson);
+	m_BestClientPlayersByServer = std::move(Parsed);
+	DebugLog("users refresh success, servers=%d", (int)m_BestClientPlayersByServer.size());
+}
+
+void CZzBestClientPresence::ResetUsersTask()
+{
+	if(m_pUsersTask)
+	{
+		m_pUsersTask->Abort();
+		m_pUsersTask = nullptr;
+	}
+}
+
 void CZzBestClientPresence::ResetTokenState()
 {
 	ResetTokenTask();
+	ResetUsersTask();
 	m_aWebSharedToken[0] = '\0';
 }
 
@@ -434,6 +587,105 @@ const char *CZzBestClientPresence::CurrentGameServerAddress()
 
 	net_addr_str(&Client()->ServerAddress(), m_aCurrentGameServerAddress, sizeof(m_aCurrentGameServerAddress), true);
 	return m_aCurrentGameServerAddress;
+}
+
+bool CZzBestClientPresence::NormalizeServerAddress(const char *pAddress, std::string &OutAddress)
+{
+	OutAddress.clear();
+	if(!pAddress || pAddress[0] == '\0')
+		return false;
+
+	char aToken[MAX_SERVER_ADDRESSES * NETADDR_MAXSTRSIZE];
+	const char *pBegin = pAddress;
+	while(*pBegin != '\0' && str_isspace(*pBegin))
+		++pBegin;
+	int Length = 0;
+	while(pBegin[Length] != '\0' && pBegin[Length] != ',')
+		++Length;
+	while(Length > 0 && str_isspace(pBegin[Length - 1]))
+		--Length;
+	str_truncate(aToken, sizeof(aToken), pBegin, Length);
+	if(aToken[0] == '\0')
+		return false;
+
+	NETADDR Addr;
+	char aNormalized[NETADDR_MAXSTRSIZE];
+	if(net_addr_from_url(&Addr, aToken, nullptr, 0) == 0 || net_addr_from_str(&Addr, aToken) == 0)
+	{
+		net_addr_str(&Addr, aNormalized, sizeof(aNormalized), true);
+		OutAddress = aNormalized;
+		return true;
+	}
+
+	OutAddress = aToken;
+	return true;
+}
+
+std::string CZzBestClientPresence::CurrentGameServerAddressNormalized() const
+{
+	if(Client()->State() != IClient::STATE_ONLINE)
+		return {};
+	if(IsBlockedIndicatorAddress(Client()->ServerAddress()))
+		return {};
+
+	char aAddress[NETADDR_MAXSTRSIZE];
+	net_addr_str(&Client()->ServerAddress(), aAddress, sizeof(aAddress), true);
+	std::string OutAddress;
+	if(!NormalizeServerAddress(aAddress, OutAddress))
+		return {};
+	return OutAddress;
+}
+
+bool CZzBestClientPresence::IsBestClientPlayerOnCurrentServer(const char *pPlayerName) const
+{
+	if(!pPlayerName || pPlayerName[0] == '\0')
+		return false;
+	const std::string Server = CurrentGameServerAddressNormalized();
+	if(Server.empty())
+		return false;
+	const auto It = m_BestClientPlayersByServer.find(Server);
+	if(It == m_BestClientPlayersByServer.end())
+		return false;
+	return It->second.find(pPlayerName) != It->second.end();
+}
+
+bool CZzBestClientPresence::IsBestClientPlayerOnServer(const CServerInfo *pServerInfo, const char *pPlayerName) const
+{
+	if(!pServerInfo || !pPlayerName || pPlayerName[0] == '\0')
+		return false;
+	for(int AddrIndex = 0; AddrIndex < pServerInfo->m_NumAddresses; AddrIndex++)
+	{
+		char aAddress[NETADDR_MAXSTRSIZE];
+		net_addr_str(&pServerInfo->m_aAddresses[AddrIndex], aAddress, sizeof(aAddress), true);
+		std::string Normalized;
+		if(!NormalizeServerAddress(aAddress, Normalized))
+			continue;
+		const auto It = m_BestClientPlayersByServer.find(Normalized);
+		if(It != m_BestClientPlayersByServer.end() && It->second.find(pPlayerName) != It->second.end())
+			return true;
+	}
+	return false;
+}
+
+int CZzBestClientPresence::CountBestClientPlayersOnServer(const CServerInfo *pServerInfo) const
+{
+	if(!pServerInfo)
+		return 0;
+	std::unordered_set<std::string> UniquePlayers;
+	for(int AddrIndex = 0; AddrIndex < pServerInfo->m_NumAddresses; AddrIndex++)
+	{
+		char aAddress[NETADDR_MAXSTRSIZE];
+		net_addr_str(&pServerInfo->m_aAddresses[AddrIndex], aAddress, sizeof(aAddress), true);
+		std::string Normalized;
+		if(!NormalizeServerAddress(aAddress, Normalized))
+			continue;
+		const auto It = m_BestClientPlayersByServer.find(Normalized);
+		if(It == m_BestClientPlayersByServer.end())
+			continue;
+		for(const std::string &Name : It->second)
+			UniquePlayers.insert(Name);
+	}
+	return (int)UniquePlayers.size();
 }
 
 const char *CZzBestClientPresence::PlayerNameForClient(int ClientId) const

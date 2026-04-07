@@ -5,11 +5,13 @@
 
 #include <engine/shared/http.h>
 #include <engine/shared/uuid_manager.h>
+#include <engine/serverbrowser.h>
 
 #include <game/client/component.h>
 
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -23,6 +25,9 @@ public:
 	void OnUpdate() override;
 	void OnStateChange(int NewState, int OldState) override;
 	void OnShutdown() override;
+	bool IsBestClientPlayerOnCurrentServer(const char *pPlayerName) const;
+	bool IsBestClientPlayerOnServer(const CServerInfo *pServerInfo, const char *pPlayerName) const;
+	int CountBestClientPlayersOnServer(const CServerInfo *pServerInfo) const;
 
 private:
 	NETSOCKET m_Socket = nullptr;
@@ -36,15 +41,21 @@ private:
 	std::unordered_set<int> m_RegisteredClientIds;
 
 	std::shared_ptr<CHttpRequest> m_pTokenTask = nullptr;
+	std::shared_ptr<CHttpRequest> m_pUsersTask = nullptr;
 	char m_aWebSharedToken[256] = "";
 	int64_t m_LastHeartbeatTick = 0;
 	int64_t m_LastTokenRefreshTick = 0;
+	int64_t m_LastUsersRefreshTick = 0;
 	int64_t m_LastSocketOpenAttemptTick = 0;
 	bool m_ForcedAllowInsecure = false;
+	std::unordered_map<std::string, std::unordered_set<std::string>> m_BestClientPlayersByServer;
 
 	void RefreshToken(bool Force);
 	void FinishTokenRefresh();
 	void ResetTokenTask();
+	void RefreshUsers(bool Force);
+	void FinishUsersRefresh();
+	void ResetUsersTask();
 	void ResetTokenState();
 
 	void EnsurePresenceSocket();
@@ -61,10 +72,12 @@ private:
 	std::vector<std::string> ParseConfiguredNicknames() const;
 
 	const char *CurrentGameServerAddress();
+	std::string CurrentGameServerAddressNormalized() const;
 	const char *PlayerNameForClient(int ClientId) const;
 	const char *EffectiveSharedToken() const;
 	void PrintConsoleMessage(const char *pFormat, ...) const;
 	void DebugLog(const char *pFormat, ...) const;
+	static bool NormalizeServerAddress(const char *pAddress, std::string &OutAddress);
 
 	std::unordered_set<std::string> m_MissingConfiguredNicknames;
 };
