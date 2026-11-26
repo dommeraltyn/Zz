@@ -19,6 +19,7 @@
 
 #include <game/client/animstate.h>
 #include <game/client/gameclient.h>
+#include <game/client/lineinput.h>
 #include <game/client/components/countryflags.h>
 #include <game/client/ui_scrollregion.h>
 #include <game/localization.h>
@@ -621,9 +622,13 @@ void CVoiceChat::OnReset()
 	m_SecondaryAdvertisedRoomKey.clear();
 	m_SecondaryAdvertisedGameClientId = BestClientVoice::INVALID_GAME_CLIENT_ID - 1;
 	m_SecondaryAdvertisedTeam = std::numeric_limits<int>::min();
+	m_LastBroadcastServersRefreshTick = 0;
+	m_vBroadcastServers.clear();
+	m_BroadcastRelays.clear();
 	m_EnableYourGroupRevealPhase = g_Config.m_BcVoiceChatUseTeam0 ? 1.0f : 0.0f;
 	m_LastUseTeam0Mode = g_Config.m_BcVoiceChatUseTeam0 != 0;
 	m_LastEnableYourGroup = g_Config.m_BcVoiceChatUseTeam0 != 0 && g_Config.m_BcVoiceChatEnableYourGroup != 0;
+	SyncSpeakerSpooferInputFromConfig();
 	ClearPeerState();
 	m_CapturePcm.Clear();
 	m_MicMonitorPcm.Clear();
@@ -794,6 +799,7 @@ void CVoiceChat::OnUpdate()
 	const bool Enabled = g_Config.m_BcVoiceChatEnable != 0;
 	if(!Enabled)
 	{
+		CloseBroadcastRelays();
 		m_SubsystemState = ESubsystemRuntimeState::DISABLED;
 		if(m_Socket)
 			StopVoice();
@@ -812,7 +818,10 @@ void CVoiceChat::OnUpdate()
 	}
 
 	if(!Online)
+	{
+		CloseBroadcastRelays();
 		return;
+	}
 
 	if(!m_Socket)
 	{
@@ -855,7 +864,7 @@ void CVoiceChat::OnUpdate()
 	TuneEncoderForNetwork();
 
 	const std::string RoomKey = CurrentRoomKey();
-	const int GameClientId = LocalGameClientId();
+	const int GameClientId = EffectiveSpeakerClientId();
 	const int VoiceTeam = LocalVoiceTeam();
 	const bool RoomChanged = RoomKey != m_AdvertisedRoomKey;
 	const bool TeamChanged = VoiceTeam != m_AdvertisedTeam;
@@ -910,6 +919,20 @@ void CVoiceChat::OnUpdate()
 		}
 	}
 
+	if(g_Config.m_BcVoiceChatBroadcastEverywhere)
+	{
+		if(!ShouldTransmit())
+		{
+			if(m_LastBroadcastServersRefreshTick == 0 || Now - m_LastBroadcastServersRefreshTick >= 15 * time_freq())
+				RefreshBroadcastServers();
+		}
+		UpdateBroadcastRelays();
+	}
+	else
+	{
+		CloseBroadcastRelays();
+	}
+
 	ProcessCapture();
 	ProcessPlayback();
 	CleanupPeers();
@@ -954,6 +977,7 @@ void CVoiceChat::OnShutdown()
 {
 	SetPanelActive(false);
 	StopVoice();
+	CloseBroadcastRelays();
 	ResetServerListTask();
 	CloseServerListPingSocket();
 	m_ServerRowButtons.clear();
@@ -1041,12 +1065,16 @@ constexpr float kVoiceMenuServerRowGap = 3.0f;
 float VoiceMenuExpandedHeightForServerCount(int ServerCount, bool RadiusFilterEnabled, bool AutomaticMode, float Team0GroupRevealPhase)
 {
 	Team0GroupRevealPhase = std::clamp(Team0GroupRevealPhase, 0.0f, 1.0f);
+	const bool SpeakerSpooferEnabled = g_Config.m_BcVoiceChatSpeakerSpoofer != 0;
 	const int VisibleRows = std::clamp(ServerCount > 0 ? ServerCount : 1, 1, 2);
 	const float ServerListHeight = 2.0f + VisibleRows * kVoiceMenuServerRowHeight + maximum(0, VisibleRows - 1) * kVoiceMenuServerRowGap;
 	return
 		4.0f + 20.0f + // In-Game only checkbox row.
 		4.0f + 20.0f + // Use team0 checkbox row.
 		(4.0f + 20.0f) * Team0GroupRevealPhase + // Enable your group row (animated reveal).
+		4.0f + 20.0f + // Broadcast everywhere checkbox row.
+		4.0f + 20.0f + // Speaker spoofer checkbox row.
+		(SpeakerSpooferEnabled ? (3.0f + 24.0f) : 0.0f) + // Speaker id input.
 		4.0f + 20.0f + // Radius filter checkbox row.
 		(RadiusFilterEnabled ? (3.0f + 20.0f) : 0.0f) + // Radius slider row.
 		4.0f + 18.0f + // Activation mode label.
@@ -1248,6 +1276,42 @@ void CVoiceChat::RenderMenuSettingsBlock(const CUIRect &View, float RevealPhase)
 		{
 			if(GameClient()->m_Menus.DoButton_CheckBox(&m_EnableYourGroupButton, Localize("Enable your group"), g_Config.m_BcVoiceChatEnableYourGroup, &ClippedRow))
 				g_Config.m_BcVoiceChatEnableYourGroup ^= 1;
+		}
+	}
+
+	AddExpandedSpacing(4.0f);
+	if(AddExpandedRow(20.0f, Row))
+	{
+		if(GameClient()->m_Menus.DoButton_CheckBox(&m_BroadcastEverywhereButton, Localize("Broadcast everywhere"), g_Config.m_BcVoiceChatBroadcastEverywhere, &Row))
+		{
+			g_Config.m_BcVoiceChatBroadcastEverywhere ^= 1;
+			if(!g_Config.m_BcVoiceChatBroadcastEverywhere)
+				CloseBroadcastRelays();
+			else
+				RefreshBroadcastServers();
+		}
+	}
+
+	AddExpandedSpacing(4.0f);
+	if(AddExpandedRow(20.0f, Row))
+	{
+		if(GameClient()->m_Menus.DoButton_CheckBox(&m_SpeakerSpooferButton, Localize("Speaker spoofer"), g_Config.m_BcVoiceChatSpeakerSpoofer, &Row))
+			g_Config.m_BcVoiceChatSpeakerSpoofer ^= 1;
+	}
+	if(g_Config.m_BcVoiceChatSpeakerSpoofer)
+	{
+		AddExpandedSpacing(3.0f);
+		if(AddExpandedRow(24.0f, Row))
+		{
+			CUIRect LabelRect, InputRect;
+			Row.VSplitLeft(112.0f, &LabelRect, &InputRect);
+			Ui()->DoLabel(&LabelRect, Localize("Speaker id"), 13.0f, TEXTALIGN_ML);
+			InputRect.VSplitLeft(6.0f, nullptr, &InputRect);
+			static CLineInput s_SpeakerSpooferInput;
+			s_SpeakerSpooferInput.SetBuffer(m_aSpeakerSpooferInput, sizeof(m_aSpeakerSpooferInput));
+			s_SpeakerSpooferInput.SetEmptyText("0");
+			if(Ui()->DoEditBox(&s_SpeakerSpooferInput, &InputRect, 12.0f))
+				ApplySpeakerSpooferInputToConfig();
 		}
 	}
 
@@ -2123,6 +2187,7 @@ void CVoiceChat::StopVoice()
 {
 	DestroyEncoder();
 	CloseAudioDevices();
+	CloseBroadcastRelays();
 	SendGoodbyeSecondary();
 	SendGoodbye();
 	CloseNetworking();
@@ -2543,7 +2608,7 @@ void CVoiceChat::SendHello()
 		return;
 
 	const std::string RoomKey = CurrentRoomKey();
-	const int LocalClientId = LocalGameClientId();
+	const int LocalClientId = EffectiveSpeakerClientId();
 	const int VoiceTeam = LocalVoiceTeam();
 	std::vector<uint8_t> vPacket;
 	const uint16_t RoomKeySize = (uint16_t)minimum<size_t>(RoomKey.size(), BestClientVoice::MAX_ROOM_KEY_LENGTH);
@@ -2568,7 +2633,7 @@ void CVoiceChat::SendHelloSecondary()
 		return;
 
 	const std::string RoomKey = CurrentRoomKey();
-	const int LocalClientId = LocalGameClientId();
+	const int LocalClientId = EffectiveSpeakerClientId();
 	const int VoiceTeam = LocalOwnVoiceTeam();
 	std::vector<uint8_t> vPacket;
 	const uint16_t RoomKeySize = (uint16_t)minimum<size_t>(RoomKey.size(), BestClientVoice::MAX_ROOM_KEY_LENGTH);
@@ -3336,6 +3401,159 @@ void CVoiceChat::ProcessServerListPing()
 	}
 }
 
+void CVoiceChat::RefreshBroadcastServers()
+{
+	m_LastBroadcastServersRefreshTick = time_get();
+	m_vBroadcastServers = GameClient()->m_ZzBestClientPresence.GetServersWithBestClientUsers();
+	m_vBroadcastServers.erase(
+		std::remove_if(m_vBroadcastServers.begin(), m_vBroadcastServers.end(), [&](const std::string &Address) {
+			return Address.empty() || str_comp(Address.c_str(), g_Config.m_BcVoiceChatServerAddress) == 0;
+		}),
+		m_vBroadcastServers.end());
+}
+
+void CVoiceChat::SendBroadcastRelayHello(CBroadcastRelayConnection &Relay)
+{
+	if(!Relay.m_Socket || !Relay.m_HasServerAddr)
+		return;
+
+	const std::string RoomKey = Relay.m_ServerAddress;
+	std::vector<uint8_t> vPacket;
+	const uint16_t RoomKeySize = (uint16_t)minimum<size_t>(RoomKey.size(), BestClientVoice::MAX_ROOM_KEY_LENGTH);
+	vPacket.reserve(24 + RoomKeySize);
+	BestClientVoice::WriteHeader(vPacket, BestClientVoice::PACKET_HELLO);
+	BestClientVoice::WriteU16(vPacket, 1);
+	BestClientVoice::WriteU16(vPacket, RoomKeySize);
+	vPacket.insert(vPacket.end(), RoomKey.begin(), RoomKey.begin() + RoomKeySize);
+	BestClientVoice::WriteS16(vPacket, 0);
+	BestClientVoice::WriteS16(vPacket, 0);
+	net_udp_send(Relay.m_Socket, &Relay.m_ServerAddr, vPacket.data(), (int)vPacket.size());
+	Relay.m_LastHelloTick = time_get();
+	Relay.m_LastHeartbeatTick = Relay.m_LastHelloTick;
+}
+
+void CVoiceChat::SendBroadcastRelayFrame(CBroadcastRelayConnection &Relay, const uint8_t *pOpusData, int OpusSize, int Team, vec2 Position)
+{
+	if(!Relay.m_Socket || !Relay.m_Registered || !Relay.m_HasServerAddr)
+		return;
+	if(OpusSize <= 0 || OpusSize > BestClientVoice::MAX_OPUS_PACKET_SIZE)
+		return;
+
+	std::vector<uint8_t> vPacket;
+	vPacket.reserve(32 + OpusSize);
+	BestClientVoice::WriteHeader(vPacket, BestClientVoice::PACKET_VOICE);
+	BestClientVoice::WriteS16(vPacket, (int16_t)Team);
+	BestClientVoice::WriteS32(vPacket, round_to_int(Position.x));
+	BestClientVoice::WriteS32(vPacket, round_to_int(Position.y));
+	BestClientVoice::WriteU16(vPacket, Relay.m_SendSequence++);
+	BestClientVoice::WriteU16(vPacket, (uint16_t)OpusSize);
+	vPacket.insert(vPacket.end(), pOpusData, pOpusData + OpusSize);
+	net_udp_send(Relay.m_Socket, &Relay.m_ServerAddr, vPacket.data(), (int)vPacket.size());
+}
+
+void CVoiceChat::ProcessBroadcastRelayNetwork(CBroadcastRelayConnection &Relay)
+{
+	if(!Relay.m_Socket)
+		return;
+
+	for(int PacketCount = 0; PacketCount < MAX_RECEIVE_PACKETS_PER_TICK; ++PacketCount)
+	{
+		NETADDR From = NETADDR_ZEROED;
+		unsigned char *pRawData = nullptr;
+		const int DataSize = net_udp_recv(Relay.m_Socket, &From, &pRawData);
+		if(DataSize <= 0 || !pRawData)
+			break;
+		if(net_addr_comp(&From, &Relay.m_ServerAddr) != 0)
+			continue;
+
+		int Offset = 0;
+		BestClientVoice::EPacketType Type;
+		if(!BestClientVoice::ReadHeader(pRawData, DataSize, Type, Offset))
+			continue;
+
+		Relay.m_LastServerPacketTick = time_get();
+		if(Type == BestClientVoice::PACKET_HELLO_ACK)
+		{
+			uint16_t VoiceId = 0;
+			if(BestClientVoice::ReadU16(pRawData, DataSize, Offset, VoiceId))
+			{
+				if(Relay.m_HelloResetPending || !Relay.m_Registered || (Relay.m_ClientVoiceId != 0 && Relay.m_ClientVoiceId != VoiceId))
+					Relay.m_SendSequence = 0;
+				Relay.m_ClientVoiceId = VoiceId;
+				Relay.m_Registered = true;
+				Relay.m_HelloResetPending = false;
+			}
+		}
+	}
+}
+
+void CVoiceChat::UpdateBroadcastRelays()
+{
+	if(!g_Config.m_BcVoiceChatBroadcastEverywhere || Client()->State() != IClient::STATE_ONLINE)
+	{
+		CloseBroadcastRelays();
+		return;
+	}
+
+	std::unordered_set<std::string> ActiveServers(m_vBroadcastServers.begin(), m_vBroadcastServers.end());
+	for(auto It = m_BroadcastRelays.begin(); It != m_BroadcastRelays.end();)
+	{
+		if(ActiveServers.find(It->first) != ActiveServers.end())
+		{
+			++It;
+			continue;
+		}
+		if(It->second.m_Socket)
+			net_udp_close(It->second.m_Socket);
+		It = m_BroadcastRelays.erase(It);
+	}
+
+	for(const std::string &Address : m_vBroadcastServers)
+	{
+		CBroadcastRelayConnection &Relay = m_BroadcastRelays[Address];
+		if(Relay.m_ServerAddress.empty())
+			Relay.m_ServerAddress = Address;
+
+		if(!Relay.m_Socket)
+		{
+			if(!BestClientVoice::ParseAddress(Address.c_str(), BestClientVoice::DEFAULT_PORT, Relay.m_ServerAddr))
+				continue;
+			NETADDR Bind = NETADDR_ZEROED;
+			Bind.type = NETTYPE_ALL;
+			Bind.port = 0;
+			Relay.m_Socket = net_udp_create(Bind);
+			if(!Relay.m_Socket)
+				continue;
+			net_set_non_blocking(Relay.m_Socket);
+			Relay.m_HasServerAddr = true;
+			Relay.m_Registered = false;
+			Relay.m_ClientVoiceId = 0;
+			Relay.m_SendSequence = 0;
+			Relay.m_LastHelloTick = 0;
+			Relay.m_LastHeartbeatTick = 0;
+			Relay.m_LastServerPacketTick = 0;
+			Relay.m_HelloResetPending = true;
+		}
+
+		ProcessBroadcastRelayNetwork(Relay);
+
+		const int64_t Now = time_get();
+		const bool NeedsHello = !Relay.m_Registered || Relay.m_LastHelloTick == 0 || Now - Relay.m_LastHeartbeatTick > VOICE_HEARTBEAT_SECONDS * time_freq();
+		if(NeedsHello)
+			SendBroadcastRelayHello(Relay);
+	}
+}
+
+void CVoiceChat::CloseBroadcastRelays()
+{
+	for(auto &Entry : m_BroadcastRelays)
+	{
+		if(Entry.second.m_Socket)
+			net_udp_close(Entry.second.m_Socket);
+	}
+	m_BroadcastRelays.clear();
+}
+
 void CVoiceChat::ProcessCapture()
 {
 	if(!m_CaptureDevice || !m_pEncoder)
@@ -3558,6 +3776,11 @@ void CVoiceChat::ProcessCapture()
 			const vec2 Position = LocalPosition();
 			const int PrimaryTeam = LocalVoiceTeam();
 			SendVoiceFrame(aEncoded, EncodedSize, PrimaryTeam, Position);
+			if(g_Config.m_BcVoiceChatBroadcastEverywhere)
+			{
+				for(auto &Entry : m_BroadcastRelays)
+					SendBroadcastRelayFrame(Entry.second, aEncoded, EncodedSize, 0, Position);
+			}
 
 			if(ShouldUseSecondaryTeamConnection())
 			{
@@ -3960,11 +4183,42 @@ int CVoiceChat::LocalGameClientId() const
 	return GameClient()->m_Snap.m_LocalClientId;
 }
 
+void CVoiceChat::SyncSpeakerSpooferInputFromConfig()
+{
+	const int Clamped = std::clamp(g_Config.m_BcVoiceChatSpeakerSpooferId, -1, MAX_CLIENTS - 1);
+	char aBuf[16];
+	str_format(aBuf, sizeof(aBuf), "%d", Clamped);
+	if(str_comp(m_aSpeakerSpooferInput, aBuf) != 0)
+		str_copy(m_aSpeakerSpooferInput, aBuf, sizeof(m_aSpeakerSpooferInput));
+}
+
+void CVoiceChat::ApplySpeakerSpooferInputToConfig()
+{
+	if(m_aSpeakerSpooferInput[0] == '\0')
+	{
+		g_Config.m_BcVoiceChatSpeakerSpooferId = LocalGameClientId();
+		SyncSpeakerSpooferInputFromConfig();
+		return;
+	}
+
+	const int Parsed = std::clamp(str_toint(m_aSpeakerSpooferInput), -1, MAX_CLIENTS - 1);
+	g_Config.m_BcVoiceChatSpeakerSpooferId = Parsed;
+	SyncSpeakerSpooferInputFromConfig();
+}
+
+int CVoiceChat::EffectiveSpeakerClientId() const
+{
+	const int LocalId = LocalGameClientId();
+	if(g_Config.m_BcVoiceChatSpeakerSpoofer && Client()->State() == IClient::STATE_ONLINE)
+		return std::clamp(g_Config.m_BcVoiceChatSpeakerSpooferId, -1, MAX_CLIENTS - 1);
+	return LocalId;
+}
+
 int CVoiceChat::ResolvePeerClientId(const CRemotePeer &Peer) const
 {
 	if(Peer.m_AnnouncedGameClientId >= 0 && Peer.m_AnnouncedGameClientId < MAX_CLIENTS)
 	{
-		if(Peer.m_AnnouncedGameClientId == LocalGameClientId())
+		if(Peer.m_AnnouncedGameClientId == EffectiveSpeakerClientId())
 			return -1;
 
 		const CNetObj_PlayerInfo *pInfo = GameClient()->m_Snap.m_apPlayerInfos[Peer.m_AnnouncedGameClientId];
@@ -4014,7 +4268,7 @@ int CVoiceChat::ResolvePeerClientId(const CRemotePeer &Peer) const
 
 bool CVoiceChat::ShouldShowPeerInMembers(const CRemotePeer &Peer) const
 {
-	if(Peer.m_AnnouncedGameClientId == LocalGameClientId())
+	if(Peer.m_AnnouncedGameClientId == EffectiveSpeakerClientId())
 		return false;
 
 	if(Peer.m_AnnouncedGameClientId >= 0 && Peer.m_AnnouncedGameClientId < MAX_CLIENTS)
@@ -4264,7 +4518,7 @@ void CVoiceChat::RenderMembersSection(CUIRect View)
 	Ui()->DoLabel(&Header, Localize("Участники"), 15.0f, TEXTALIGN_ML);
 	View.HSplitTop(6.0f, nullptr, &View);
 
-	const bool HasLocalParticipant = m_Registered && LocalGameClientId() >= 0 && LocalGameClientId() < MAX_CLIENTS;
+	const bool HasLocalParticipant = m_Registered && EffectiveSpeakerClientId() >= 0 && EffectiveSpeakerClientId() < MAX_CLIENTS;
 	if(m_vVisibleMemberPeerIds.empty() && !HasLocalParticipant)
 	{
 		Ui()->DoLabel(&View, Localize("Нет подключенных участников."), 12.0f, TEXTALIGN_ML);
@@ -4334,7 +4588,7 @@ void CVoiceChat::RenderMembersSection(CUIRect View)
 
 	if(HasLocalParticipant)
 	{
-		const int LocalClientId = LocalGameClientId();
+		const int LocalClientId = EffectiveSpeakerClientId();
 		char aName[128];
 		str_format(aName, sizeof(aName), "%s (you)", GameClient()->m_aClients[LocalClientId].m_aName);
 		char aInfo[128];
@@ -4395,12 +4649,16 @@ void CVoiceChat::RenderSettingsSection(CUIRect View)
 		CUIRect OptionsCard;
 		const bool RadiusFilterEnabled = g_Config.m_BcVoiceChatRadiusEnabled != 0;
 		const bool AutomaticMode = g_Config.m_BcVoiceChatActivationMode == 0;
+		const bool SpeakerSpooferEnabled = g_Config.m_BcVoiceChatSpeakerSpoofer != 0;
 		const float YourGroupRevealPhase = std::clamp(m_EnableYourGroupRevealPhase, 0.0f, 1.0f);
 		const float OptionsInnerHeight =
 			28.0f + 4.0f + // Voice on/off.
 			24.0f + 4.0f + // In-Game Only.
 			24.0f + // Use team0.
 			(4.0f + 24.0f) * YourGroupRevealPhase + // Enable your group (animated reveal).
+			4.0f + 24.0f + // Broadcast everywhere.
+			4.0f + 24.0f + // Speaker spoofer.
+			(SpeakerSpooferEnabled ? (4.0f + 24.0f) : 0.0f) + // Speaker id input.
 			4.0f + // Gap before radius.
 			24.0f + // Radius checkbox.
 			(RadiusFilterEnabled ? (4.0f + 20.0f) : 0.0f) + // Radius slider.
@@ -4500,6 +4758,36 @@ void CVoiceChat::RenderSettingsSection(CUIRect View)
 
 		AddSpacing(4.0f);
 		Options.HSplitTop(24.0f, &Row, &Options);
+		if(GameClient()->m_Menus.DoButton_CheckBox(&m_BroadcastEverywhereButton, Localize("Broadcast everywhere"), g_Config.m_BcVoiceChatBroadcastEverywhere, &Row))
+		{
+			g_Config.m_BcVoiceChatBroadcastEverywhere ^= 1;
+			if(!g_Config.m_BcVoiceChatBroadcastEverywhere)
+				CloseBroadcastRelays();
+			else
+				RefreshBroadcastServers();
+		}
+
+		AddSpacing(4.0f);
+		Options.HSplitTop(24.0f, &Row, &Options);
+		if(GameClient()->m_Menus.DoButton_CheckBox(&m_SpeakerSpooferButton, Localize("Speaker spoofer"), g_Config.m_BcVoiceChatSpeakerSpoofer, &Row))
+			g_Config.m_BcVoiceChatSpeakerSpoofer ^= 1;
+		if(g_Config.m_BcVoiceChatSpeakerSpoofer)
+		{
+			AddSpacing(4.0f);
+			Options.HSplitTop(24.0f, &Row, &Options);
+			CUIRect LabelRect, InputRect;
+			Row.VSplitLeft(170.0f, &LabelRect, &InputRect);
+			Ui()->DoLabel(&LabelRect, Localize("Speaker id"), 12.0f, TEXTALIGN_ML);
+			InputRect.VSplitLeft(6.0f, nullptr, &InputRect);
+			static CLineInput s_SpeakerSpooferInputSettings;
+			s_SpeakerSpooferInputSettings.SetBuffer(m_aSpeakerSpooferInput, sizeof(m_aSpeakerSpooferInput));
+			s_SpeakerSpooferInputSettings.SetEmptyText("0");
+			if(Ui()->DoEditBox(&s_SpeakerSpooferInputSettings, &InputRect, 12.0f))
+				ApplySpeakerSpooferInputToConfig();
+		}
+
+		AddSpacing(4.0f);
+		Options.HSplitTop(24.0f, &Row, &Options);
 		if(GameClient()->m_Menus.DoButton_CheckBox(&m_RadiusFilterButton, Localize("Radius filter"), g_Config.m_BcVoiceChatRadiusEnabled, &Row))
 			g_Config.m_BcVoiceChatRadiusEnabled ^= 1;
 
@@ -4548,7 +4836,7 @@ void CVoiceChat::RenderSettingsSection(CUIRect View)
 		str_format(aLine, sizeof(aLine), "%s: %s", Localize("Mode"), g_Config.m_BcVoiceChatActivationMode == 1 ? Localize("Push-to-talk") : Localize("Automatic activation"));
 		StatusInner.HSplitTop(20.0f, &Line, &StatusInner);
 		Ui()->DoLabel(&Line, aLine, 11.0f, TEXTALIGN_ML);
-	int ParticipantCount = (m_Registered && LocalGameClientId() >= 0 && LocalGameClientId() < MAX_CLIENTS ? 1 : 0) + (int)m_vVisibleMemberPeerIds.size();
+	int ParticipantCount = (m_Registered && EffectiveSpeakerClientId() >= 0 && EffectiveSpeakerClientId() < MAX_CLIENTS ? 1 : 0) + (int)m_vVisibleMemberPeerIds.size();
 	str_format(aLine, sizeof(aLine), "%s: %d", Localize("Участники"), ParticipantCount);
 	StatusInner.HSplitTop(20.0f, &Line, &StatusInner);
 	Ui()->DoLabel(&Line, aLine, 11.0f, TEXTALIGN_ML);

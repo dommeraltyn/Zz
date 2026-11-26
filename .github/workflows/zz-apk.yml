@@ -1,0 +1,110 @@
+name: Zz APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: "Architecture"
+        required: true
+        default: arm64
+        type: choice
+        options:
+          - arm64
+          - arm
+          - x86_64
+          - all
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zz-apk
+  cancel-in-progress: true
+
+jobs:
+  build-android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      CARGO_HTTP_MULTIPLEXING: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare java package dir
+        run: mkdir -p scripts/android/files/java/org/zz
+
+      - name: Fix line endings
+        run: |
+          find scripts -type f \( -name '*.sh' -o -name 'gradlew' -o -name '*.gradle' -o -name '*.properties' -o -name '*.pro' \) -exec sed -i 's/\r$//' {} +
+          find scripts -type f \( -name '*.sh' -o -name 'gradlew' \) -exec chmod +x {} +
+          sed -i 's/\r$//' src/game/version.h
+
+      - name: Add prebuilt Android libraries
+        run: |
+          if [ ! -d ddnet-libs/sdl ]; then
+            echo "ddnet-libs отсутствует в репозитории, клонирую целиком"
+            rm -rf ddnet-libs
+            git clone --depth 1 https://github.com/ddnet/ddnet-libs ddnet-libs
+          else
+            git clone --depth 1 https://github.com/ddnet/ddnet-libs /tmp/upstream-libs
+            find ddnet-libs -type d -name android -prune -exec rm -rf {} +
+            rm -rf ddnet-libs/sdl/java
+            (cd /tmp/upstream-libs && find . -type d \( -name android -o -path './sdl/java' \) -prune -print) | while read -r d; do
+              mkdir -p "ddnet-libs/$d"
+              cp -r "/tmp/upstream-libs/$d/." "ddnet-libs/$d/"
+            done
+          fi
+          ls ddnet-libs/sdl ddnet-libs/curl
+
+      - name: Prepare Linux
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y ninja-build openjdk-21-jdk openssl
+          curl -LO https://github.com/Kitware/CMake/releases/download/v3.22.1/cmake-3.22.1-Linux-x86_64.tar.gz
+          mkdir -p /home/runner/cmake
+          tar --strip-components 1 -C /home/runner/cmake -xf cmake-3.22.1-Linux-x86_64.tar.gz
+          rustup default 1.92.0
+          cargo install cargo-ndk
+          rustup target add armv7-linux-androideabi i686-linux-android aarch64-linux-android x86_64-linux-android
+          scripts/android/download_android_sdk.sh /home/runner
+
+      - name: Install Vulkan SDK
+        uses: humbletim/install-vulkan-sdk@v1.2
+        with:
+          version: 1.3.296.0
+          cache: true
+
+      - name: Cache Rust dependencies
+        continue-on-error: true
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src/mastersrv
+            src/masterping
+            ./
+
+      - name: Build APK
+        env:
+          TW_KEY_NAME: /home/runner/App.jks
+          TW_KEY_ALIAS: Zz-Key
+        run: |
+          printf '%s' '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' | base64 -d > "$TW_KEY_NAME"
+          export TW_KEY_PW='ba0f16c5b28e1d9c'
+          export TW_VERSION_CODE="$(grep '#define DDNET_VERSION_NUMBER' src/game/version.h | awk '{print $3}' | tr -d '\r')"
+          export TW_VERSION_NAME="$(grep '#define GAME_RELEASE_VERSION_INTERNAL' src/game/version.h | awk '{print $3}' | tr -d '\r')"
+          export TW_VERSION_CODE="${TW_VERSION_CODE:-1}"
+          export TW_VERSION_NAME="${TW_VERSION_NAME:-1.0}"
+          echo "version: $TW_VERSION_NAME ($TW_VERSION_CODE)"
+          export ANDROID_HOME="/home/runner/Android/Sdk"
+          unset ANDROID_SDK_ROOT
+          export PATH=/home/runner/cmake/bin:$PATH
+          scripts/android/cmake_android.sh "${{ inputs.arch || 'arm64' }}" Zz org.zz.client Release build-zz
+          mkdir artifacts
+          mv build-zz/Zz.apk artifacts/
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: zz-android-${{ inputs.arch || 'arm64' }}
+          path: artifacts

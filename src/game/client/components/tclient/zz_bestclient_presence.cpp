@@ -688,6 +688,18 @@ int CZzBestClientPresence::CountBestClientPlayersOnServer(const CServerInfo *pSe
 	return (int)UniquePlayers.size();
 }
 
+std::vector<std::string> CZzBestClientPresence::GetServersWithBestClientUsers() const
+{
+	std::vector<std::string> vServers;
+	vServers.reserve(m_BestClientPlayersByServer.size());
+	for(const auto &Entry : m_BestClientPlayersByServer)
+	{
+		if(!Entry.second.empty())
+			vServers.push_back(Entry.first);
+	}
+	return vServers;
+}
+
 const char *CZzBestClientPresence::PlayerNameForClient(int ClientId) const
 {
 	if(ClientId < 0 || ClientId >= MAX_CLIENTS)
@@ -930,11 +942,6 @@ void CZzBestClientPresence::UpdatePresence()
 
 void CZzBestClientPresence::DebugLog(const char *pFormat, ...) const
 {
-	char aBuf[1024];
-	va_list Args;
-	va_start(Args, pFormat);
-	str_format_v(aBuf, sizeof(aBuf), pFormat, Args);
-	va_end(Args);
-	log_info(LOG_SCOPE, "%s", aBuf);
+	(void)pFormat;
 }
 

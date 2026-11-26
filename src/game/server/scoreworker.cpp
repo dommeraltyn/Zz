@@ -94,11 +94,22 @@ static int64_t AccountXPForLevel(int Level)
 
 bool CScoreWorker::RegisterAccount(IDbConnection *pSqlServer, const ISqlData *pGameData, char *pError, int ErrorSize)
 {
+	if(!pSqlServer || !pGameData)
+	{
+		str_copy(pError, "RegisterAccount: invalid sql context", ErrorSize);
+		return false;
+	}
 	const auto *pData = dynamic_cast<const CSqlAccountRegisterRequest *>(pGameData);
 	auto *pResult = dynamic_cast<CScorePlayerResult *>(pGameData->m_pResult.get());
+	if(!pData || !pResult)
+	{
+		str_copy(pError, "RegisterAccount: invalid request/result", ErrorSize);
+		return false;
+	}
 	pResult->SetVariant(CScorePlayerResult::ACCOUNT_REGISTER);
 
 	log_info("account", "RegisterAccount: user='%s'", pData->m_aUsername);
+	log_info("account", "RegisterAccount: step=check_exists_prepare");
 
 	// Check existing username
 	char aBuf[512];
@@ -109,6 +120,7 @@ bool CScoreWorker::RegisterAccount(IDbConnection *pSqlServer, const ISqlData *pG
 		return false;
 	}
 	pSqlServer->BindString(1, pData->m_aUsername);
+	log_info("account", "RegisterAccount: step=check_exists_step");
 	bool End;
 	if(!pSqlServer->Step(&End, pError, ErrorSize))
 	{
@@ -125,6 +137,7 @@ bool CScoreWorker::RegisterAccount(IDbConnection *pSqlServer, const ISqlData *pG
 	secure_random_fill(aSalt, sizeof(aSalt));
 	unsigned char aHash[32];
 	HashPasswordSha256(pData->m_aPassword, aSalt, sizeof(aSalt), aHash, sizeof(aHash));
+	log_info("account", "RegisterAccount: step=insert_account_prepare");
 
 	// Insert account
 	str_format(aBuf, sizeof(aBuf), "INSERT INTO %s_accounts (Username, PwHash, PwSalt, LastIgn, LastIP) VALUES (?, ?, ?, ?, ?)", pSqlServer->GetPrefix());
@@ -139,45 +152,56 @@ bool CScoreWorker::RegisterAccount(IDbConnection *pSqlServer, const ISqlData *pG
 	pSqlServer->BindString(4, pData->m_aLastIgn);
 	pSqlServer->BindString(5, pData->m_aClientAddrStr);
 	int NumUpdated;
+	log_info("account", "RegisterAccount: step=insert_account_exec");
 	if(!pSqlServer->ExecuteUpdate(&NumUpdated, pError, ErrorSize))
 	{
 		log_error("account", "RegisterAccount ExecuteUpdate insert failed: %s", pError);
 		return false;
 	}
 
-	// Get inserted id
-	str_format(aBuf, sizeof(aBuf), "SELECT Id FROM %s_accounts WHERE Username = ? LIMIT 1", pSqlServer->GetPrefix());
-	if(!pSqlServer->PrepareStatement(aBuf, pError, ErrorSize))
-		return false;
-	pSqlServer->BindString(1, pData->m_aUsername);
-	if(!pSqlServer->Step(&End, pError, ErrorSize))
-		return false;
-	if(End)
-		return false;
-	int64_t AccountId = pSqlServer->GetInt64(1);
-
 	// Insert stats defaults
-	str_format(aBuf, sizeof(aBuf), "INSERT INTO %s_account_stats (AccountId, XP, Money, PlaytimeSeconds, Deaths, Kills, Combo) VALUES (?, 0, 0, 0, 0, 0, 0)", pSqlServer->GetPrefix());
+	log_info("account", "RegisterAccount: step=insert_stats_prepare");
+	str_format(aBuf, sizeof(aBuf),
+		"INSERT INTO %s_account_stats (AccountId, XP, Money, PlaytimeSeconds, Deaths, Kills, Combo) "
+		"SELECT Id, 0, 0, 0, 0, 0, 0 FROM %s_accounts WHERE Username = ? LIMIT 1",
+		pSqlServer->GetPrefix(), pSqlServer->GetPrefix());
 	if(!pSqlServer->PrepareStatement(aBuf, pError, ErrorSize))
 	{
 		log_error("account", "RegisterAccount PrepareStatement stats insert failed: %s", pError);
 		return false;
 	}
-	pSqlServer->BindInt64(1, AccountId);
+	pSqlServer->BindString(1, pData->m_aUsername);
+	log_info("account", "RegisterAccount: step=insert_stats_exec");
 	if(!pSqlServer->ExecuteUpdate(&NumUpdated, pError, ErrorSize))
 		return false;
+	if(NumUpdated <= 0)
+	{
+		str_copy(pError, "failed to create account stats row", ErrorSize);
+		return false;
+	}
 
 	// Insert settings defaults (language = EN, hint not shown, not manual)
-	str_format(aBuf, sizeof(aBuf), "INSERT INTO %s_account_settings (AccountId, Language, LangHintShown, LangManual, Role, AutoLogin) VALUES (?, 0, 0, 0, 0, 1)", pSqlServer->GetPrefix());
+	log_info("account", "RegisterAccount: step=insert_settings_prepare");
+	str_format(aBuf, sizeof(aBuf),
+		"INSERT INTO %s_account_settings (AccountId, Language, LangHintShown, LangManual, Role, AutoLogin) "
+		"SELECT Id, 0, 0, 0, 0, 1 FROM %s_accounts WHERE Username = ? LIMIT 1",
+		pSqlServer->GetPrefix(), pSqlServer->GetPrefix());
 	if(!pSqlServer->PrepareStatement(aBuf, pError, ErrorSize))
 	{
 		log_error("account", "RegisterAccount PrepareStatement settings insert failed: %s", pError);
 		return false;
 	}
-	pSqlServer->BindInt64(1, AccountId);
+	pSqlServer->BindString(1, pData->m_aUsername);
+	log_info("account", "RegisterAccount: step=insert_settings_exec");
 	if(!pSqlServer->ExecuteUpdate(&NumUpdated, pError, ErrorSize))
 		return false;
+	if(NumUpdated <= 0)
+	{
+		str_copy(pError, "failed to create account settings row", ErrorSize);
+		return false;
+	}
 
+	log_info("account", "RegisterAccount: step=done user='%s'", pData->m_aUsername);
 	str_copy(pResult->m_Data.m_aaMessages[0], "Registered successfully. Now use /login", sizeof(pResult->m_Data.m_aaMessages[0]));
 	return true;
 }
@@ -905,10 +929,18 @@ bool CScoreWorker::AccountKillEvent(IDbConnection *pSqlServer, const ISqlData *p
 
 bool CScoreWorker::LoginAccount(IDbConnection *pSqlServer, const ISqlData *pGameData, char *pError, int ErrorSize)
 {
-	const auto *pData = dynamic_cast<const CSqlAccountLoginRequest *>(pGameData);
-	if(!pData)
+	if(!pSqlServer || !pGameData)
+	{
+		str_copy(pError, "LoginAccount: invalid sql context", ErrorSize);
 		return false;
+	}
+	const auto *pData = dynamic_cast<const CSqlAccountLoginRequest *>(pGameData);
 	auto *pResult = dynamic_cast<CScorePlayerResult *>(pGameData->m_pResult.get());
+	if(!pData || !pResult)
+	{
+		str_copy(pError, "LoginAccount: invalid request/result", ErrorSize);
+		return false;
+	}
 	pResult->SetVariant(CScorePlayerResult::ACCOUNT_LOGIN);
 
 	log_info("account", "LoginAccount: user='%s'", pData->m_aUsername);

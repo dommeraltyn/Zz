@@ -10,6 +10,7 @@
 #include <base/color.h>
 #include <base/system.h>
 #include <base/time.h>
+#include <base/vmath.h>
 
 #include <engine/font_icons.h>
 #include <engine/graphics.h>
@@ -36,6 +37,8 @@
 
 namespace
 {
+constexpr int ZZ_HUD_POS_MAX = 1000;
+
 ColorRGBA MixColors(const ColorRGBA &A, const ColorRGBA &B, float T)
 {
 	const float K = std::clamp(T, 0.0f, 1.0f);
@@ -63,6 +66,13 @@ float ApproachValue(float Value, float Target, float Speed, float Dt)
 	return maximum(Value - Step, Target);
 }
 
+float EaseOutCubic(float T)
+{
+	const float Clamped = std::clamp(T, 0.0f, 1.0f);
+	const float Inv = 1.0f - Clamped;
+	return 1.0f - Inv * Inv * Inv;
+}
+
 std::string CutText(const std::string &Text, int MaxChars)
 {
 	if((int)Text.size() <= MaxChars)
@@ -76,6 +86,81 @@ bool IsPointInsideRect(const CUIRect &Rect, float X, float Y, float Padding = 0.
 {
 	return X >= Rect.x - Padding && X <= Rect.x + Rect.w + Padding &&
 	       Y >= Rect.y - Padding && Y <= Rect.y + Rect.h + Padding;
+}
+
+float ZzHudAnchor01(int Value)
+{
+	const int Clamped = std::clamp(Value, 0, ZZ_HUD_POS_MAX);
+	return Clamped / 1000.0f;
+}
+
+bool ZzHudRightAligned(int Value)
+{
+	const int Clamped = std::clamp(Value, 0, ZZ_HUD_POS_MAX);
+	return Clamped >= 500;
+}
+
+int ZzHudAnchorStore(float Anchor01)
+{
+	return std::clamp((int)round_to_int(std::clamp(Anchor01, 0.0f, 1.0f) * ZZ_HUD_POS_MAX), 0, ZZ_HUD_POS_MAX);
+}
+
+vec2 HudMouseFromUi(CUi *pUi, float HudW, float HudH)
+{
+	const CUIRect UiScreen = *pUi->Screen();
+	const vec2 UiMouse = pUi->MousePos();
+	return vec2(
+		UiMouse.x * HudW / maximum(UiScreen.w, 1.0f),
+		UiMouse.y * HudH / maximum(UiScreen.h, 1.0f));
+}
+
+void EnsureHudAnchorPromilleConfig()
+{
+	static bool s_DidMigrate = false;
+	if(s_DidMigrate)
+		return;
+	s_DidMigrate = true;
+
+	const bool LooksLegacy =
+		g_Config.m_ClZzHudArraylistX >= 0 && g_Config.m_ClZzHudArraylistX <= 100 &&
+		g_Config.m_ClZzHudArraylistY >= 0 && g_Config.m_ClZzHudArraylistY <= 100 &&
+		g_Config.m_ClZzHudNotifyX >= 0 && g_Config.m_ClZzHudNotifyX <= 100 &&
+		g_Config.m_ClZzHudNotifyY >= 0 && g_Config.m_ClZzHudNotifyY <= 100 &&
+		g_Config.m_ClZzHudIslandX >= 0 && g_Config.m_ClZzHudIslandX <= 100 &&
+		g_Config.m_ClZzHudIslandY >= 0 && g_Config.m_ClZzHudIslandY <= 100 &&
+		g_Config.m_ClZzHudWatermarkX >= 0 && g_Config.m_ClZzHudWatermarkX <= 100 &&
+		g_Config.m_ClZzHudWatermarkY >= 0 && g_Config.m_ClZzHudWatermarkY <= 100;
+
+	auto ConvertLegacy = [LooksLegacy](int &Value) {
+		if(LooksLegacy && Value >= 0 && Value <= 100)
+			Value *= 10;
+		else if(!LooksLegacy && Value >= 0 && Value <= 100 && Value != 0)
+		{
+			// Keep modern low anchors (e.g. y=20 for top HUD) unchanged.
+		}
+		Value = std::clamp(Value, 0, ZZ_HUD_POS_MAX);
+	};
+
+	ConvertLegacy(g_Config.m_ClZzHudArraylistX);
+	ConvertLegacy(g_Config.m_ClZzHudArraylistY);
+	ConvertLegacy(g_Config.m_ClZzHudNotifyX);
+	ConvertLegacy(g_Config.m_ClZzHudNotifyY);
+	ConvertLegacy(g_Config.m_ClZzHudIslandX);
+	ConvertLegacy(g_Config.m_ClZzHudIslandY);
+	ConvertLegacy(g_Config.m_ClZzHudWatermarkX);
+	ConvertLegacy(g_Config.m_ClZzHudWatermarkY);
+}
+
+void ResetZzHudLayoutDefaults()
+{
+	g_Config.m_ClZzHudArraylistX = 980;
+	g_Config.m_ClZzHudArraylistY = 500;
+	g_Config.m_ClZzHudNotifyX = 980;
+	g_Config.m_ClZzHudNotifyY = 80;
+	g_Config.m_ClZzHudIslandX = 500;
+	g_Config.m_ClZzHudIslandY = 20;
+	g_Config.m_ClZzHudWatermarkX = 980;
+	g_Config.m_ClZzHudWatermarkY = 20;
 }
 }
 
@@ -149,6 +234,7 @@ void CHud::OnReset()
 	m_aLastPlayerSpeedChange[0] = ESpeedChange::NONE;
 	m_aLastPlayerSpeedChange[1] = ESpeedChange::NONE;
 	m_LastSpectatorCountTick = 0;
+	m_vZzToggleNotifications.clear();
 
 	ResetHudContainers();
 }
@@ -177,6 +263,20 @@ void CHud::OnInit()
 	PreparePlayerStateQuads();
 
 	Graphics()->QuadContainerUpload(m_HudQuadContainerIndex);
+}
+
+void CHud::PushZzToggleNotification(const char *pFeatureName, bool Enabled)
+{
+	if(pFeatureName == nullptr || pFeatureName[0] == '\0')
+		return;
+
+	SZzToggleNotification Notification;
+	str_copy(Notification.m_aFeature, pFeatureName, sizeof(Notification.m_aFeature));
+	Notification.m_Enabled = Enabled;
+	Notification.m_StartTime = time_get();
+	m_vZzToggleNotifications.push_back(Notification);
+	if(m_vZzToggleNotifications.size() > 8)
+		m_vZzToggleNotifications.erase(m_vZzToggleNotifications.begin());
 }
 
 void CHud::RenderGameTimer()
@@ -273,23 +373,25 @@ void CHud::RenderGameTimer()
 		const float BoxH = 14.2f;
 		const float BoxW = PaddingX + ArtBlockW + TextWidth + BarsBlockW + PaddingX;
 		const float Corner = BoxH * 0.38f;
-		const float Y = 2.0f;
-		const float X = Half - BoxW * 0.5f;
+		const bool HudEditMode = g_Config.m_ClZzHudEditMode != 0;
+		float X = m_Width * ZzHudAnchor01(g_Config.m_ClZzHudIslandX) - BoxW * 0.5f;
+		float Y = m_Height * ZzHudAnchor01(g_Config.m_ClZzHudIslandY);
+		X = std::clamp(X, 1.0f, m_Width - BoxW - 1.0f);
+		Y = std::clamp(Y, 1.0f, m_Height - BoxH - 1.0f);
 
-		const bool CanExpandWithMouse = GameClient()->m_Chat.IsActive() && !GameClient()->m_Menus.IsActive();
+		const bool CanExpandWithMouse = !HudEditMode && GameClient()->m_Chat.IsActive() && !GameClient()->m_Menus.IsActive();
 		const float ExpandGap = 2.0f;
 		const float ExpandPanelH = 16.0f;
 		bool ClickPrev = false;
 		bool ClickPause = false;
 		bool ClickNext = false;
 
-		const CUIRect UiScreen = *Ui()->Screen();
-		const vec2 WindowSize(maximum(1.0f, (float)Graphics()->WindowWidth()), maximum(1.0f, (float)Graphics()->WindowHeight()));
-		const vec2 UiMousePos = Ui()->UpdatedMousePos() * vec2(UiScreen.w, UiScreen.h) / WindowSize;
-		const vec2 UiToHudScale(m_Width / maximum(UiScreen.w, 1.0f), m_Height / maximum(UiScreen.h, 1.0f));
-		const float MouseX = UiMousePos.x * UiToHudScale.x;
-		const float MouseY = UiMousePos.y * UiToHudScale.y;
+		const vec2 HudMouse = HudMouseFromUi(Ui(), m_Width, m_Height);
+		const float MouseX = HudMouse.x;
+		const float MouseY = HudMouse.y;
 		const bool ClickedLeft = CanExpandWithMouse && (Ui()->MouseButtonClicked(0) || Input()->KeyPress(KEY_MOUSE_1));
+		const bool MousePressed = Ui()->MouseButtonClicked(0) || Input()->KeyPress(KEY_MOUSE_1);
+		const bool MouseDown = Ui()->MouseButton(0) || Input()->KeyIsPressed(KEY_MOUSE_1);
 		{
 			const CUIRect HoverRectHud = {X, Y, BoxW, BoxH + ExpandGap + ExpandPanelH};
 			const bool Hovered = CanExpandWithMouse && IsPointInsideRect(HoverRectHud, MouseX, MouseY, 1.5f);
@@ -331,12 +433,39 @@ void CHud::RenderGameTimer()
 		m_ZzIslandW = BoxW;
 		m_ZzIslandH = BoxH;
 
+		if(HudEditMode)
+		{
+			static bool s_DragIsland = false;
+			static float s_LastX = 0.0f;
+			static float s_LastY = 0.0f;
+			const CUIRect IslandRect = {X, Y, BoxW, BoxH};
+			if(MousePressed && IsPointInsideRect(IslandRect, MouseX, MouseY, 2.0f))
+			{
+				s_DragIsland = true;
+				s_LastX = MouseX;
+				s_LastY = MouseY;
+			}
+			if(s_DragIsland && MouseDown)
+			{
+				const float Dx = MouseX - s_LastX;
+				const float Dy = MouseY - s_LastY;
+				g_Config.m_ClZzHudIslandX = ZzHudAnchorStore((((X + BoxW * 0.5f) + Dx) / maximum(m_Width, 1.0f)));
+				g_Config.m_ClZzHudIslandY = ZzHudAnchorStore(((Y + Dy) / maximum(m_Height, 1.0f)));
+				s_LastX = MouseX;
+				s_LastY = MouseY;
+			}
+			if(!MouseDown)
+				s_DragIsland = false;
+		}
+
 		Graphics()->TextureClear();
 		Graphics()->DrawRect4(X, Y, BoxW, BoxH, BorderLeft, BorderRight, BorderLeft, BorderRight, IGraphics::CORNER_ALL, Corner);
 		const float InnerInset = 0.55f;
 		Graphics()->DrawRect(
 			X + InnerInset, Y + InnerInset, BoxW - InnerInset * 2.0f, BoxH - InnerInset * 2.0f,
 			InnerFill, IGraphics::CORNER_ALL, maximum(0.0f, BoxH * 0.35f - 0.25f));
+		if(HudEditMode)
+			Graphics()->DrawRect(X - 1.0f, Y - 1.0f, BoxW + 2.0f, BoxH + 2.0f, ColorRGBA(0.35f, 0.78f, 1.0f, 0.20f), IGraphics::CORNER_ALL, Corner + 0.8f);
 
 		const float ArtSize = ArtBaseSize;
 		const float ArtX = X + PaddingX;
@@ -886,119 +1015,394 @@ void CHud::RenderTextInfo()
 		TextRender()->Text(m_Width - 10 - TextRender()->TextWidth(12, aBuf, -1, -1.0f), Showfps ? 20 : 5, 12, aBuf, -1.0f);
 	}
 
-	// ZZetClient: enabled feature list (right side)
-	if((g_Config.m_ClZzAimbotEnabled || g_Config.m_ClZzHammerAssistEnabled || g_Config.m_ClZzFlyHelperEnabled ||
-		g_Config.m_ClZzAvoidEnabled || g_Config.m_ClZzAutoAled || g_Config.m_ClZzAutoShotgun || g_Config.m_ClZzBalanceBot ||
-		g_Config.m_ClZzFakeLag || g_Config.m_ClZzFakePing || g_Config.m_ClZzAutoUnfreeze || g_Config.m_ClZzFngTriggerLaser || g_Config.m_ClZzFngAutoLaser) &&
-		GameClient()->m_Snap.m_pLocalCharacter && !GameClient()->m_Snap.m_SpecInfo.m_Active)
+	// ZZetClient: HUD toggle notifications + animated arraylist.
+	const bool DrawZzHudElements = GameClient()->m_Snap.m_pLocalCharacter && !GameClient()->m_Snap.m_SpecInfo.m_Active;
+	if(DrawZzHudElements)
 	{
-		std::vector<const char *> vLines;
-		vLines.reserve(12);
-		if(g_Config.m_ClZzAimbotEnabled)
-			vLines.push_back("Aimbot");
-		if(g_Config.m_ClZzHammerAssistEnabled)
-			vLines.push_back("Auto-hit");
-		if(g_Config.m_ClZzAutoAled)
-			vLines.push_back("Auto aled");
-		if(g_Config.m_ClZzAutoShotgun)
-			vLines.push_back("Auto shotgun");
-		if(g_Config.m_ClZzBalanceBot)
-			vLines.push_back("Balance bot");
-		if(g_Config.m_ClZzFakeLag)
-			vLines.push_back("Fake lag");
-		if(g_Config.m_ClZzFakePing)
-			vLines.push_back("Fake ping");
-		if(g_Config.m_ClZzAutoUnfreeze)
-			vLines.push_back("Auto unfreeze");
-		if(g_Config.m_ClZzFlyHelperEnabled)
-			vLines.push_back("Auto-pseudo");
-		if(g_Config.m_ClZzAvoidEnabled)
-			vLines.push_back("Avoid");
-		if(g_Config.m_ClZzFngTriggerLaser)
-			vLines.push_back("Trigger laser");
-		if(g_Config.m_ClZzFngAutoLaser)
-			vLines.push_back("Auto laser");
-		if(!vLines.empty())
-		{
-			const float FontSize = 5.2f;
-			const float LineH = 6.4f;
-			const float PadX = 5.0f;
-			const float PadY = maximum(0.0f, (LineH - FontSize) * 0.5f);
-			const float GapY = 0.0f;
-			const float TotalH = (float)vLines.size() * LineH + (float)(vLines.size() - 1) * GapY;
-			float Y = m_Height / 2.0f - TotalH / 2.0f;
+		const bool HudEditMode = g_Config.m_ClZzHudEditMode != 0;
+		const float Dt = std::clamp((float)Client()->FrameTimeAverage(), 0.0f, 0.10f);
+		const vec2 HudMouse = HudMouseFromUi(Ui(), m_Width, m_Height);
+		const float MouseX = HudMouse.x;
+		const float MouseY = HudMouse.y;
+		const bool MouseDown = Ui()->MouseButton(0) || Input()->KeyIsPressed(KEY_MOUSE_1);
+		const bool MousePressed = Ui()->MouseButtonClicked(0) || Input()->KeyPress(KEY_MOUSE_1);
 
-			auto HsvToRgb = [&](float H, float S, float V, float A) -> ColorRGBA {
-				H = fmodf(H, 1.0f);
-				if(H < 0.0f)
-					H += 1.0f;
-				const float C = V * S;
-				const float Hp = H * 6.0f;
-				const float X = C * (1.0f - fabsf(fmodf(Hp, 2.0f) - 1.0f));
-				float r = 0.0f, g = 0.0f, b = 0.0f;
-				if(0.0f <= Hp && Hp < 1.0f)
+		// Animated notifications for bind toggles (Shalawa-like toast behavior).
+		{
+			const int64_t Now = time_get();
+			const float Freq = (float)time_freq();
+			const float FadeIn = 0.12f;
+			const float Hold = 0.90f;
+			const float FadeOut = 0.20f;
+			const float Life = FadeIn + Hold + FadeOut;
+
+			for(size_t i = 0; i < m_vZzToggleNotifications.size();)
+			{
+				const float Age = (float)(Now - m_vZzToggleNotifications[i].m_StartTime) / Freq;
+				if(Age > Life + 0.05f)
 				{
-					r = C;
-					g = X;
+					m_vZzToggleNotifications.erase(m_vZzToggleNotifications.begin() + i);
+					continue;
 				}
-				else if(1.0f <= Hp && Hp < 2.0f)
+				++i;
+			}
+
+			const bool NotifyRightSide = ZzHudRightAligned(g_Config.m_ClZzHudNotifyX);
+			const float AnchorX = m_Width * ZzHudAnchor01(g_Config.m_ClZzHudNotifyX);
+			const float StartYAnchor = m_Height * ZzHudAnchor01(g_Config.m_ClZzHudNotifyY);
+			if(HudEditMode || !m_vZzToggleNotifications.empty())
+			{
+				const float BoxH = 10.8f;
+				const float Gap = 1.8f;
+				const float PadX = 4.8f;
+				const float TextSize = 5.3f;
+				float Y = StartYAnchor;
+
+				struct SNotifyRender
 				{
-					r = X;
-					g = C;
-				}
-				else if(2.0f <= Hp && Hp < 3.0f)
+					char m_aText[96];
+					bool m_Enabled;
+					float m_Alpha;
+				};
+				std::vector<SNotifyRender> vRender;
+				if(HudEditMode)
 				{
-					g = C;
-					b = X;
-				}
-				else if(3.0f <= Hp && Hp < 4.0f)
-				{
-					g = X;
-					b = C;
-				}
-				else if(4.0f <= Hp && Hp < 5.0f)
-				{
-					r = X;
-					b = C;
+					vRender.push_back({"Aimbot: ON", true, 1.0f});
+					vRender.push_back({"Avoid: OFF", false, 1.0f});
+					vRender.push_back({"Fake lag: ON", true, 1.0f});
 				}
 				else
 				{
-					r = C;
-					b = X;
-				}
-				const float M = V - C;
-				return ColorRGBA(r + M, g + M, b + M, A);
-			};
+					for(int Visible = (int)m_vZzToggleNotifications.size() - 1; Visible >= 0 && Visible >= (int)m_vZzToggleNotifications.size() - 4; --Visible)
+					{
+						const SZzToggleNotification &N = m_vZzToggleNotifications[Visible];
+						const float Age = (float)(Now - N.m_StartTime) / Freq;
+						float Alpha = 0.0f;
+						if(Age < FadeIn)
+							Alpha = EaseOutCubic(Age / FadeIn);
+						else if(Age < FadeIn + Hold)
+							Alpha = 1.0f;
+						else
+							Alpha = 1.0f - std::clamp((Age - FadeIn - Hold) / FadeOut, 0.0f, 1.0f);
+						if(Alpha <= 0.001f)
+							continue;
 
-			auto RenderRainbowText = [&](float X, float Y, float Size, const char *pText) {
+						SNotifyRender Entry;
+						str_format(Entry.m_aText, sizeof(Entry.m_aText), "%s: %s", N.m_aFeature, N.m_Enabled ? "ON" : "OFF");
+						Entry.m_Enabled = N.m_Enabled;
+						Entry.m_Alpha = Alpha;
+						vRender.push_back(Entry);
+					}
+				}
+
+				CUIRect Group = {0, 0, 0, 0};
+				bool GroupInit = false;
+				for(const auto &Entry : vRender)
+				{
+					const float Alpha = Entry.m_Alpha;
+					const float TextW = TextRender()->TextWidth(TextSize, Entry.m_aText, -1, -1.0f);
+					const float BoxW = TextW + PadX * 2.0f + 8.0f;
+					const float Slide = (1.0f - Alpha) * 14.0f;
+					const float XBase = NotifyRightSide ? AnchorX - BoxW : AnchorX;
+					const float X = XBase + (NotifyRightSide ? Slide : -Slide);
+					const float Radius = 5.0f;
+
+					const ColorRGBA Side = Entry.m_Enabled ? ColorRGBA(0.22f, 0.85f, 0.42f, 0.86f * Alpha) : ColorRGBA(0.92f, 0.28f, 0.30f, 0.86f * Alpha);
+					Graphics()->TextureClear();
+					const int MainCorners = NotifyRightSide ? IGraphics::CORNER_L : IGraphics::CORNER_R;
+					Graphics()->DrawRect(X, Y, BoxW, BoxH, ColorRGBA(0.05f, 0.07f, 0.10f, 0.88f * Alpha), MainCorners, Radius);
+					const float AccentW = maximum(4.8f, BoxH * 0.44f);
+					const float AccentOverlap = 1.45f;
+					const float AccentX = NotifyRightSide ? (X + BoxW - AccentOverlap) : (X - AccentW + AccentOverlap);
+					const float AccentRadius = minimum(BoxH * 0.5f, AccentW * 0.5f);
+					Graphics()->DrawRect(AccentX, Y, AccentW, BoxH, Side, NotifyRightSide ? IGraphics::CORNER_R : IGraphics::CORNER_L, AccentRadius);
+					TextRender()->TextColor(0.98f, 0.99f, 1.0f, Alpha);
+					TextRender()->Text(X + PadX + 2.0f, Y + 2.2f, TextSize, Entry.m_aText, -1.0f);
+					TextRender()->TextColor(TextRender()->DefaultTextColor());
+
+					const CUIRect Box = {X, Y, BoxW, BoxH};
+					if(!GroupInit)
+					{
+						Group = Box;
+						GroupInit = true;
+					}
+					else
+					{
+						const float MinX = minimum(Group.x, Box.x);
+						const float MinY = minimum(Group.y, Box.y);
+						const float MaxX = maximum(Group.x + Group.w, Box.x + Box.w);
+						const float MaxY = maximum(Group.y + Group.h, Box.y + Box.h);
+						Group = {MinX, MinY, MaxX - MinX, MaxY - MinY};
+					}
+
+					Y += BoxH + Gap;
+				}
+
+				if(HudEditMode && GroupInit)
+				{
+					static bool s_DragNotify = false;
+					static float s_LastX = 0.0f;
+					static float s_LastY = 0.0f;
+					if(MousePressed && IsPointInsideRect(Group, MouseX, MouseY, 2.0f))
+					{
+						s_DragNotify = true;
+						s_LastX = MouseX;
+						s_LastY = MouseY;
+					}
+					if(s_DragNotify && MouseDown)
+					{
+						const float Dx = MouseX - s_LastX;
+						const float Dy = MouseY - s_LastY;
+						g_Config.m_ClZzHudNotifyX = ZzHudAnchorStore((AnchorX + Dx) / maximum(m_Width, 1.0f));
+						g_Config.m_ClZzHudNotifyY = ZzHudAnchorStore((StartYAnchor + Dy) / maximum(m_Height, 1.0f));
+						s_LastX = MouseX;
+						s_LastY = MouseY;
+					}
+					if(!MouseDown)
+						s_DragNotify = false;
+
+					Graphics()->TextureClear();
+					Graphics()->DrawRect(Group.x - 1.0f, Group.y - 1.0f, Group.w + 2.0f, Group.h + 2.0f, ColorRGBA(0.35f, 0.78f, 1.0f, 0.18f), IGraphics::CORNER_ALL, 4.0f);
+				}
+			}
+		}
+
+		// Animated arraylist. Items stay visible while their alpha fades out.
+		struct SArrayItemDef
+		{
+			const char *m_pName;
+			bool m_Enabled;
+		};
+		static constexpr int ARRAY_ITEMS = 12;
+		const SArrayItemDef aItemDefs[ARRAY_ITEMS] = {
+			{"Aimbot", HudEditMode || g_Config.m_ClZzAimbotEnabled != 0},
+			{"Auto-hit", HudEditMode || g_Config.m_ClZzHammerAssistEnabled != 0},
+			{"Auto aled", HudEditMode || g_Config.m_ClZzAutoAled != 0},
+			{"Balance bot", HudEditMode || g_Config.m_ClZzBalanceBot != 0},
+			{"Fake lag", HudEditMode || g_Config.m_ClZzFakeLag != 0},
+			{"Fake ping", HudEditMode || g_Config.m_ClZzFakePing != 0},
+			{"Auto unfreeze", HudEditMode || g_Config.m_ClZzAutoUnfreeze != 0},
+			{"Auto-pseudo", HudEditMode || g_Config.m_ClZzFlyHelperEnabled != 0},
+			{"Auto triplefly", HudEditMode || g_Config.m_ClZzFlyAutoTriplefly != 0},
+			{"Avoid", HudEditMode || g_Config.m_ClZzAvoidEnabled != 0},
+			{"Trigger laser", HudEditMode || g_Config.m_ClZzFngTriggerLaser != 0},
+			{"Auto laser", HudEditMode || g_Config.m_ClZzFngAutoLaser != 0},
+		};
+		static bool s_ArrayStateInitialized = false;
+		static bool s_aPrevEnabled[ARRAY_ITEMS] = {};
+		struct SArrayAnim
+		{
+			float m_Anim = 0.0f;
+			float m_TextW = 0.0f;
+		};
+		static SArrayAnim s_aArrayAnim[ARRAY_ITEMS];
+		struct SArrayRender
+		{
+			int m_Index;
+			float m_Width;
+			float m_Anim;
+		};
+		std::vector<SArrayRender> vRender;
+		vRender.reserve(ARRAY_ITEMS);
+		char aBotArrayText[96];
+		const auto &BotStats = GameClient()->AsyncProxyBots().Stats();
+		const bool ShowBotArrayItem = HudEditMode || BotStats.m_Total > 0;
+		str_format(aBotArrayText, sizeof(aBotArrayText), "Bots: %d / Online: %d / Error: %d", BotStats.m_Total, BotStats.m_Ingame, BotStats.m_Error);
+
+		if(!s_ArrayStateInitialized)
+		{
+			for(int i = 0; i < ARRAY_ITEMS; i++)
+				s_aPrevEnabled[i] = aItemDefs[i].m_Enabled;
+			s_ArrayStateInitialized = true;
+		}
+
+		for(int i = 0; i < ARRAY_ITEMS; i++)
+		{
+			if(!HudEditMode && s_aPrevEnabled[i] != aItemDefs[i].m_Enabled)
+			{
+				PushZzToggleNotification(aItemDefs[i].m_pName, aItemDefs[i].m_Enabled);
+			}
+			s_aPrevEnabled[i] = aItemDefs[i].m_Enabled;
+
+			const float Target = aItemDefs[i].m_Enabled ? 1.0f : 0.0f;
+			const float Speed = aItemDefs[i].m_Enabled ? 9.0f : 12.0f;
+			s_aArrayAnim[i].m_Anim = ApproachValue(s_aArrayAnim[i].m_Anim, Target, Speed, Dt);
+			s_aArrayAnim[i].m_TextW = TextRender()->TextWidth(5.2f, aItemDefs[i].m_pName, -1, -1.0f);
+			if(s_aArrayAnim[i].m_Anim > 0.01f)
+				vRender.push_back({i, s_aArrayAnim[i].m_TextW, s_aArrayAnim[i].m_Anim});
+		}
+
+		std::stable_sort(vRender.begin(), vRender.end(), [&](const SArrayRender &A, const SArrayRender &B) {
+			if(fabsf(A.m_Width - B.m_Width) > 0.01f)
+				return A.m_Width > B.m_Width;
+			return str_comp(aItemDefs[A.m_Index].m_pName, aItemDefs[B.m_Index].m_pName) < 0;
+		});
+
+		if(!vRender.empty() || ShowBotArrayItem)
+		{
+			const float FontSize = 5.2f;
+			const float BaseLineH = 6.6f;
+			const float PadX = 4.8f;
+			const float PadY = maximum(0.0f, (BaseLineH - FontSize) * 0.5f);
+			const bool ArrayRightSide = ZzHudRightAligned(g_Config.m_ClZzHudArraylistX);
+			const float AnchorX = m_Width * ZzHudAnchor01(g_Config.m_ClZzHudArraylistX);
+			const float AnchorY = m_Height * ZzHudAnchor01(g_Config.m_ClZzHudArraylistY);
+			float Y = AnchorY;
+			CUIRect Group = {0, 0, 0, 0};
+			bool GroupInit = false;
+			for(const auto &Entry : vRender)
+			{
+				const float Anim = EaseOutCubic(Entry.m_Anim);
+				const char *pText = aItemDefs[Entry.m_Index].m_pName;
+				const float BoxW = (Entry.m_Width + PadX * 2.0f + 2.5f) * Anim;
+				const float BoxH = BaseLineH * Anim;
+				const float XBase = ArrayRightSide ? (AnchorX - BoxW) : AnchorX;
+				const float X = XBase + (ArrayRightSide ? (1.0f - Anim) * 12.0f : -(1.0f - Anim) * 12.0f);
+				const float Radius = minimum(5.2f, BoxH * 0.5f);
+				const float Alpha = std::clamp(Anim, 0.0f, 1.0f);
+				Graphics()->TextureClear();
+				const int MainCorners = ArrayRightSide ? IGraphics::CORNER_L : IGraphics::CORNER_R;
+				Graphics()->DrawRect(X, Y, BoxW, BoxH, ColorRGBA(0.07f, 0.09f, 0.12f, 0.90f * Alpha), MainCorners, Radius);
+				const float AccentW = maximum(3.8f, BoxH * 0.62f);
+				const float AccentOverlap = 1.25f;
+				const float AccentX = ArrayRightSide ? (X + BoxW - AccentOverlap) : (X - AccentW + AccentOverlap);
+				const ColorRGBA AccentCol = RainbowColor((float)time() / (float)time_freq() * 0.20f + Entry.m_Index * 0.09f, 0.95f * Alpha);
+				const float AccentRadius = minimum(BoxH * 0.5f, AccentW * 0.5f);
+				Graphics()->DrawRect(AccentX, Y, AccentW, BoxH, AccentCol, ArrayRightSide ? IGraphics::CORNER_R : IGraphics::CORNER_L, AccentRadius);
 				CTextCursor Cursor;
-				Cursor.SetPosition(vec2(X, Y));
-				Cursor.m_FontSize = Size;
+				Cursor.SetPosition(vec2(X + PadX, Y + PadY * Anim));
+				Cursor.m_FontSize = FontSize;
 				Cursor.m_LineWidth = -1.0f;
 				Cursor.m_Flags = TEXTFLAG_RENDER;
 				Cursor.m_vColorSplits.clear();
-
 				const int Len = str_length(pText);
-				const float T = (float)time() / (float)time_freq();
-				for(int i = 0; i < Len; i++)
+				const float BaseHue = (float)time() / (float)time_freq() * 0.18f + Entry.m_Index * 0.06f;
+				for(int c = 0; c < Len; c++)
 				{
-					const float H = T * 0.05f + (float)i * 0.06f;
-					Cursor.m_vColorSplits.emplace_back(i, 1, HsvToRgb(H, 0.95f, 0.95f, 1.0f));
+					const float Hue = BaseHue + c * 0.075f;
+					Cursor.m_vColorSplits.emplace_back(c, 1, RainbowColor(Hue, Alpha));
 				}
 				TextRender()->TextEx(&Cursor, pText, -1);
-			};
-
-			for(const char *pText : vLines)
-			{
-				const float TextW = TextRender()->TextWidth(FontSize, pText, -1, -1.0f);
-				const float BoxW = TextW + PadX * 2.0f;
-				const float X = m_Width - BoxW - 8.0f;
-				const float Corner = minimum(4.0f, LineH * 0.5f);
-				Graphics()->TextureClear();
-				Graphics()->DrawRect(X, Y, BoxW, LineH, ColorRGBA(0.08f, 0.10f, 0.12f, 0.85f), IGraphics::CORNER_ALL, Corner);
-				RenderRainbowText(X + PadX, Y + PadY, FontSize, pText);
-				Y += LineH + GapY;
+				TextRender()->TextColor(TextRender()->DefaultTextColor());
+				const CUIRect Box = {X, Y, BoxW, BoxH};
+				if(!GroupInit)
+				{
+					Group = Box;
+					GroupInit = true;
+				}
+				else
+				{
+					const float MinX = minimum(Group.x, Box.x);
+					const float MinY = minimum(Group.y, Box.y);
+					const float MaxX = maximum(Group.x + Group.w, Box.x + Box.w);
+					const float MaxY = maximum(Group.y + Group.h, Box.y + Box.h);
+					Group = {MinX, MinY, MaxX - MinX, MaxY - MinY};
+				}
+				Y += BoxH + 0.8f * Anim;
 			}
+
+			if(ShowBotArrayItem)
+			{
+				const float Alpha = HudEditMode && BotStats.m_Total == 0 ? 0.7f : 1.0f;
+				const float TextW = TextRender()->TextWidth(FontSize, aBotArrayText, -1, -1.0f);
+				const float BoxW = TextW + PadX * 2.0f + 2.5f;
+				const float BoxH = BaseLineH;
+				const float X = ArrayRightSide ? (AnchorX - BoxW) : AnchorX;
+				const float Radius = minimum(5.2f, BoxH * 0.5f);
+				Graphics()->TextureClear();
+				const int MainCorners = ArrayRightSide ? IGraphics::CORNER_L : IGraphics::CORNER_R;
+				Graphics()->DrawRect(X, Y, BoxW, BoxH, ColorRGBA(0.07f, 0.09f, 0.12f, 0.90f * Alpha), MainCorners, Radius);
+				const float AccentW = maximum(3.8f, BoxH * 0.62f);
+				const float AccentOverlap = 1.25f;
+				const float AccentX = ArrayRightSide ? (X + BoxW - AccentOverlap) : (X - AccentW + AccentOverlap);
+				const float AccentRadius = minimum(BoxH * 0.5f, AccentW * 0.5f);
+				Graphics()->DrawRect(AccentX, Y, AccentW, BoxH, ColorRGBA(0.28f, 0.85f, 0.52f, 0.95f * Alpha), ArrayRightSide ? IGraphics::CORNER_R : IGraphics::CORNER_L, AccentRadius);
+				TextRender()->TextColor(0.95f, 0.98f, 1.0f, Alpha);
+				TextRender()->Text(X + PadX, Y + PadY, FontSize, aBotArrayText, -1.0f);
+				TextRender()->TextColor(TextRender()->DefaultTextColor());
+				const CUIRect Box = {X, Y, BoxW, BoxH};
+				if(!GroupInit)
+				{
+					Group = Box;
+					GroupInit = true;
+				}
+				else
+				{
+					const float MinX = minimum(Group.x, Box.x);
+					const float MinY = minimum(Group.y, Box.y);
+					const float MaxX = maximum(Group.x + Group.w, Box.x + Box.w);
+					const float MaxY = maximum(Group.y + Group.h, Box.y + Box.h);
+					Group = {MinX, MinY, MaxX - MinX, MaxY - MinY};
+				}
+			}
+
+			if(HudEditMode && GroupInit)
+			{
+				static bool s_DragArray = false;
+				static float s_LastX = 0.0f;
+				static float s_LastY = 0.0f;
+				if(MousePressed && IsPointInsideRect(Group, MouseX, MouseY, 2.0f))
+				{
+					s_DragArray = true;
+					s_LastX = MouseX;
+					s_LastY = MouseY;
+				}
+				if(s_DragArray && MouseDown)
+				{
+					const float Dx = MouseX - s_LastX;
+					const float Dy = MouseY - s_LastY;
+					g_Config.m_ClZzHudArraylistX = ZzHudAnchorStore((AnchorX + Dx) / maximum(m_Width, 1.0f));
+					g_Config.m_ClZzHudArraylistY = ZzHudAnchorStore((AnchorY + Dy) / maximum(m_Height, 1.0f));
+					s_LastX = MouseX;
+					s_LastY = MouseY;
+				}
+				if(!MouseDown)
+					s_DragArray = false;
+
+				Graphics()->TextureClear();
+				Graphics()->DrawRect(Group.x - 1.0f, Group.y - 1.0f, Group.w + 2.0f, Group.h + 2.0f, ColorRGBA(0.35f, 0.78f, 1.0f, 0.18f), IGraphics::CORNER_ALL, 4.0f);
+			}
+		}
+
+		if(HudEditMode)
+		{
+			const char *pHint = "HUD EDIT MODE (HOME): drag ArrayList / Notify / Island / ZZClient";
+			const float FontSize = 4.8f;
+			const float W = TextRender()->TextWidth(FontSize, pHint, -1, -1.0f);
+			const float X = m_Width * 0.5f - W * 0.5f;
+			const float Y = m_Height - 12.0f;
+			Graphics()->TextureClear();
+			Graphics()->DrawRect(X - 3.0f, Y - 1.2f, W + 6.0f, 8.0f, ColorRGBA(0.03f, 0.05f, 0.08f, 0.84f), IGraphics::CORNER_ALL, 3.6f);
+			TextRender()->TextColor(0.94f, 0.98f, 1.0f, 0.98f);
+			TextRender()->Text(X, Y, FontSize, pHint, -1.0f);
+			TextRender()->TextColor(TextRender()->DefaultTextColor());
+
+			const CUIRect ResetBtn = {X + W + 4.0f, Y - 1.2f, 26.0f, 8.0f};
+			const bool HoverReset = IsPointInsideRect(ResetBtn, MouseX, MouseY, 0.8f);
+			if(MousePressed && HoverReset)
+				ResetZzHudLayoutDefaults();
+			Graphics()->DrawRect(
+				ResetBtn.x, ResetBtn.y, ResetBtn.w, ResetBtn.h,
+				HoverReset ? ColorRGBA(0.21f, 0.30f, 0.42f, 0.94f) : ColorRGBA(0.14f, 0.20f, 0.30f, 0.90f),
+				IGraphics::CORNER_ALL, 3.6f);
+			TextRender()->TextColor(0.97f, 0.99f, 1.0f, 0.98f);
+			TextRender()->Text(ResetBtn.x + 4.8f, ResetBtn.y + 1.5f, 4.8f, "Reset HUD", -1.0f);
+			TextRender()->TextColor(TextRender()->DefaultTextColor());
+
+			const CUIRect ExitBtn = {ResetBtn.x + ResetBtn.w + 3.0f, Y - 1.2f, 29.5f, 8.0f};
+			const bool HoverExit = IsPointInsideRect(ExitBtn, MouseX, MouseY, 0.8f);
+			if(MousePressed && HoverExit)
+			{
+				g_Config.m_ClZzHudEditMode = 0;
+				(void)ConfigManager()->Save();
+			}
+			Graphics()->DrawRect(
+				ExitBtn.x, ExitBtn.y, ExitBtn.w, ExitBtn.h,
+				HoverExit ? ColorRGBA(0.47f, 0.28f, 0.27f, 0.96f) : ColorRGBA(0.37f, 0.22f, 0.21f, 0.92f),
+				IGraphics::CORNER_ALL, 3.6f);
+			TextRender()->TextColor(0.97f, 0.99f, 1.0f, 0.98f);
+			TextRender()->Text(ExitBtn.x + 4.2f, ExitBtn.y + 1.5f, 4.8f, "Exit & Save", -1.0f);
+			TextRender()->TextColor(TextRender()->DefaultTextColor());
 		}
 	}
 
@@ -1231,13 +1635,17 @@ void CHud::RenderTeambalanceWarning()
 
 void CHud::RenderCursor()
 {
+	if(g_Config.m_ClZzHudEditMode && !GameClient()->m_Menus.IsActive())
+	{
+		Ui()->MapScreen();
+		RenderTools()->RenderCursor(Ui()->MousePos(), 24.0f);
+		Graphics()->MapScreen(0.0f, 0.0f, m_Width, m_Height);
+		return;
+	}
+
 	if(GameClient()->m_Chat.IsActive() && !GameClient()->m_Menus.IsActive())
 	{
-		const CUIRect UiScreen = *Ui()->Screen();
-		const vec2 WindowSize(maximum(1.0f, (float)Graphics()->WindowWidth()), maximum(1.0f, (float)Graphics()->WindowHeight()));
-		const vec2 UiMousePos = Ui()->UpdatedMousePos() * vec2(UiScreen.w, UiScreen.h) / WindowSize;
-		const vec2 UiToHudScale(m_Width / maximum(UiScreen.w, 1.0f), m_Height / maximum(UiScreen.h, 1.0f));
-		const vec2 HudMousePos = UiMousePos * UiToHudScale;
+		const vec2 HudMousePos = HudMouseFromUi(Ui(), m_Width, m_Height);
 		RenderTools()->RenderCursor(HudMousePos, 12.0f);
 		return;
 	}
@@ -2406,19 +2814,44 @@ void CHud::RenderZzWatermark()
 	const ColorRGBA BorderLeft = MixColors(Accent, ColorRGBA(1.0f, 1.0f, 1.0f, 1.0f), 0.25f).WithAlpha(BorderAlpha);
 	const ColorRGBA BorderRight = MixColors(Accent2, ColorRGBA(1.0f, 1.0f, 1.0f, 1.0f), 0.20f).WithAlpha(BorderAlpha);
 
-	const float Margin = 6.0f;
-	const float IslandGap = 5.0f;
-	float X = m_Width - BoxW - Margin;
-	float Y = Margin;
-	if(m_ZzIslandVisible)
+	const bool HudEditMode = g_Config.m_ClZzHudEditMode != 0;
+	const bool WatermarkRightSide = ZzHudRightAligned(g_Config.m_ClZzHudWatermarkX);
+	const float AnchorX = m_Width * ZzHudAnchor01(g_Config.m_ClZzHudWatermarkX);
+	const float AnchorY = m_Height * ZzHudAnchor01(g_Config.m_ClZzHudWatermarkY);
+	float X = WatermarkRightSide ? (AnchorX - BoxW) : AnchorX;
+	float Y = AnchorY;
+	X = std::clamp(X, 1.0f, m_Width - BoxW - 1.0f);
+	Y = std::clamp(Y, 1.0f, m_Height - BoxH - 1.0f);
+
+	const vec2 HudMouse = HudMouseFromUi(Ui(), m_Width, m_Height);
+	const float MouseX = HudMouse.x;
+	const float MouseY = HudMouse.y;
+	const bool MousePressed = Ui()->MouseButtonClicked(0) || Input()->KeyPress(KEY_MOUSE_1);
+	const bool MouseDown = Ui()->MouseButton(0) || Input()->KeyIsPressed(KEY_MOUSE_1);
+	if(HudEditMode)
 	{
-		X = m_ZzIslandX + m_ZzIslandW + IslandGap;
-		Y = m_ZzIslandY + (m_ZzIslandH - BoxH) * 0.5f;
-		if(X + BoxW > m_Width - Margin)
-			X = m_ZzIslandX - IslandGap - BoxW;
+		static bool s_DragWatermark = false;
+		static float s_LastX = 0.0f;
+		static float s_LastY = 0.0f;
+		const CUIRect WatermarkRect = {X, Y, BoxW, BoxH};
+		if(MousePressed && IsPointInsideRect(WatermarkRect, MouseX, MouseY, 2.0f))
+		{
+			s_DragWatermark = true;
+			s_LastX = MouseX;
+			s_LastY = MouseY;
+		}
+		if(s_DragWatermark && MouseDown)
+		{
+			const float Dx = MouseX - s_LastX;
+			const float Dy = MouseY - s_LastY;
+			g_Config.m_ClZzHudWatermarkX = ZzHudAnchorStore((AnchorX + Dx) / maximum(m_Width, 1.0f));
+			g_Config.m_ClZzHudWatermarkY = ZzHudAnchorStore((AnchorY + Dy) / maximum(m_Height, 1.0f));
+			s_LastX = MouseX;
+			s_LastY = MouseY;
+		}
+		if(!MouseDown)
+			s_DragWatermark = false;
 	}
-	X = std::clamp(X, Margin, m_Width - BoxW - Margin);
-	Y = std::clamp(Y, Margin, m_Height - BoxH - Margin);
 
 	Graphics()->TextureClear();
 	Graphics()->DrawRect4(X, Y, BoxW, BoxH, BorderLeft, BorderRight, BorderLeft, BorderRight, IGraphics::CORNER_ALL, Corner);
@@ -2428,6 +2861,8 @@ void CHud::RenderZzWatermark()
 		InnerFill, InnerFill,
 		InnerFill, InnerFill,
 		IGraphics::CORNER_ALL, maximum(0.0f, Corner - 0.55f));
+	if(HudEditMode)
+		Graphics()->DrawRect(X - 1.0f, Y - 1.0f, BoxW + 2.0f, BoxH + 2.0f, ColorRGBA(0.35f, 0.78f, 1.0f, 0.20f), IGraphics::CORNER_ALL, Corner + 0.8f);
 
 	const float TextX = X + PaddingX;
 	const float TextY = Y + BoxH / 2.0f - FontSize / 2.0f - 0.1f;
@@ -2493,6 +2928,7 @@ void CHud::OnRender()
 	m_Width = 300.0f * Graphics()->ScreenAspect();
 	m_Height = 300.0f;
 	Graphics()->MapScreen(0.0f, 0.0f, m_Width, m_Height);
+	EnsureHudAnchorPromilleConfig();
 
 #if defined(CONF_VIDEORECORDER)
 	if((IVideo::Current() && g_Config.m_ClVideoShowhud) || (!IVideo::Current() && g_Config.m_ClShowhud))
@@ -2503,11 +2939,15 @@ void CHud::OnRender()
 		if(GameClient()->m_Snap.m_pLocalCharacter && !GameClient()->m_Snap.m_SpecInfo.m_Active && !(GameClient()->m_Snap.m_pGameInfoObj->m_GameStateFlags & GAMESTATEFLAG_GAMEOVER))
 		{
 			// ZZetClient: aimbot overlays (FOV + selected target glow)
-			const bool ShowRegularAimbotFov = g_Config.m_ClZzAimbotEnabled && g_Config.m_ClZzAimbotShowFov &&
+			const bool AutoHookBindHeld = GameClient()->m_Controls.m_aAutoHookPlayers[g_Config.m_ClDummy] != 0;
+			const bool AimbotLikeEnabled = g_Config.m_ClZzAimbotEnabled || AutoHookBindHeld;
+			const bool ShowRegularAimbotFov = AimbotLikeEnabled && g_Config.m_ClZzAimbotShowFov &&
 				GameClient()->m_Controls.m_aSaveInBlock[g_Config.m_ClDummy] == 0;
-			const bool ShowAimbotGlow = g_Config.m_ClZzAimbotEnabled && g_Config.m_ClZzAimbotGlowTarget &&
+			const bool ShowAimbotGlow = AimbotLikeEnabled && g_Config.m_ClZzAimbotGlowTarget &&
 				GameClient()->m_Controls.m_aSaveInBlock[g_Config.m_ClDummy] == 0;
-			if(ShowRegularAimbotFov || ShowAimbotGlow)
+			const bool ShowAimbotGhostAura = AimbotLikeEnabled && g_Config.m_ClZzAimbotGhostAura &&
+				GameClient()->m_Controls.m_aSaveInBlock[g_Config.m_ClDummy] == 0;
+			if(ShowRegularAimbotFov || ShowAimbotGlow || ShowAimbotGhostAura)
 			{
 				// draw in world space
 				float WorldW = 0.0f;
@@ -2546,27 +2986,163 @@ void CHud::OnRender()
 					const int TargetId = GameClient()->ZzAimbotGlowTargetId(g_Config.m_ClDummy);
 					if(in_range(TargetId, MAX_CLIENTS - 1) && GameClient()->m_Snap.m_aCharacters[TargetId].m_Active)
 					{
-						const vec2 TargetPos = GameClient()->m_aClients[TargetId].m_RegularPredicted.m_Pos;
-						const float Pulse = 0.55f + 0.45f * sinf((float)Client()->LocalTime() * 8.5f);
-						const float InnerRadius = CCharacterCore::PhysicalSize() * 0.90f;
-						const float OuterRadius = CCharacterCore::PhysicalSize() * 1.60f;
+						const vec2 TargetPos = GameClient()->m_aClients[TargetId].m_RenderPos;
+						const float BaseRadius = CCharacterCore::PhysicalSize() * 1.10f;
+						const float MidRadius = CCharacterCore::PhysicalSize() * 1.45f;
+						const float OuterRadius = CCharacterCore::PhysicalSize() * 1.90f;
+						const float BaseAlpha = 0.26f;
 
 						Graphics()->TextureClear();
 						Graphics()->QuadsBegin();
-						Graphics()->SetColor(1.0f, 0.03f, 0.03f, 0.16f + 0.10f * Pulse);
-						Graphics()->DrawCircle(TargetPos.x, TargetPos.y, OuterRadius, 28);
-						Graphics()->SetColor(1.0f, 0.08f, 0.08f, 0.28f + 0.14f * Pulse);
-						Graphics()->DrawCircle(TargetPos.x, TargetPos.y, InnerRadius, 24);
+						Graphics()->SetColor(1.0f, 0.08f, 0.08f, BaseAlpha * 0.35f);
+						Graphics()->DrawCircle(TargetPos.x, TargetPos.y, OuterRadius, 36);
+						Graphics()->SetColor(1.0f, 0.10f, 0.10f, BaseAlpha * 0.62f);
+						Graphics()->DrawCircle(TargetPos.x, TargetPos.y, MidRadius, 32);
+						Graphics()->SetColor(1.0f, 0.12f, 0.12f, BaseAlpha);
+						Graphics()->DrawCircle(TargetPos.x, TargetPos.y, BaseRadius, 28);
 						Graphics()->QuadsEnd();
+					}
+				}
 
-						const float CrossR = CCharacterCore::PhysicalSize() * 0.55f;
-						IGraphics::CLineItem aTargetLines[2] = {
-							IGraphics::CLineItem(TargetPos.x - CrossR, TargetPos.y, TargetPos.x + CrossR, TargetPos.y),
-							IGraphics::CLineItem(TargetPos.x, TargetPos.y - CrossR, TargetPos.x, TargetPos.y + CrossR)};
+				if(ShowAimbotGhostAura)
+				{
+					static int s_CurTarget = -1;
+					static int s_PrevTarget = -1;
+					static float s_CurAlpha = 0.0f;
+					static float s_PrevAlpha = 0.0f;
+					static vec2 s_PrevPos(0.0f, 0.0f);
+
+					const float Dt = std::clamp(Client()->RenderFrameTime(), 0.0f, 0.1f);
+					const int NewTarget = GameClient()->ZzAimbotGlowTargetId(g_Config.m_ClDummy);
+					const bool NewValid = in_range(NewTarget, MAX_CLIENTS - 1) && GameClient()->m_Snap.m_aCharacters[NewTarget].m_Active;
+					if(NewTarget != s_CurTarget)
+					{
+						if(s_CurAlpha > 0.001f && in_range(s_CurTarget, MAX_CLIENTS - 1) && GameClient()->m_Snap.m_aCharacters[s_CurTarget].m_Active)
+						{
+							s_PrevTarget = s_CurTarget;
+							s_PrevAlpha = s_CurAlpha;
+							s_PrevPos = GameClient()->m_aClients[s_CurTarget].m_RenderPos;
+						}
+						s_CurTarget = NewTarget;
+						s_CurAlpha = 0.0f;
+					}
+
+					if(NewValid)
+						s_CurAlpha = ApproachValue(s_CurAlpha, 1.0f, 6.0f, Dt);
+					else
+						s_CurAlpha = ApproachValue(s_CurAlpha, 0.0f, 8.5f, Dt);
+					s_PrevAlpha = ApproachValue(s_PrevAlpha, 0.0f, 5.2f, Dt);
+
+					auto DrawGhostRing = [&](vec2 Center, const ColorRGBA &BaseColor, float AlphaMul) {
+						if(AlphaMul <= 0.001f)
+							return;
+
+						const float Radius = std::clamp((float)g_Config.m_ClZzAimbotGhostAuraRadius, 8.0f, 200.0f);
+						const float ThicknessScale = std::clamp(g_Config.m_ClZzAimbotGhostAuraSize / 100.0f, 0.5f, 2.5f);
+						const float Speed = std::clamp(g_Config.m_ClZzAimbotGhostAuraSpeed / 100.0f, 0.1f, 3.0f);
+						const float ConfigAlpha = std::clamp(g_Config.m_ClZzAimbotGhostAuraAlpha / 100.0f, 0.01f, 1.0f);
+						const float Time = Client()->LocalTime();
+						const int Segments = 56;
+						const int AxisCfg1 = std::clamp((int)g_Config.m_ClZzAimbotGhostAuraAxis, 1, 3);
+						const int AxisCfg2 = std::clamp((int)g_Config.m_ClZzAimbotGhostAuraAxis2, 1, 3);
+						const float DirSign1 = g_Config.m_ClZzAimbotGhostAuraDirection == 2 ? -1.0f : 1.0f;
+						const float DirSign2 = g_Config.m_ClZzAimbotGhostAuraDirection2 == 2 ? -1.0f : 1.0f;
+						const float Stretch1 = std::clamp(g_Config.m_ClZzAimbotGhostAuraStretch / 100.0f, 0.5f, 2.5f);
+						const float Stretch2 = std::clamp(g_Config.m_ClZzAimbotGhostAuraStretch2 / 100.0f, 0.5f, 2.5f);
+						auto AxisFromCfg = [&](int AxisCfg) {
+							return AxisCfg == 1 ? vec3(1.0f, 0.0f, 0.0f) : AxisCfg == 2 ? vec3(0.0f, 1.0f, 0.0f) : vec3(0.0f, 0.0f, 1.0f);
+						};
+						const vec3 SpinAxis1 = AxisFromCfg(AxisCfg1);
+						const vec3 SpinAxis2 = AxisFromCfg(AxisCfg2);
+
+						auto BuildSpinBasis = [&](const vec3 &SpinAxis, vec3 &OutP, vec3 &OutQ) {
+							vec3 Ref = std::abs(SpinAxis.z) < 0.99f ? vec3(0.0f, 0.0f, 1.0f) : vec3(0.0f, 1.0f, 0.0f);
+							OutP = normalize(cross(SpinAxis, Ref));
+							if(length(OutP) < 0.001f)
+								OutP = normalize(cross(SpinAxis, vec3(1.0f, 0.0f, 0.0f)));
+							OutQ = normalize(cross(SpinAxis, OutP));
+						};
+
+						auto BuildBasis = [&](const vec3 &Normal, vec3 &OutU, vec3 &OutV) {
+							vec3 Ref = std::abs(Normal.z) < 0.99f ? vec3(0.0f, 0.0f, 1.0f) : vec3(0.0f, 1.0f, 0.0f);
+							OutU = normalize(cross(Ref, Normal));
+							OutV = normalize(cross(Normal, OutU));
+						};
+
+						auto Project3D = [&](const vec3 &P) {
+							return vec2(P.x + P.z * 0.36f, P.y - P.z * 0.20f);
+						};
+
+						auto DrawRingByNormal = [&](const vec3 &Normal, float Phase, float RadiusScale, float Stretch, float AlphaScale) {
+							vec3 U, V;
+							BuildBasis(Normal, U, V);
+							const int ThicknessLayers = std::clamp((int)round_to_int(ThicknessScale * 2.0f), 1, 6);
+							for(int Layer = 0; Layer < ThicknessLayers; Layer++)
+							{
+								const float LayerT = ThicknessLayers == 1 ? 0.0f : (float)Layer / (float)(ThicknessLayers - 1);
+								const float LayerOffset = (LayerT - 0.5f) * (1.2f + 2.0f * ThicknessScale);
+								std::vector<IGraphics::CLineItem> vLines;
+								vLines.reserve(Segments);
+								vec2 Prev;
+								for(int i = 0; i <= Segments; i++)
+								{
+									const float T = (float)i / (float)Segments;
+									const float A = T * 2.0f * pi + Phase;
+									const float DrawRadius = maximum(1.0f, Radius * RadiusScale + LayerOffset);
+									const vec3 P3 = (U * (std::cos(A) * Stretch) + V * std::sin(A)) * DrawRadius;
+									const vec2 P2 = Center + Project3D(P3);
+									if(i > 0)
+										vLines.emplace_back(Prev.x, Prev.y, P2.x, P2.y);
+									Prev = P2;
+								}
+								const float LayerAlpha = (1.0f - 0.08f * (float)Layer) / (float)ThicknessLayers;
+								Graphics()->SetColor(BaseColor.r, BaseColor.g, BaseColor.b, ConfigAlpha * AlphaMul * AlphaScale * LayerAlpha);
+								Graphics()->LinesDraw(vLines.data(), vLines.size());
+							}
+						};
+
+						vec3 P1, Q1, P2, Q2;
+						BuildSpinBasis(SpinAxis1, P1, Q1);
+						BuildSpinBasis(SpinAxis2, P2, Q2);
+						const float Orbit1 = Time * Speed * DirSign1 * 1.25f;
+						const float Orbit2 = Time * Speed * DirSign2 * 1.05f + 1.3f;
+						const vec3 RingNormal1 = normalize(P1 * std::cos(Orbit1) + Q1 * std::sin(Orbit1));
+						const vec3 RingNormal2 = normalize(P2 * std::cos(Orbit2) + Q2 * std::sin(Orbit2));
+
+						Graphics()->TextureClear();
 						Graphics()->LinesBegin();
-						Graphics()->SetColor(1.0f, 0.20f, 0.20f, 0.80f);
-						Graphics()->LinesDraw(aTargetLines, 2);
+						DrawRingByNormal(RingNormal1, Time * Speed * DirSign1 * 1.8f, 1.00f, Stretch1, 0.90f);
+						DrawRingByNormal(RingNormal2, Time * Speed * DirSign2 * 1.55f + 0.65f, 0.82f, Stretch2, 0.72f);
 						Graphics()->LinesEnd();
+					};
+
+					if(s_PrevAlpha > 0.001f)
+					{
+						ColorRGBA PrevColor = color_cast<ColorRGBA>(ColorHSLA(g_Config.m_ClZzAimbotGhostAuraColor));
+						if(g_Config.m_ClZzAimbotGhostAuraUseTargetBodyColor && in_range(s_PrevTarget, MAX_CLIENTS - 1) && GameClient()->m_aClients[s_PrevTarget].m_Active)
+						{
+							const auto &Info = GameClient()->m_aClients[s_PrevTarget].m_RenderInfo;
+							PrevColor = Info.m_CustomColoredSkin ? Info.m_ColorBody : Info.m_BloodColor;
+						}
+						vec2 PrevDrawPos = s_PrevPos;
+						if(in_range(s_PrevTarget, MAX_CLIENTS - 1) && GameClient()->m_Snap.m_aCharacters[s_PrevTarget].m_Active && GameClient()->m_aClients[s_PrevTarget].m_Active)
+						{
+							PrevDrawPos = GameClient()->m_aClients[s_PrevTarget].m_RenderPos;
+							s_PrevPos = PrevDrawPos;
+						}
+						DrawGhostRing(PrevDrawPos, PrevColor, s_PrevAlpha);
+					}
+
+					if(s_CurAlpha > 0.001f && NewValid)
+					{
+						const vec2 CurPos = GameClient()->m_aClients[s_CurTarget].m_RenderPos;
+						ColorRGBA CurColor = color_cast<ColorRGBA>(ColorHSLA(g_Config.m_ClZzAimbotGhostAuraColor));
+						if(g_Config.m_ClZzAimbotGhostAuraUseTargetBodyColor)
+						{
+							const auto &Info = GameClient()->m_aClients[s_CurTarget].m_RenderInfo;
+							CurColor = Info.m_CustomColoredSkin ? Info.m_ColorBody : Info.m_BloodColor;
+						}
+						DrawGhostRing(CurPos, CurColor, s_CurAlpha);
 					}
 				}
 

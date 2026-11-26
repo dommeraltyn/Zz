@@ -125,6 +125,7 @@ public:
 	vec2 m_ViewPos;
 	int m_TuneZone;
 	int m_TuneZoneOld;
+	bool m_PendingHubRedirect;
 
 	// states if the client is chatting, accessing a menu etc.
 	int m_PlayerFlags;

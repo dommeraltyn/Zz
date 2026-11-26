@@ -1084,6 +1084,8 @@ void CNamePlates::OnRender()
 {
 	if(Client()->State() != IClient::STATE_ONLINE && Client()->State() != IClient::STATE_DEMOPLAYBACK)
 		return;
+	if((GameClient()->m_ZzTas.IsRecording() || GameClient()->m_ZzTas.IsPlaying()) && GameClient()->m_ZzTas.IsWorldInitialized() && !GameClient()->m_Snap.m_SpecInfo.m_Active)
+		return;
 
 	int ShowDirection = g_Config.m_ClShowDirection;
 #if defined(CONF_VIDEORECORDER)

@@ -6,7 +6,9 @@
 #include <base/color.h>
 #include <base/log.h>
 #include <base/math.h>
+#include <base/str.h>
 #include <base/system.h>
+#include <base/time.h>
 #include <base/vmath.h>
 
 #include <engine/client.h>
@@ -20,6 +22,10 @@
 #include <engine/keys.h>
 #include <engine/serverbrowser.h>
 #include <engine/shared/config.h>
+#include <engine/shared/http.h>
+#include <engine/shared/json.h>
+#include <engine/shared/jsonwriter.h>
+#include <engine/shared/uuid_manager.h>
 #include <engine/storage.h>
 #include <engine/textrender.h>
 
@@ -37,11 +43,177 @@
 #include <game/localization.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
+#include <string>
 #include <vector>
 
 using namespace std::chrono_literals;
+
+namespace
+{
+constexpr const char *CLIENT_CHAT_HEADER_NAME = "X-Dobri-Client";
+constexpr const char *CLIENT_CHAT_HEADER_VALUE = "dobri-client-chat-6c4f7f14b822";
+constexpr const char *CLIENT_CHAT_AUTH_HEADER_NAME = "X-Dobri-Auth";
+constexpr const char *CLIENT_CHAT_CONTACTS_FOLDER = "dobri_client_chat";
+constexpr int CLIENT_CHAT_ROOM_LIMIT = 64;
+constexpr int CLIENT_CHAT_DIRECT_LIMIT = 96;
+constexpr int CLIENT_CHAT_MAX_VISIBLE_ITEMS = 12;
+constexpr auto CLIENT_CHAT_ACTIVE_POLL_INTERVAL = 2s;
+constexpr auto CLIENT_CHAT_BACKGROUND_POLL_INTERVAL = 5s;
+constexpr auto CLIENT_CHAT_TOAST_DURATION = 6s;
+constexpr CTimeout CLIENT_CHAT_TIMEOUT{4000, 15000, 500, 5};
+
+ColorRGBA ClientChatAccentColor(bool UseCustomColor, int ColorValue, float Alpha = 0.35f)
+{
+	if(!UseCustomColor)
+		return ColorRGBA(0.65f, 0.65f, 0.65f, Alpha * 0.6f);
+
+	ColorRGBA Result = color_cast<ColorRGBA>(ColorHSLA((unsigned)ColorValue, true));
+	Result.a = Alpha;
+	return Result;
+}
+
+bool ClientChatContactsFilePath(char *pBuffer, size_t BufferSize, const char *pAccountId)
+{
+	if(pBuffer == nullptr || BufferSize == 0 || pAccountId == nullptr || pAccountId[0] == '\0')
+		return false;
+
+	str_format(pBuffer, BufferSize, "%s/direct_contacts_%s.json", CLIENT_CHAT_CONTACTS_FOLDER, pAccountId);
+	return true;
+}
+
+bool ClientChatIsAccountId(const char *pUserId)
+{
+	return pUserId != nullptr && str_startswith(pUserId, "acct_") != nullptr;
+}
+
+bool ClientChatIdsEqual(const char *pLeft, const char *pRight);
+bool ClientChatNamesEqual(const char *pLeft, const char *pRight);
+
+bool ClientChatTextContainsMention(const char *pText, const char *pName)
+{
+	if(pText == nullptr || pText[0] == '\0' || pName == nullptr || pName[0] == '\0')
+		return false;
+
+	char aNeedle[128];
+	str_format(aNeedle, sizeof(aNeedle), "@%s", pName);
+	return str_utf8_find_nocase(pText, aNeedle) != nullptr;
+}
+
+void ClientChatFormatToastLine(char *pDst, int DstSize, const char *pText, int MaxChars)
+{
+	if(pDst == nullptr || DstSize <= 0)
+		return;
+
+	char aRaw[256];
+	if(pText != nullptr && pText[0] != '\0')
+		str_copy(aRaw, pText, sizeof(aRaw));
+	else
+		aRaw[0] = '\0';
+	char aCompact[256];
+	int OutIndex = 0;
+	bool LastWasSpace = false;
+	for(int Index = 0; aRaw[Index] != '\0' && OutIndex < (int)sizeof(aCompact) - 1; ++Index)
+	{
+		char c = aRaw[Index];
+		if(c == '\r' || c == '\n' || c == '\t')
+			c = ' ';
+		if(c == ' ')
+		{
+			if(LastWasSpace)
+				continue;
+			LastWasSpace = true;
+		}
+		else
+			LastWasSpace = false;
+		aCompact[OutIndex++] = c;
+	}
+	aCompact[OutIndex] = '\0';
+	str_utf8_trim_right(aCompact);
+
+	if(MaxChars > 3 && str_length(aCompact) > MaxChars)
+	{
+		str_truncate(pDst, DstSize, aCompact, MaxChars - 3);
+		str_append(pDst, "...", DstSize);
+	}
+	else
+		str_copy(pDst, aCompact, DstSize);
+}
+
+bool ClientChatIsLocalMessage(const char *pSenderId, const char *pSenderInstanceId, const char *pSenderName, const char *pLocalId, const char *pLocalName, const char *pLocalInstanceId, bool HasAccountIdentity)
+{
+	if(ClientChatIdsEqual(pSenderId, pLocalId))
+	{
+		if(HasAccountIdentity && pLocalInstanceId != nullptr && pLocalInstanceId[0] != '\0' && pSenderInstanceId != nullptr && pSenderInstanceId[0] != '\0')
+			return str_comp(pSenderInstanceId, pLocalInstanceId) == 0;
+		return true;
+	}
+	if(pSenderId != nullptr && pSenderId[0] != '\0')
+		return false;
+	return ClientChatNamesEqual(pSenderName, pLocalName);
+}
+
+bool ClientChatIdsEqual(const char *pLeft, const char *pRight)
+{
+	return pLeft != nullptr && pRight != nullptr && pLeft[0] != '\0' && pRight[0] != '\0' && str_comp(pLeft, pRight) == 0;
+}
+
+bool ClientChatNamesEqual(const char *pLeft, const char *pRight)
+{
+	return pLeft != nullptr && pRight != nullptr && pLeft[0] != '\0' && pRight[0] != '\0' && str_utf8_comp_nocase(pLeft, pRight) == 0;
+}
+
+void ClientChatCopyOptional(char *pDst, int DstSize, const char *pSrc, const char *pFallback = "")
+{
+	if(pSrc != nullptr && pSrc[0] != '\0')
+		str_copy(pDst, pSrc, DstSize);
+	else
+		str_copy(pDst, pFallback, DstSize);
+}
+
+void ClientChatTrimPreview(char *pDst, int DstSize, const char *pText)
+{
+	if(DstSize <= 0)
+		return;
+	ClientChatCopyOptional(pDst, DstSize, pText);
+	if(str_length(pDst) > 72 && DstSize > 4)
+	{
+		pDst[DstSize - 4] = '.';
+		pDst[DstSize - 3] = '.';
+		pDst[DstSize - 2] = '.';
+		pDst[DstSize - 1] = '\0';
+	}
+}
+
+const char *ClientChatStatusIconFor(const char *pStatus, bool Online)
+{
+	if(!Online)
+		return FontIcon::CIRCLE;
+	if(str_comp_nocase(pStatus, "dnd") == 0)
+		return FontIcon::BAN;
+	if(str_comp_nocase(pStatus, "idle") == 0)
+		return FontIcon::PAUSE;
+	if(str_comp_nocase(pStatus, "invisible") == 0)
+		return FontIcon::EYE_SLASH;
+	return FontIcon::CIRCLE;
+}
+
+ColorRGBA ClientChatStatusColorFor(const char *pStatus, bool Online)
+{
+	if(!Online)
+		return ColorRGBA(0.58f, 0.62f, 0.70f, 0.90f);
+	if(str_comp_nocase(pStatus, "dnd") == 0)
+		return ColorRGBA(0.86f, 0.30f, 0.34f, 0.95f);
+	if(str_comp_nocase(pStatus, "idle") == 0)
+		return ColorRGBA(0.93f, 0.72f, 0.22f, 0.95f);
+	if(str_comp_nocase(pStatus, "invisible") == 0)
+		return ColorRGBA(0.64f, 0.66f, 0.72f, 0.95f);
+	return ColorRGBA(0.35f, 0.83f, 0.50f, 0.95f);
+}
+} // namespace
 
 ColorRGBA CMenus::ms_GuiColor;
 ColorRGBA CMenus::ms_ColorTabbarInactiveOutgame;
@@ -98,6 +270,10 @@ CMenus::CMenus()
 
 	m_PasswordInput.SetBuffer(g_Config.m_Password, sizeof(g_Config.m_Password));
 	m_PasswordInput.SetHidden(true);
+	m_ClientChatInput.SetEmptyText("Write a message...");
+	m_ClientChatAuthNameInput.SetEmptyText("Username");
+	m_ClientChatAuthPasswordInput.SetEmptyText("Password");
+	m_ClientChatAuthPasswordInput.SetHidden(true);
 }
 
 int CMenus::DoButton_Toggle(const void *pId, int Checked, const CUIRect *pRect, bool Active, const unsigned Flags)
@@ -840,6 +1016,2381 @@ void CMenus::RenderNews(CUIRect MainView)
 	}
 }
 
+bool CMenus::IsClientChatPageActive() const
+{
+	const IClient::EClientState ClientState = Client()->State();
+	if(ClientState == IClient::STATE_OFFLINE)
+		return m_MenuPage == PAGE_CLIENT_CHAT;
+	if(ClientState == IClient::STATE_ONLINE)
+		return m_GamePage == PAGE_CLIENT_CHAT;
+	return false;
+}
+
+void CMenus::ActivateClientChatRoom()
+{
+	m_aClientChatDirectTargetId[0] = '\0';
+	m_aClientChatDirectTargetName[0] = '\0';
+	str_copy(m_aClientChatDirectTargetSkin, "default", sizeof(m_aClientChatDirectTargetSkin));
+	m_ClientChatDirectTargetUseCustomColor = false;
+	m_ClientChatDirectTargetColorBody = 65408;
+	m_ClientChatDirectTargetColorFeet = 65408;
+}
+
+void CMenus::ActivateClientChatDirect(const char *pUserId, const char *pName, const char *pSkin, bool UseCustomColor, int ColorBody, int ColorFeet)
+{
+	EnsureClientChatDirectContact(pUserId, pName, pSkin, UseCustomColor, ColorBody, ColorFeet);
+
+	ClientChatCopyOptional(m_aClientChatDirectTargetId, sizeof(m_aClientChatDirectTargetId), pUserId);
+	ClientChatCopyOptional(m_aClientChatDirectTargetName, sizeof(m_aClientChatDirectTargetName), pName);
+	ClientChatCopyOptional(m_aClientChatDirectTargetSkin, sizeof(m_aClientChatDirectTargetSkin), pSkin, "default");
+	m_ClientChatDirectTargetUseCustomColor = UseCustomColor;
+	m_ClientChatDirectTargetColorBody = ColorBody;
+	m_ClientChatDirectTargetColorFeet = ColorFeet;
+	RefreshClientChatConversations();
+
+	for(CClientChatConversation &Conversation : m_vClientChatConversations)
+	{
+		if((m_aClientChatDirectTargetId[0] != '\0' && ClientChatIdsEqual(Conversation.m_aUserId, m_aClientChatDirectTargetId)) ||
+			(m_aClientChatDirectTargetId[0] == '\0' && ClientChatNamesEqual(Conversation.m_aName, m_aClientChatDirectTargetName)))
+		{
+			Conversation.m_UnreadCount = 0;
+			ClientChatCopyOptional(m_aClientChatDirectTargetName, sizeof(m_aClientChatDirectTargetName), Conversation.m_aName, m_aClientChatDirectTargetName);
+			ClientChatCopyOptional(m_aClientChatDirectTargetSkin, sizeof(m_aClientChatDirectTargetSkin), Conversation.m_aSkin, "default");
+			if(m_aClientChatDirectTargetId[0] == '\0')
+				ClientChatCopyOptional(m_aClientChatDirectTargetId, sizeof(m_aClientChatDirectTargetId), Conversation.m_aUserId);
+			m_ClientChatDirectTargetUseCustomColor = Conversation.m_UseCustomColor;
+			m_ClientChatDirectTargetColorBody = Conversation.m_ColorBody;
+			m_ClientChatDirectTargetColorFeet = Conversation.m_ColorFeet;
+			break;
+		}
+	}
+}
+
+CMenus::CClientChatDirectContact *CMenus::FindClientChatDirectContact(const char *pUserId, const char *pName)
+{
+	for(CClientChatDirectContact &Contact : m_vClientChatDirectContacts)
+	{
+		if((pUserId != nullptr && pUserId[0] != '\0' && Contact.m_aUserId[0] != '\0' && ClientChatIdsEqual(Contact.m_aUserId, pUserId)) ||
+			((pUserId == nullptr || pUserId[0] == '\0' || Contact.m_aUserId[0] == '\0') && ClientChatNamesEqual(Contact.m_aName, pName)))
+			return &Contact;
+	}
+	return nullptr;
+}
+
+const CMenus::CClientChatDirectContact *CMenus::FindClientChatDirectContact(const char *pUserId, const char *pName) const
+{
+	for(const CClientChatDirectContact &Contact : m_vClientChatDirectContacts)
+	{
+		if((pUserId != nullptr && pUserId[0] != '\0' && Contact.m_aUserId[0] != '\0' && ClientChatIdsEqual(Contact.m_aUserId, pUserId)) ||
+			((pUserId == nullptr || pUserId[0] == '\0' || Contact.m_aUserId[0] == '\0') && ClientChatNamesEqual(Contact.m_aName, pName)))
+			return &Contact;
+	}
+	return nullptr;
+}
+
+void CMenus::LoadClientChatDirectContacts()
+{
+	m_vClientChatDirectContacts.clear();
+
+	char aContactsFile[IO_MAX_PATH_LENGTH];
+	if(!ClientChatContactsFilePath(aContactsFile, sizeof(aContactsFile), m_aClientChatAccountId))
+		return;
+
+	char *pRawContacts = Storage()->ReadFileStr(aContactsFile, IStorage::TYPE_SAVE);
+	if(pRawContacts == nullptr || pRawContacts[0] == '\0')
+	{
+		if(pRawContacts != nullptr)
+			std::free(pRawContacts);
+		return;
+	}
+
+	json_settings JsonSettings = {};
+	char aError[json_error_max];
+	json_value *pJson = json_parse_ex(&JsonSettings, pRawContacts, str_length(pRawContacts), aError);
+	std::free(pRawContacts);
+
+	if(pJson == nullptr || pJson->type != json_array)
+	{
+		if(pJson != nullptr)
+			json_value_free(pJson);
+		return;
+	}
+
+	const int NumContacts = json_array_length(pJson);
+	for(int Index = 0; Index < NumContacts; ++Index)
+	{
+		const json_value *pEntry = json_array_get(pJson, Index);
+		if(pEntry == nullptr || pEntry->type != json_object)
+			continue;
+
+		CClientChatDirectContact Contact;
+		if(const json_value *pUserId = json_object_get(pEntry, "user_id"); pUserId != nullptr && pUserId->type == json_string)
+			str_copy(Contact.m_aUserId, json_string_get(pUserId), sizeof(Contact.m_aUserId));
+		if(const json_value *pName = json_object_get(pEntry, "name"); pName != nullptr && pName->type == json_string)
+			str_copy(Contact.m_aName, json_string_get(pName), sizeof(Contact.m_aName));
+		if(const json_value *pSkin = json_object_get(pEntry, "skin"); pSkin != nullptr && pSkin->type == json_string)
+			str_copy(Contact.m_aSkin, json_string_get(pSkin), sizeof(Contact.m_aSkin));
+		if(const json_value *pUseCustomColor = json_object_get(pEntry, "use_custom_color"); pUseCustomColor != nullptr && pUseCustomColor->type == json_boolean)
+			Contact.m_UseCustomColor = json_boolean_get(pUseCustomColor);
+		if(const json_value *pColorBody = json_object_get(pEntry, "color_body"); pColorBody != nullptr && pColorBody->type == json_integer)
+			Contact.m_ColorBody = json_int_get(pColorBody);
+		if(const json_value *pColorFeet = json_object_get(pEntry, "color_feet"); pColorFeet != nullptr && pColorFeet->type == json_integer)
+			Contact.m_ColorFeet = json_int_get(pColorFeet);
+		if(const json_value *pHiddenBeforeId = json_object_get(pEntry, "hidden_before_id"); pHiddenBeforeId != nullptr && pHiddenBeforeId->type == json_integer)
+			Contact.m_HiddenBeforeId = json_int_get(pHiddenBeforeId);
+		if(const json_value *pVisible = json_object_get(pEntry, "visible"); pVisible != nullptr && pVisible->type == json_boolean)
+			Contact.m_Visible = json_boolean_get(pVisible);
+
+		if(Contact.m_aName[0] == '\0' && Contact.m_aUserId[0] == '\0')
+			continue;
+		if(Contact.m_aSkin[0] == '\0')
+			str_copy(Contact.m_aSkin, "default", sizeof(Contact.m_aSkin));
+		if(m_aClientChatAccountId[0] != '\0' && Contact.m_aUserId[0] != '\0' && !ClientChatIsAccountId(Contact.m_aUserId))
+			continue;
+
+		if(CClientChatDirectContact *pExisting = FindClientChatDirectContact(Contact.m_aUserId, Contact.m_aName))
+		{
+			ClientChatCopyOptional(pExisting->m_aUserId, sizeof(pExisting->m_aUserId), Contact.m_aUserId, pExisting->m_aUserId);
+			ClientChatCopyOptional(pExisting->m_aName, sizeof(pExisting->m_aName), Contact.m_aName, pExisting->m_aName);
+			ClientChatCopyOptional(pExisting->m_aSkin, sizeof(pExisting->m_aSkin), Contact.m_aSkin, "default");
+			pExisting->m_UseCustomColor = Contact.m_UseCustomColor;
+			pExisting->m_ColorBody = Contact.m_ColorBody;
+			pExisting->m_ColorFeet = Contact.m_ColorFeet;
+			pExisting->m_HiddenBeforeId = maximum(pExisting->m_HiddenBeforeId, Contact.m_HiddenBeforeId);
+			pExisting->m_Visible = pExisting->m_Visible || Contact.m_Visible;
+			continue;
+		}
+
+		if(m_aClientChatAccountId[0] != '\0')
+		{
+			for(CClientChatDirectContact &Existing : m_vClientChatDirectContacts)
+			{
+				if(!ClientChatNamesEqual(Existing.m_aName, Contact.m_aName))
+					continue;
+
+				const bool ExistingAccountId = ClientChatIsAccountId(Existing.m_aUserId);
+				const bool ContactAccountId = ClientChatIsAccountId(Contact.m_aUserId);
+				if(ExistingAccountId == ContactAccountId)
+					continue;
+
+				CClientChatDirectContact &Preferred = ExistingAccountId ? Existing : Contact;
+				const CClientChatDirectContact &Legacy = ExistingAccountId ? Contact : Existing;
+				ClientChatCopyOptional(Preferred.m_aSkin, sizeof(Preferred.m_aSkin), Legacy.m_aSkin, Preferred.m_aSkin);
+				Preferred.m_UseCustomColor = Legacy.m_UseCustomColor;
+				Preferred.m_ColorBody = Legacy.m_ColorBody;
+				Preferred.m_ColorFeet = Legacy.m_ColorFeet;
+				Preferred.m_HiddenBeforeId = maximum(Preferred.m_HiddenBeforeId, Legacy.m_HiddenBeforeId);
+				Preferred.m_Visible = Preferred.m_Visible || Legacy.m_Visible;
+				if(!ExistingAccountId)
+					Existing = Preferred;
+				goto skip_push_contact;
+			}
+		}
+
+		m_vClientChatDirectContacts.push_back(Contact);
+skip_push_contact:
+		;
+	}
+
+	json_value_free(pJson);
+	SaveClientChatDirectContacts();
+}
+
+void CMenus::SaveClientChatDirectContacts() const
+{
+	char aContactsFile[IO_MAX_PATH_LENGTH];
+	if(!ClientChatContactsFilePath(aContactsFile, sizeof(aContactsFile), m_aClientChatAccountId))
+		return;
+
+	Storage()->CreateFolder(CLIENT_CHAT_CONTACTS_FOLDER, IStorage::TYPE_SAVE);
+	IOHANDLE File = Storage()->OpenFile(aContactsFile, IOFLAG_WRITE, IStorage::TYPE_SAVE);
+	if(!File)
+		return;
+
+	CJsonFileWriter Writer(File);
+	Writer.BeginArray();
+	for(const CClientChatDirectContact &Contact : m_vClientChatDirectContacts)
+	{
+		Writer.BeginObject();
+		Writer.WriteAttribute("user_id");
+		Writer.WriteStrValue(Contact.m_aUserId);
+		Writer.WriteAttribute("name");
+		Writer.WriteStrValue(Contact.m_aName);
+		Writer.WriteAttribute("skin");
+		Writer.WriteStrValue(Contact.m_aSkin);
+		Writer.WriteAttribute("use_custom_color");
+		Writer.WriteBoolValue(Contact.m_UseCustomColor);
+		Writer.WriteAttribute("color_body");
+		Writer.WriteIntValue(Contact.m_ColorBody);
+		Writer.WriteAttribute("color_feet");
+		Writer.WriteIntValue(Contact.m_ColorFeet);
+		Writer.WriteAttribute("hidden_before_id");
+		Writer.WriteIntValue(Contact.m_HiddenBeforeId);
+		Writer.WriteAttribute("visible");
+		Writer.WriteBoolValue(Contact.m_Visible);
+		Writer.EndObject();
+	}
+	Writer.EndArray();
+}
+
+void CMenus::EnsureClientChatDirectContact(const char *pUserId, const char *pName, const char *pSkin, bool UseCustomColor, int ColorBody, int ColorFeet)
+{
+	if((pUserId == nullptr || pUserId[0] == '\0') && (pName == nullptr || pName[0] == '\0'))
+		return;
+
+	if(m_aClientChatAccountId[0] != '\0' && pUserId != nullptr && pUserId[0] != '\0' && !ClientChatIsAccountId(pUserId))
+		return;
+
+	CClientChatDirectContact *pContact = FindClientChatDirectContact(pUserId, pName);
+	if(pContact == nullptr)
+	{
+		if(m_aClientChatAccountId[0] != '\0' && pName != nullptr && pName[0] != '\0')
+		{
+			for(CClientChatDirectContact &Contact : m_vClientChatDirectContacts)
+			{
+				if(!Contact.m_Visible || !ClientChatNamesEqual(Contact.m_aName, pName))
+					continue;
+
+				const bool ExistingAccountId = ClientChatIsAccountId(Contact.m_aUserId);
+				const bool NewAccountId = ClientChatIsAccountId(pUserId);
+				if(ExistingAccountId || !NewAccountId)
+					continue;
+
+				ClientChatCopyOptional(Contact.m_aUserId, sizeof(Contact.m_aUserId), pUserId, Contact.m_aUserId);
+				ClientChatCopyOptional(Contact.m_aSkin, sizeof(Contact.m_aSkin), pSkin, "default");
+				Contact.m_UseCustomColor = UseCustomColor;
+				Contact.m_ColorBody = ColorBody;
+				Contact.m_ColorFeet = ColorFeet;
+				SaveClientChatDirectContacts();
+				return;
+			}
+		}
+
+		CClientChatDirectContact Contact;
+		ClientChatCopyOptional(Contact.m_aUserId, sizeof(Contact.m_aUserId), pUserId);
+		ClientChatCopyOptional(Contact.m_aName, sizeof(Contact.m_aName), pName, "unnamed");
+		ClientChatCopyOptional(Contact.m_aSkin, sizeof(Contact.m_aSkin), pSkin, "default");
+		Contact.m_UseCustomColor = UseCustomColor;
+		Contact.m_ColorBody = ColorBody;
+		Contact.m_ColorFeet = ColorFeet;
+		Contact.m_HiddenBeforeId = m_ClientChatLastDirectId;
+		Contact.m_Visible = true;
+		m_vClientChatDirectContacts.push_back(Contact);
+		SaveClientChatDirectContacts();
+		return;
+	}
+
+	const bool WasVisible = pContact->m_Visible;
+	ClientChatCopyOptional(pContact->m_aUserId, sizeof(pContact->m_aUserId), pUserId, pContact->m_aUserId);
+	ClientChatCopyOptional(pContact->m_aName, sizeof(pContact->m_aName), pName, pContact->m_aName);
+	ClientChatCopyOptional(pContact->m_aSkin, sizeof(pContact->m_aSkin), pSkin, "default");
+	pContact->m_UseCustomColor = UseCustomColor;
+	pContact->m_ColorBody = ColorBody;
+	pContact->m_ColorFeet = ColorFeet;
+	pContact->m_Visible = true;
+	if(!WasVisible)
+		pContact->m_HiddenBeforeId = maximum(pContact->m_HiddenBeforeId, m_ClientChatLastDirectId);
+	SaveClientChatDirectContacts();
+}
+
+void CMenus::DeleteClientChatDirectContact(const char *pUserId, const char *pName)
+{
+	CClientChatDirectContact *pContact = FindClientChatDirectContact(pUserId, pName);
+	if(pContact == nullptr)
+		return;
+
+	pContact->m_Visible = false;
+	pContact->m_HiddenBeforeId = maximum(pContact->m_HiddenBeforeId, m_ClientChatLastDirectId);
+	SaveClientChatDirectContacts();
+
+	const bool Selected = (m_aClientChatDirectTargetId[0] != '\0' && pContact->m_aUserId[0] != '\0' && ClientChatIdsEqual(pContact->m_aUserId, m_aClientChatDirectTargetId)) ||
+		(m_aClientChatDirectTargetName[0] != '\0' && ClientChatNamesEqual(pContact->m_aName, m_aClientChatDirectTargetName));
+	if(Selected)
+		ActivateClientChatRoom();
+
+	RefreshClientChatConversations();
+}
+
+void CMenus::RefreshClientChatConversations()
+{
+	const char *pLocalNameRaw = Client()->PlayerName();
+	const char *pLocalName = pLocalNameRaw != nullptr ? pLocalNameRaw : "";
+	const char *pLocalId = m_aClientChatAccountId[0] != '\0' ? m_aClientChatAccountId : (m_aClientChatRuntimeIdentity[0] != '\0' ? m_aClientChatRuntimeIdentity : g_Config.m_ClClientChatIdentity);
+
+	auto IsLocalMessage = [&](const CClientChatMessage &Message) {
+		return ClientChatIsLocalMessage(Message.m_aSenderId, Message.m_aSenderInstanceId, Message.m_aName, pLocalId, pLocalName, m_aClientChatRuntimeIdentity, m_aClientChatAccountId[0] != '\0');
+	};
+	auto SameConversation = [](const CClientChatConversation &Conversation, const char *pUserId, const char *pName) {
+		if(pUserId != nullptr && pUserId[0] != '\0' && Conversation.m_aUserId[0] != '\0')
+			return ClientChatIdsEqual(Conversation.m_aUserId, pUserId);
+		return ClientChatNamesEqual(Conversation.m_aName, pName);
+	};
+
+	auto FindVisibleContact = [&](const char *pUserId, const char *pName) -> const CClientChatDirectContact * {
+		const CClientChatDirectContact *pContact = FindClientChatDirectContact(pUserId, pName);
+		return pContact != nullptr && pContact->m_Visible ? pContact : nullptr;
+	};
+
+	std::vector<CClientChatConversation> vPrevious = m_vClientChatConversations;
+	std::vector<CClientChatConversation> vConversations;
+
+	auto FindConversation = [&](const char *pUserId, const char *pName) -> CClientChatConversation * {
+		for(CClientChatConversation &Conversation : vConversations)
+		{
+			if(SameConversation(Conversation, pUserId, pName))
+				return &Conversation;
+		}
+		return nullptr;
+	};
+
+	auto GetOrCreateConversation = [&](const char *pUserId, const char *pName) -> CClientChatConversation & {
+		if(CClientChatConversation *pExisting = FindConversation(pUserId, pName))
+			return *pExisting;
+
+		CClientChatConversation Conversation;
+		ClientChatCopyOptional(Conversation.m_aUserId, sizeof(Conversation.m_aUserId), pUserId);
+		ClientChatCopyOptional(Conversation.m_aName, sizeof(Conversation.m_aName), pName, "unnamed");
+		for(const CClientChatConversation &Previous : vPrevious)
+		{
+			if(SameConversation(Previous, pUserId, pName))
+			{
+				Conversation.m_UnreadCount = Previous.m_UnreadCount;
+				ClientChatCopyOptional(Conversation.m_aSkin, sizeof(Conversation.m_aSkin), Previous.m_aSkin, "default");
+				Conversation.m_UseCustomColor = Previous.m_UseCustomColor;
+				Conversation.m_ColorBody = Previous.m_ColorBody;
+				Conversation.m_ColorFeet = Previous.m_ColorFeet;
+				ClientChatCopyOptional(Conversation.m_aPreview, sizeof(Conversation.m_aPreview), Previous.m_aPreview);
+				Conversation.m_LastTimestamp = Previous.m_LastTimestamp;
+				break;
+			}
+		}
+		vConversations.push_back(Conversation);
+		return vConversations.back();
+	};
+
+	auto TouchConversation = [&](CClientChatConversation &Conversation, const char *pUserId, const char *pName, const char *pSkin, bool UseCustomColor, int ColorBody, int ColorFeet, const char *pPreview, int Timestamp) {
+		if(Conversation.m_aUserId[0] == '\0')
+			ClientChatCopyOptional(Conversation.m_aUserId, sizeof(Conversation.m_aUserId), pUserId);
+		if(Conversation.m_aName[0] == '\0' || ClientChatNamesEqual(Conversation.m_aName, "unnamed"))
+			ClientChatCopyOptional(Conversation.m_aName, sizeof(Conversation.m_aName), pName, "unnamed");
+		if(pSkin != nullptr && pSkin[0] != '\0')
+			ClientChatCopyOptional(Conversation.m_aSkin, sizeof(Conversation.m_aSkin), pSkin, "default");
+		Conversation.m_UseCustomColor = UseCustomColor;
+		Conversation.m_ColorBody = ColorBody;
+		Conversation.m_ColorFeet = ColorFeet;
+		if(Timestamp >= Conversation.m_LastTimestamp)
+		{
+			Conversation.m_LastTimestamp = Timestamp;
+			ClientChatTrimPreview(Conversation.m_aPreview, sizeof(Conversation.m_aPreview), pPreview);
+		}
+	};
+
+	for(const CClientChatDirectContact &Contact : m_vClientChatDirectContacts)
+	{
+		if(!Contact.m_Visible || IsClientChatBlocked(Contact.m_aUserId, Contact.m_aName))
+			continue;
+
+		CClientChatConversation &Conversation = GetOrCreateConversation(Contact.m_aUserId, Contact.m_aName);
+		TouchConversation(Conversation, Contact.m_aUserId, Contact.m_aName, Contact.m_aSkin, Contact.m_UseCustomColor, Contact.m_ColorBody, Contact.m_ColorFeet, "Private line", 0);
+	}
+
+	for(const CClientChatMessage &Message : m_vClientChatDirectMessages)
+	{
+		char aPeerId[64] = "";
+		char aPeerName[64] = "";
+		const bool LocalMessage = IsLocalMessage(Message);
+		if(LocalMessage)
+		{
+			ClientChatCopyOptional(aPeerId, sizeof(aPeerId), Message.m_aTargetId);
+			ClientChatCopyOptional(aPeerName, sizeof(aPeerName), Message.m_aTargetName, Message.m_aName);
+		}
+		else
+		{
+			ClientChatCopyOptional(aPeerId, sizeof(aPeerId), Message.m_aSenderId);
+			ClientChatCopyOptional(aPeerName, sizeof(aPeerName), Message.m_aName, Message.m_aTargetName);
+		}
+
+		const CClientChatDirectContact *pContact = FindVisibleContact(aPeerId, aPeerName);
+		if(pContact == nullptr || Message.m_Id <= pContact->m_HiddenBeforeId)
+			continue;
+		if(IsClientChatBlocked(pContact->m_aUserId, pContact->m_aName))
+			continue;
+
+		CClientChatConversation &Conversation = GetOrCreateConversation(pContact->m_aUserId, pContact->m_aName);
+		char aPreview[96];
+		if(LocalMessage)
+			str_format(aPreview, sizeof(aPreview), "You: %s", Message.m_aText);
+		else
+			ClientChatCopyOptional(aPreview, sizeof(aPreview), Message.m_aText);
+
+		const char *pSkin = LocalMessage ? pContact->m_aSkin : Message.m_aSkin;
+		const bool UseCustomColor = LocalMessage ? pContact->m_UseCustomColor : Message.m_UseCustomColor;
+		const int ColorBody = LocalMessage ? pContact->m_ColorBody : Message.m_ColorBody;
+		const int ColorFeet = LocalMessage ? pContact->m_ColorFeet : Message.m_ColorFeet;
+		TouchConversation(Conversation, pContact->m_aUserId, pContact->m_aName, pSkin, UseCustomColor, ColorBody, ColorFeet, aPreview, Message.m_Timestamp);
+	}
+
+	std::sort(vConversations.begin(), vConversations.end(), [](const CClientChatConversation &Left, const CClientChatConversation &Right) {
+		if(Left.m_LastTimestamp != Right.m_LastTimestamp)
+			return Left.m_LastTimestamp > Right.m_LastTimestamp;
+		return str_utf8_comp_nocase(Left.m_aName, Right.m_aName) < 0;
+	});
+
+	m_vClientChatConversations = std::move(vConversations);
+	bool SelectionStillExists = m_aClientChatDirectTargetId[0] == '\0' && m_aClientChatDirectTargetName[0] == '\0';
+	for(const CClientChatConversation &Conversation : m_vClientChatConversations)
+	{
+		if((m_aClientChatDirectTargetId[0] != '\0' && ClientChatIdsEqual(Conversation.m_aUserId, m_aClientChatDirectTargetId)) ||
+			(m_aClientChatDirectTargetId[0] == '\0' && m_aClientChatDirectTargetName[0] != '\0' && ClientChatNamesEqual(Conversation.m_aName, m_aClientChatDirectTargetName)))
+		{
+			ClientChatCopyOptional(m_aClientChatDirectTargetId, sizeof(m_aClientChatDirectTargetId), Conversation.m_aUserId, m_aClientChatDirectTargetId);
+			ClientChatCopyOptional(m_aClientChatDirectTargetName, sizeof(m_aClientChatDirectTargetName), Conversation.m_aName, m_aClientChatDirectTargetName);
+			ClientChatCopyOptional(m_aClientChatDirectTargetSkin, sizeof(m_aClientChatDirectTargetSkin), Conversation.m_aSkin, "default");
+			m_ClientChatDirectTargetUseCustomColor = Conversation.m_UseCustomColor;
+			m_ClientChatDirectTargetColorBody = Conversation.m_ColorBody;
+			m_ClientChatDirectTargetColorFeet = Conversation.m_ColorFeet;
+			SelectionStillExists = true;
+			break;
+		}
+	}
+
+	if(!SelectionStillExists)
+		ActivateClientChatRoom();
+}
+
+void CMenus::StartClientChatFetch()
+{
+	if(m_pClientChatFetchTask || m_pClientChatAuthTask || g_Config.m_ClClientChatUrl[0] == '\0' || g_Config.m_ClClientChatAuthToken[0] == '\0')
+		return;
+
+	char aUrl[256];
+	str_format(aUrl, sizeof(aUrl), "%s?room_limit=%d&direct_limit=%d", g_Config.m_ClClientChatUrl, CLIENT_CHAT_ROOM_LIMIT, CLIENT_CHAT_DIRECT_LIMIT);
+
+	std::shared_ptr<CHttpRequest> pRequest = HttpGet(aUrl);
+	pRequest->Timeout(CLIENT_CHAT_TIMEOUT);
+	pRequest->LogProgress(HTTPLOG::FAILURE);
+	pRequest->FailOnErrorStatus(false);
+	pRequest->MaxResponseSize(512 * 1024);
+	pRequest->HeaderString(CLIENT_CHAT_HEADER_NAME, CLIENT_CHAT_HEADER_VALUE);
+	pRequest->HeaderString(CLIENT_CHAT_AUTH_HEADER_NAME, g_Config.m_ClClientChatAuthToken);
+	Http()->Run(pRequest);
+
+	m_pClientChatFetchTask = pRequest;
+	m_ClientChatLastPollTime = time_get_nanoseconds();
+
+	if(m_vClientChatRoomMessages.empty() && m_vClientChatDirectMessages.empty())
+	{
+		str_copy(m_aClientChatStatus, m_aClientChatAccountId[0] == '\0' ? "Checking saved session..." : Localize("Connecting to client chat..."), sizeof(m_aClientChatStatus));
+		m_ClientChatStatusError = false;
+	}
+}
+
+void CMenus::HandleClientChatFetchCompletion(const std::shared_ptr<CHttpRequest> &pTask)
+{
+	if(!pTask)
+		return;
+
+	if(pTask->State() != EHttpState::DONE)
+	{
+		str_copy(m_aClientChatStatus, Localize("Couldn't reach the client chat server."), sizeof(m_aClientChatStatus));
+		m_ClientChatStatusError = true;
+		return;
+	}
+
+	if(pTask->StatusCode() >= 400)
+	{
+		if(pTask->StatusCode() == 401 || pTask->StatusCode() == 403)
+		{
+			++m_ClientChatTransientAuthFailures;
+			if(m_ClientChatTransientAuthFailures < 3 && g_Config.m_ClClientChatAuthToken[0] != '\0')
+			{
+				m_aClientChatAccountId[0] = '\0';
+				str_format(m_aClientChatStatus, sizeof(m_aClientChatStatus), "Reconnecting chat session (%d/3)...", m_ClientChatTransientAuthFailures);
+				m_ClientChatStatusError = false;
+				m_ClientChatLastPollTime = 0ns;
+			}
+			else
+			{
+				ClearClientChatAuthState(true);
+				str_copy(m_aClientChatStatus, "Session expired. Log in again.", sizeof(m_aClientChatStatus));
+				m_ClientChatStatusError = true;
+			}
+			return;
+		}
+
+		str_format(m_aClientChatStatus, sizeof(m_aClientChatStatus), Localize("Client chat server returned %d."), pTask->StatusCode());
+		m_ClientChatStatusError = true;
+		return;
+	}
+
+	json_value *pJson = pTask->ResultJson();
+	if(pJson == nullptr || pJson->type != json_object)
+	{
+		str_copy(m_aClientChatStatus, Localize("Client chat returned invalid data."), sizeof(m_aClientChatStatus));
+		m_ClientChatStatusError = true;
+		if(pJson != nullptr)
+			json_value_free(pJson);
+		return;
+	}
+
+	if(const json_value *pOk = json_object_get(pJson, "ok"); pOk != nullptr && pOk->type == json_boolean && !json_boolean_get(pOk))
+	{
+		const char *pErrorText = "Client chat auth failed.";
+		if(const json_value *pError = json_object_get(pJson, "error"); pError != nullptr && pError->type == json_string)
+		{
+			const char *pErrorCode = json_string_get(pError);
+			if(str_comp(pErrorCode, "auth_required") == 0 || str_comp(pErrorCode, "invalid_session") == 0 || str_comp(pErrorCode, "session_expired") == 0)
+			{
+				++m_ClientChatTransientAuthFailures;
+				if(m_ClientChatTransientAuthFailures < 3 && g_Config.m_ClClientChatAuthToken[0] != '\0')
+				{
+					m_aClientChatAccountId[0] = '\0';
+					str_format(m_aClientChatStatus, sizeof(m_aClientChatStatus), "Reconnecting chat session (%d/3)...", m_ClientChatTransientAuthFailures);
+					m_ClientChatStatusError = false;
+					m_ClientChatLastPollTime = 0ns;
+					json_value_free(pJson);
+					return;
+				}
+				ClearClientChatAuthState(true);
+				pErrorText = "Session expired. Log in again.";
+			}
+			else
+				pErrorText = "Client chat server rejected the request.";
+		}
+
+		str_copy(m_aClientChatStatus, pErrorText, sizeof(m_aClientChatStatus));
+		m_ClientChatStatusError = true;
+		json_value_free(pJson);
+		return;
+	}
+
+	const json_value *pAccount = json_object_get(pJson, "account");
+	if(pAccount == nullptr || pAccount->type != json_object)
+	{
+		str_copy(m_aClientChatStatus, "Client chat account data is missing.", sizeof(m_aClientChatStatus));
+		m_ClientChatStatusError = true;
+		json_value_free(pJson);
+		return;
+	}
+
+	char aPreviousAccountId[sizeof(m_aClientChatAccountId)];
+	str_copy(aPreviousAccountId, m_aClientChatAccountId, sizeof(aPreviousAccountId));
+	if(const json_value *pId = json_object_get(pAccount, "id"); pId != nullptr && pId->type == json_string)
+		str_copy(m_aClientChatAccountId, json_string_get(pId), sizeof(m_aClientChatAccountId));
+	if(const json_value *pUsername = json_object_get(pAccount, "username"); pUsername != nullptr && pUsername->type == json_string)
+	{
+		str_copy(m_aClientChatAccountUsername, json_string_get(pUsername), sizeof(m_aClientChatAccountUsername));
+		str_copy(g_Config.m_ClClientChatAccountName, m_aClientChatAccountUsername, sizeof(g_Config.m_ClClientChatAccountName));
+		if(m_ClientChatAuthNameInput.IsEmpty())
+			m_ClientChatAuthNameInput.Set(m_aClientChatAccountUsername);
+	}
+	if(m_aClientChatAccountId[0] == '\0')
+	{
+		str_copy(m_aClientChatStatus, "Client chat account data is invalid.", sizeof(m_aClientChatStatus));
+		m_ClientChatStatusError = true;
+		json_value_free(pJson);
+		return;
+	}
+	if(!ClientChatIdsEqual(aPreviousAccountId, m_aClientChatAccountId))
+		LoadClientChatDirectContacts();
+	m_ClientChatTransientAuthFailures = 0;
+	if(const json_value *pStatus = json_object_get(pAccount, "status"); pStatus != nullptr && pStatus->type == json_string)
+		str_copy(m_aClientChatPresenceStatus, json_string_get(pStatus), sizeof(m_aClientChatPresenceStatus));
+	if(const json_value *pStatusText = json_object_get(pAccount, "status_text"); pStatusText != nullptr && pStatusText->type == json_string)
+		str_copy(m_aClientChatPresenceText, json_string_get(pStatusText), sizeof(m_aClientChatPresenceText));
+	if(const json_value *pPrivacy = json_object_get(pAccount, "privacy"); pPrivacy != nullptr && pPrivacy->type == json_object)
+	{
+		if(const json_value *pWhoCanDm = json_object_get(pPrivacy, "who_can_dm"); pWhoCanDm != nullptr && pWhoCanDm->type == json_string)
+			str_copy(m_aClientChatPrivacyWhoCanDm, json_string_get(pWhoCanDm), sizeof(m_aClientChatPrivacyWhoCanDm));
+		if(const json_value *pWhoCanAddFriends = json_object_get(pPrivacy, "who_can_add_friends"); pWhoCanAddFriends != nullptr && pWhoCanAddFriends->type == json_string)
+			str_copy(m_aClientChatPrivacyWhoCanAddFriends, json_string_get(pWhoCanAddFriends), sizeof(m_aClientChatPrivacyWhoCanAddFriends));
+	}
+
+	m_vClientChatFriends.clear();
+	if(const json_value *pFriends = json_object_get(pJson, "friends"); pFriends != nullptr && pFriends->type == json_array)
+	{
+		const int Num = json_array_length(pFriends);
+		m_vClientChatFriends.reserve(Num);
+		for(int i = 0; i < Num; ++i)
+		{
+			const json_value *pFriend = json_array_get(pFriends, i);
+			if(pFriend == nullptr || pFriend->type != json_object)
+				continue;
+			CClientChatFriend Friend;
+			if(const json_value *pId = json_object_get(pFriend, "id"); pId != nullptr && pId->type == json_string)
+				str_copy(Friend.m_aUserId, json_string_get(pId), sizeof(Friend.m_aUserId));
+			if(const json_value *pName = json_object_get(pFriend, "username"); pName != nullptr && pName->type == json_string)
+				str_copy(Friend.m_aName, json_string_get(pName), sizeof(Friend.m_aName));
+			if(const json_value *pStatus = json_object_get(pFriend, "status"); pStatus != nullptr && pStatus->type == json_string)
+				str_copy(Friend.m_aStatus, json_string_get(pStatus), sizeof(Friend.m_aStatus));
+			if(const json_value *pStatusText = json_object_get(pFriend, "status_text"); pStatusText != nullptr && pStatusText->type == json_string)
+				str_copy(Friend.m_aStatusText, json_string_get(pStatusText), sizeof(Friend.m_aStatusText));
+			if(const json_value *pCurrentServer = json_object_get(pFriend, "current_server"); pCurrentServer != nullptr && pCurrentServer->type == json_string)
+				str_copy(Friend.m_aCurrentServer, json_string_get(pCurrentServer), sizeof(Friend.m_aCurrentServer));
+			if(const json_value *pOnline = json_object_get(pFriend, "is_online"); pOnline != nullptr && pOnline->type == json_boolean)
+				Friend.m_Online = json_boolean_get(pOnline);
+			if(const json_value *pCanJoin = json_object_get(pFriend, "can_join"); pCanJoin != nullptr && pCanJoin->type == json_boolean)
+				Friend.m_CanJoin = json_boolean_get(pCanJoin);
+			if(Friend.m_aName[0] != '\0')
+				m_vClientChatFriends.push_back(Friend);
+		}
+	}
+
+	m_vClientChatFriendRequestsIn.clear();
+	if(const json_value *pRequests = json_object_get(pJson, "friend_requests_in"); pRequests != nullptr && pRequests->type == json_array)
+	{
+		const int Num = json_array_length(pRequests);
+		m_vClientChatFriendRequestsIn.reserve(Num);
+		for(int i = 0; i < Num; ++i)
+		{
+			const json_value *pRequest = json_array_get(pRequests, i);
+			if(pRequest == nullptr || pRequest->type != json_object)
+				continue;
+			CClientChatFriendRequest Request;
+			if(const json_value *pReqId = json_object_get(pRequest, "id"); pReqId != nullptr && pReqId->type == json_integer)
+				Request.m_Id = json_int_get(pReqId);
+			if(const json_value *pFromId = json_object_get(pRequest, "from_id"); pFromId != nullptr && pFromId->type == json_string)
+				str_copy(Request.m_aUserId, json_string_get(pFromId), sizeof(Request.m_aUserId));
+			if(const json_value *pFromName = json_object_get(pRequest, "from_username"); pFromName != nullptr && pFromName->type == json_string)
+				str_copy(Request.m_aName, json_string_get(pFromName), sizeof(Request.m_aName));
+			if(Request.m_Id > 0 && Request.m_aName[0] != '\0')
+				m_vClientChatFriendRequestsIn.push_back(Request);
+		}
+	}
+
+	m_vClientChatBlockedUsers.clear();
+	if(const json_value *pBlocks = json_object_get(pJson, "blocks"); pBlocks != nullptr && pBlocks->type == json_array)
+	{
+		const int Num = json_array_length(pBlocks);
+		m_vClientChatBlockedUsers.reserve(Num);
+		for(int i = 0; i < Num; ++i)
+		{
+			const json_value *pBlock = json_array_get(pBlocks, i);
+			if(pBlock == nullptr || pBlock->type != json_object)
+				continue;
+			CClientChatBlockedUser Blocked;
+			if(const json_value *pBlockedId = json_object_get(pBlock, "user_id"); pBlockedId != nullptr && pBlockedId->type == json_string)
+				str_copy(Blocked.m_aUserId, json_string_get(pBlockedId), sizeof(Blocked.m_aUserId));
+			if(const json_value *pBlockedName = json_object_get(pBlock, "username"); pBlockedName != nullptr && pBlockedName->type == json_string)
+				str_copy(Blocked.m_aName, json_string_get(pBlockedName), sizeof(Blocked.m_aName));
+			if(Blocked.m_aName[0] != '\0' || Blocked.m_aUserId[0] != '\0')
+				m_vClientChatBlockedUsers.push_back(Blocked);
+		}
+	}
+
+	const json_value *pRoomMessages = json_object_get(pJson, "room_messages");
+	if(pRoomMessages == nullptr)
+		pRoomMessages = json_object_get(pJson, "messages");
+	const json_value *pDirectMessages = json_object_get(pJson, "direct_messages");
+	if((pRoomMessages != nullptr && pRoomMessages->type != json_array) || (pDirectMessages != nullptr && pDirectMessages->type != json_array))
+	{
+		str_copy(m_aClientChatStatus, Localize("Client chat returned invalid data."), sizeof(m_aClientChatStatus));
+		m_ClientChatStatusError = true;
+		json_value_free(pJson);
+		return;
+	}
+
+	const char *pLocalNameRaw = Client()->PlayerName();
+	const char *pLocalName = pLocalNameRaw != nullptr ? pLocalNameRaw : "";
+	const char *pLocalId = m_aClientChatAccountId[0] != '\0' ? m_aClientChatAccountId : (m_aClientChatRuntimeIdentity[0] != '\0' ? m_aClientChatRuntimeIdentity : g_Config.m_ClClientChatIdentity);
+
+	auto IsLocalMessage = [&](const CClientChatMessage &Message) {
+		return ClientChatIsLocalMessage(Message.m_aSenderId, Message.m_aSenderInstanceId, Message.m_aName, pLocalId, pLocalName, m_aClientChatRuntimeIdentity, m_aClientChatAccountId[0] != '\0');
+	};
+
+	auto ContainsLocalMention = [&](const char *pText) {
+		return ClientChatTextContainsMention(pText, pLocalName) ||
+			ClientChatTextContainsMention(pText, m_aClientChatAccountUsername);
+	};
+
+	auto ParseMessages = [&](const json_value *pArray, std::vector<CClientChatMessage> &vOut, bool DefaultDirect) {
+		if(pArray == nullptr)
+			return;
+
+		const int NumMessages = json_array_length(pArray);
+		vOut.reserve(NumMessages);
+		for(int Index = 0; Index < NumMessages; ++Index)
+		{
+			const json_value *pMessage = json_array_get(pArray, Index);
+			if(pMessage == nullptr || pMessage->type != json_object)
+				continue;
+
+			CClientChatMessage Message;
+			Message.m_Direct = DefaultDirect;
+			if(const json_value *pId = json_object_get(pMessage, "id"); pId != nullptr && pId->type == json_integer)
+				Message.m_Id = json_int_get(pId);
+			if(const json_value *pTimestamp = json_object_get(pMessage, "timestamp"); pTimestamp != nullptr && pTimestamp->type == json_integer)
+				Message.m_Timestamp = json_int_get(pTimestamp);
+			if(const json_value *pSenderId = json_object_get(pMessage, "sender_id"); pSenderId != nullptr && pSenderId->type == json_string)
+				str_copy(Message.m_aSenderId, json_string_get(pSenderId), sizeof(Message.m_aSenderId));
+			if(const json_value *pSenderInstanceId = json_object_get(pMessage, "sender_instance_id"); pSenderInstanceId != nullptr && pSenderInstanceId->type == json_string)
+				str_copy(Message.m_aSenderInstanceId, json_string_get(pSenderInstanceId), sizeof(Message.m_aSenderInstanceId));
+			if(const json_value *pTargetId = json_object_get(pMessage, "target_id"); pTargetId != nullptr && pTargetId->type == json_string)
+				str_copy(Message.m_aTargetId, json_string_get(pTargetId), sizeof(Message.m_aTargetId));
+			if(const json_value *pName = json_object_get(pMessage, "name"); pName != nullptr && pName->type == json_string)
+				str_copy(Message.m_aName, json_string_get(pName), sizeof(Message.m_aName));
+			if(const json_value *pTargetName = json_object_get(pMessage, "target_name"); pTargetName != nullptr && pTargetName->type == json_string)
+				str_copy(Message.m_aTargetName, json_string_get(pTargetName), sizeof(Message.m_aTargetName));
+			if(const json_value *pText = json_object_get(pMessage, "text"); pText != nullptr && pText->type == json_string)
+				str_copy(Message.m_aText, json_string_get(pText), sizeof(Message.m_aText));
+			if(const json_value *pSkin = json_object_get(pMessage, "skin"); pSkin != nullptr && pSkin->type == json_string)
+				str_copy(Message.m_aSkin, json_string_get(pSkin), sizeof(Message.m_aSkin));
+			if(const json_value *pUseCustomColor = json_object_get(pMessage, "use_custom_color"); pUseCustomColor != nullptr && pUseCustomColor->type == json_boolean)
+				Message.m_UseCustomColor = json_boolean_get(pUseCustomColor);
+			if(const json_value *pColorBody = json_object_get(pMessage, "color_body"); pColorBody != nullptr && pColorBody->type == json_integer)
+				Message.m_ColorBody = json_int_get(pColorBody);
+			if(const json_value *pColorFeet = json_object_get(pMessage, "color_feet"); pColorFeet != nullptr && pColorFeet->type == json_integer)
+				Message.m_ColorFeet = json_int_get(pColorFeet);
+			if(const json_value *pDirect = json_object_get(pMessage, "direct"); pDirect != nullptr && pDirect->type == json_boolean)
+				Message.m_Direct = json_boolean_get(pDirect);
+			if(const json_value *pChannel = json_object_get(pMessage, "channel"); pChannel != nullptr && pChannel->type == json_string)
+				Message.m_Direct = str_comp(json_string_get(pChannel), "direct") == 0;
+
+			if(Message.m_aName[0] == '\0')
+				str_copy(Message.m_aName, "unnamed", sizeof(Message.m_aName));
+			if(Message.m_aSkin[0] == '\0')
+				str_copy(Message.m_aSkin, "default", sizeof(Message.m_aSkin));
+			if(!IsLocalMessage(Message) && IsClientChatBlocked(Message.m_aSenderId, Message.m_aName))
+				continue;
+			Message.m_MentionsLocal = !Message.m_Direct && !IsLocalMessage(Message) && ContainsLocalMention(Message.m_aText);
+			vOut.push_back(Message);
+		}
+	};
+
+	int PreviousRoomId = m_ClientChatLastRoomId;
+	int PreviousDirectId = m_ClientChatLastDirectId;
+
+	std::vector<CClientChatMessage> vRoomMessages;
+	std::vector<CClientChatMessage> vDirectMessages;
+	ParseMessages(pRoomMessages, vRoomMessages, false);
+	ParseMessages(pDirectMessages, vDirectMessages, true);
+
+	m_vClientChatRoomMessages = std::move(vRoomMessages);
+	m_vClientChatDirectMessages = std::move(vDirectMessages);
+	for(const CClientChatMessage &Message : m_vClientChatDirectMessages)
+	{
+		if(Message.m_Id <= PreviousDirectId || IsLocalMessage(Message))
+			continue;
+
+		EnsureClientChatDirectContact(Message.m_aSenderId, Message.m_aName, Message.m_aSkin, Message.m_UseCustomColor, Message.m_ColorBody, Message.m_ColorFeet);
+	}
+	RefreshClientChatConversations();
+
+	auto MessageMatchesSelectedDirect = [&](const CClientChatMessage &Message) {
+		if(!Message.m_Direct || (m_aClientChatDirectTargetName[0] == '\0' && m_aClientChatDirectTargetId[0] == '\0'))
+			return false;
+		if(IsLocalMessage(Message))
+		{
+			if(m_aClientChatDirectTargetId[0] != '\0' && Message.m_aTargetId[0] != '\0')
+				return ClientChatIdsEqual(Message.m_aTargetId, m_aClientChatDirectTargetId);
+			return ClientChatNamesEqual(Message.m_aTargetName, m_aClientChatDirectTargetName);
+		}
+		if(m_aClientChatDirectTargetId[0] != '\0' && Message.m_aSenderId[0] != '\0')
+			return ClientChatIdsEqual(Message.m_aSenderId, m_aClientChatDirectTargetId);
+		return ClientChatNamesEqual(Message.m_aName, m_aClientChatDirectTargetName);
+	};
+
+	auto QueueToast = [&](const CClientChatMessage &Message, const char *pVisualTitle, const char *pNotifyTitle) {
+		if(g_Config.m_ClClientChatNotifications == 0)
+			return;
+		CClientChatToast Toast;
+		ClientChatCopyOptional(Toast.m_aTitle, sizeof(Toast.m_aTitle), pVisualTitle);
+		ClientChatCopyOptional(Toast.m_aText, sizeof(Toast.m_aText), Message.m_aText);
+		ClientChatCopyOptional(Toast.m_aName, sizeof(Toast.m_aName), Message.m_aName);
+		ClientChatCopyOptional(Toast.m_aSkin, sizeof(Toast.m_aSkin), Message.m_aSkin, "default");
+		Toast.m_UseCustomColor = Message.m_UseCustomColor;
+		Toast.m_ColorBody = Message.m_ColorBody;
+		Toast.m_ColorFeet = Message.m_ColorFeet;
+		Toast.m_Direct = Message.m_Direct;
+		m_vClientChatToastQueue.push_back(Toast);
+		Client()->Notify(pNotifyTitle, Message.m_aText);
+	};
+
+	auto IncrementUnread = [&](const CClientChatMessage &Message) {
+		for(CClientChatConversation &Conversation : m_vClientChatConversations)
+		{
+			if((Conversation.m_aUserId[0] != '\0' && Message.m_aSenderId[0] != '\0' && ClientChatIdsEqual(Conversation.m_aUserId, Message.m_aSenderId)) ||
+				(Conversation.m_aUserId[0] == '\0' && ClientChatNamesEqual(Conversation.m_aName, Message.m_aName)))
+			{
+				Conversation.m_UnreadCount++;
+				break;
+			}
+		}
+	};
+
+	const bool ViewingRoom = IsClientChatPageActive() && m_aClientChatDirectTargetName[0] == '\0' && m_aClientChatDirectTargetId[0] == '\0';
+	if(m_ClientChatHasFetched)
+	{
+		for(const CClientChatMessage &Message : m_vClientChatRoomMessages)
+		{
+			if(Message.m_Id <= PreviousRoomId || IsLocalMessage(Message) || !Message.m_MentionsLocal || ViewingRoom)
+				continue;
+
+			char aNotifyTitle[96];
+			str_format(aNotifyTitle, sizeof(aNotifyTitle), "Ping from %s", Message.m_aName);
+			QueueToast(Message, "PING", aNotifyTitle);
+		}
+
+		for(const CClientChatMessage &Message : m_vClientChatDirectMessages)
+		{
+			if(Message.m_Id <= PreviousDirectId || IsLocalMessage(Message))
+				continue;
+
+			const CClientChatDirectContact *pContact = FindClientChatDirectContact(Message.m_aSenderId, Message.m_aName);
+			if(pContact == nullptr || !pContact->m_Visible || Message.m_Id <= pContact->m_HiddenBeforeId)
+				continue;
+
+			const bool ViewingThisConversation = IsClientChatPageActive() && MessageMatchesSelectedDirect(Message);
+			if(!ViewingThisConversation)
+				IncrementUnread(Message);
+			if(!ViewingThisConversation)
+			{
+				char aNotifyTitle[96];
+				str_format(aNotifyTitle, sizeof(aNotifyTitle), "LS from %s", Message.m_aName);
+				QueueToast(Message, "LS", aNotifyTitle);
+			}
+		}
+	}
+
+	m_ClientChatLastRoomId = 0;
+	for(const CClientChatMessage &Message : m_vClientChatRoomMessages)
+		m_ClientChatLastRoomId = maximum(m_ClientChatLastRoomId, Message.m_Id);
+	m_ClientChatLastDirectId = 0;
+	for(const CClientChatMessage &Message : m_vClientChatDirectMessages)
+		m_ClientChatLastDirectId = maximum(m_ClientChatLastDirectId, Message.m_Id);
+
+	if(IsClientChatPageActive() && (m_aClientChatDirectTargetName[0] != '\0' || m_aClientChatDirectTargetId[0] != '\0'))
+	{
+		for(CClientChatConversation &Conversation : m_vClientChatConversations)
+		{
+			if((m_aClientChatDirectTargetId[0] != '\0' && ClientChatIdsEqual(Conversation.m_aUserId, m_aClientChatDirectTargetId)) ||
+				(m_aClientChatDirectTargetId[0] == '\0' && ClientChatNamesEqual(Conversation.m_aName, m_aClientChatDirectTargetName)))
+			{
+				Conversation.m_UnreadCount = 0;
+				break;
+			}
+		}
+	}
+
+	if(m_vClientChatRoomMessages.empty() && m_vClientChatConversations.empty())
+		str_copy(m_aClientChatStatus, Localize("Chat is empty. Send the first message."), sizeof(m_aClientChatStatus));
+	else
+		m_aClientChatStatus[0] = '\0';
+	m_ClientChatStatusError = false;
+	m_ClientChatHasFetched = true;
+
+	json_value_free(pJson);
+}
+
+void CMenus::ClearClientChatAuthState(bool ClearSavedToken)
+{
+	if(ClearSavedToken)
+		g_Config.m_ClClientChatAuthToken[0] = '\0';
+
+	m_aClientChatAccountId[0] = '\0';
+	m_aClientChatAccountUsername[0] = '\0';
+	m_ClientChatTransientAuthFailures = 0;
+	if(m_pClientChatActionTask)
+		m_pClientChatActionTask->Abort();
+	m_pClientChatActionTask.reset();
+	m_ClientChatInput.Clear();
+	m_ClientChatAuthPasswordInput.Clear();
+	ActivateClientChatRoom();
+	m_vClientChatDirectContacts.clear();
+	m_vClientChatRoomMessages.clear();
+	m_vClientChatDirectMessages.clear();
+	m_vClientChatConversations.clear();
+	m_vClientChatFriends.clear();
+	m_vClientChatFriendRequestsIn.clear();
+	m_vClientChatBlockedUsers.clear();
+	m_vClientChatToastQueue.clear();
+	m_ClientChatToast.m_Active = false;
+	m_ClientChatHasFetched = false;
+	m_ClientChatLastRoomId = 0;
+	m_ClientChatLastDirectId = 0;
+	m_ClientChatLastPollTime = 0ns;
+	str_copy(m_aClientChatPresenceStatus, "online", sizeof(m_aClientChatPresenceStatus));
+	m_aClientChatPresenceText[0] = '\0';
+	str_copy(m_aClientChatPrivacyWhoCanDm, "everyone", sizeof(m_aClientChatPrivacyWhoCanDm));
+	str_copy(m_aClientChatPrivacyWhoCanAddFriends, "everyone", sizeof(m_aClientChatPrivacyWhoCanAddFriends));
+	m_aClientChatPresenceServer[0] = '\0';
+	m_ClientChatPresenceLastSync = 0ns;
+}
+
+void CMenus::StartClientChatAuthRequest(EClientChatAuthAction Action)
+{
+	if(m_pClientChatAuthTask || m_pClientChatFetchTask || m_pClientChatSendTask || g_Config.m_ClClientChatUrl[0] == '\0')
+		return;
+
+	const char *pUsername = m_ClientChatAuthNameInput.GetString();
+	const char *pPassword = m_ClientChatAuthPasswordInput.GetString();
+	if((Action == CLIENT_CHAT_AUTH_LOGIN || Action == CLIENT_CHAT_AUTH_REGISTER) && (pUsername[0] == '\0' || pPassword[0] == '\0'))
+	{
+		str_copy(m_aClientChatStatus, "Fill in username and password.", sizeof(m_aClientChatStatus));
+		m_ClientChatStatusError = true;
+		return;
+	}
+
+	CJsonStringWriter JsonWriter;
+	JsonWriter.BeginObject();
+	JsonWriter.WriteAttribute("action");
+	if(Action == CLIENT_CHAT_AUTH_REGISTER)
+		JsonWriter.WriteStrValue("register");
+	else if(Action == CLIENT_CHAT_AUTH_LOGOUT)
+		JsonWriter.WriteStrValue("logout");
+	else
+		JsonWriter.WriteStrValue("login");
+	if(Action == CLIENT_CHAT_AUTH_LOGIN || Action == CLIENT_CHAT_AUTH_REGISTER)
+	{
+		JsonWriter.WriteAttribute("username");
+		JsonWriter.WriteStrValue(pUsername);
+		JsonWriter.WriteAttribute("password");
+		JsonWriter.WriteStrValue(pPassword);
+	}
+	JsonWriter.EndObject();
+
+	std::string JsonBody = JsonWriter.GetOutputString();
+	std::shared_ptr<CHttpRequest> pRequest = HttpPostJson(g_Config.m_ClClientChatUrl, JsonBody.c_str());
+	pRequest->Timeout(CLIENT_CHAT_TIMEOUT);
+	pRequest->LogProgress(HTTPLOG::FAILURE);
+	pRequest->FailOnErrorStatus(false);
+	pRequest->MaxResponseSize(128 * 1024);
+	pRequest->HeaderString(CLIENT_CHAT_HEADER_NAME, CLIENT_CHAT_HEADER_VALUE);
+	if(Action == CLIENT_CHAT_AUTH_LOGOUT && g_Config.m_ClClientChatAuthToken[0] != '\0')
+		pRequest->HeaderString(CLIENT_CHAT_AUTH_HEADER_NAME, g_Config.m_ClClientChatAuthToken);
+	Http()->Run(pRequest);
+
+	m_pClientChatAuthTask = pRequest;
+	m_ClientChatAuthAction = Action;
+	m_ClientChatStatusError = false;
+	if(Action == CLIENT_CHAT_AUTH_REGISTER)
+		str_copy(m_aClientChatStatus, "Creating chat account...", sizeof(m_aClientChatStatus));
+	else if(Action == CLIENT_CHAT_AUTH_LOGOUT)
+		str_copy(m_aClientChatStatus, "Signing out...", sizeof(m_aClientChatStatus));
+	else
+		str_copy(m_aClientChatStatus, "Signing in...", sizeof(m_aClientChatStatus));
+}
+
+void CMenus::HandleClientChatAuthCompletion(const std::shared_ptr<CHttpRequest> &pTask)
+{
+	if(!pTask)
+		return;
+
+	auto SetErrorFromCode = [&](const char *pErrorCode) {
+		if(pErrorCode == nullptr || pErrorCode[0] == '\0')
+		{
+			str_copy(m_aClientChatStatus, "Client chat auth failed.", sizeof(m_aClientChatStatus));
+			return;
+		}
+
+		if(str_comp(pErrorCode, "username_taken") == 0)
+			str_copy(m_aClientChatStatus, "This username is already taken.", sizeof(m_aClientChatStatus));
+		else if(str_comp(pErrorCode, "invalid_credentials") == 0)
+			str_copy(m_aClientChatStatus, "Wrong username or password.", sizeof(m_aClientChatStatus));
+		else if(str_comp(pErrorCode, "invalid_username") == 0)
+			str_copy(m_aClientChatStatus, "Username must be 3-24 chars: letters, numbers, _ or -.", sizeof(m_aClientChatStatus));
+		else if(str_comp(pErrorCode, "invalid_password") == 0)
+			str_copy(m_aClientChatStatus, "Password must be at least 4 characters.", sizeof(m_aClientChatStatus));
+		else if(str_comp(pErrorCode, "auth_required") == 0 || str_comp(pErrorCode, "invalid_session") == 0 || str_comp(pErrorCode, "session_expired") == 0)
+			str_copy(m_aClientChatStatus, "Session expired. Log in again.", sizeof(m_aClientChatStatus));
+		else
+			str_copy(m_aClientChatStatus, "Client chat auth failed.", sizeof(m_aClientChatStatus));
+	};
+
+	if(pTask->State() != EHttpState::DONE)
+	{
+		str_copy(m_aClientChatStatus, "Couldn't reach the chat login server.", sizeof(m_aClientChatStatus));
+		m_ClientChatStatusError = true;
+		m_ClientChatAuthAction = CLIENT_CHAT_AUTH_NONE;
+		return;
+	}
+
+	json_value *pJson = pTask->ResultJson();
+	const json_value *pError = pJson != nullptr && pJson->type == json_object ? json_object_get(pJson, "error") : nullptr;
+	const char *pErrorCode = pError != nullptr && pError->type == json_string ? json_string_get(pError) : "";
+
+	if(pTask->StatusCode() >= 400)
+	{
+		if(m_ClientChatAuthAction == CLIENT_CHAT_AUTH_LOGOUT)
+			ClearClientChatAuthState(true);
+		else if(str_comp(pErrorCode, "auth_required") == 0 || str_comp(pErrorCode, "invalid_session") == 0 || str_comp(pErrorCode, "session_expired") == 0)
+			ClearClientChatAuthState(true);
+
+		SetErrorFromCode(pErrorCode);
+		m_ClientChatStatusError = true;
+		m_ClientChatAuthAction = CLIENT_CHAT_AUTH_NONE;
+		if(pJson != nullptr)
+			json_value_free(pJson);
+		return;
+	}
+
+	if(pJson == nullptr || pJson->type != json_object)
+	{
+		str_copy(m_aClientChatStatus, "Client chat auth returned invalid data.", sizeof(m_aClientChatStatus));
+		m_ClientChatStatusError = true;
+		m_ClientChatAuthAction = CLIENT_CHAT_AUTH_NONE;
+		if(pJson != nullptr)
+			json_value_free(pJson);
+		return;
+	}
+
+	if(const json_value *pOk = json_object_get(pJson, "ok"); pOk != nullptr && pOk->type == json_boolean && !json_boolean_get(pOk))
+	{
+		SetErrorFromCode(pErrorCode);
+		m_ClientChatStatusError = true;
+		m_ClientChatAuthAction = CLIENT_CHAT_AUTH_NONE;
+		json_value_free(pJson);
+		return;
+	}
+
+	if(m_ClientChatAuthAction == CLIENT_CHAT_AUTH_LOGOUT)
+	{
+		ClearClientChatAuthState(true);
+		str_copy(m_aClientChatStatus, "Signed out from client chat.", sizeof(m_aClientChatStatus));
+		m_ClientChatStatusError = false;
+		m_ClientChatAuthAction = CLIENT_CHAT_AUTH_NONE;
+		json_value_free(pJson);
+		return;
+	}
+
+	const json_value *pToken = json_object_get(pJson, "session_token");
+	const json_value *pAccount = json_object_get(pJson, "account");
+	if(pToken == nullptr || pToken->type != json_string || pAccount == nullptr || pAccount->type != json_object)
+	{
+		str_copy(m_aClientChatStatus, "Client chat auth returned incomplete data.", sizeof(m_aClientChatStatus));
+		m_ClientChatStatusError = true;
+		m_ClientChatAuthAction = CLIENT_CHAT_AUTH_NONE;
+		json_value_free(pJson);
+		return;
+	}
+
+	const json_value *pAccountId = json_object_get(pAccount, "id");
+	const json_value *pUsername = json_object_get(pAccount, "username");
+	if(pAccountId == nullptr || pAccountId->type != json_string || pUsername == nullptr || pUsername->type != json_string)
+	{
+		str_copy(m_aClientChatStatus, "Client chat auth returned invalid account data.", sizeof(m_aClientChatStatus));
+		m_ClientChatStatusError = true;
+		m_ClientChatAuthAction = CLIENT_CHAT_AUTH_NONE;
+		json_value_free(pJson);
+		return;
+	}
+
+	str_copy(g_Config.m_ClClientChatAuthToken, json_string_get(pToken), sizeof(g_Config.m_ClClientChatAuthToken));
+	str_copy(m_aClientChatAccountId, json_string_get(pAccountId), sizeof(m_aClientChatAccountId));
+	str_copy(m_aClientChatAccountUsername, json_string_get(pUsername), sizeof(m_aClientChatAccountUsername));
+	str_copy(g_Config.m_ClClientChatAccountName, m_aClientChatAccountUsername, sizeof(g_Config.m_ClClientChatAccountName));
+	m_ClientChatAuthNameInput.Set(m_aClientChatAccountUsername);
+	m_ClientChatAuthPasswordInput.Clear();
+	m_ClientChatTransientAuthFailures = 0;
+	LoadClientChatDirectContacts();
+	RefreshClientChatConversations();
+	m_ClientChatLastPollTime = 0ns;
+	m_ClientChatStatusError = false;
+	if(m_ClientChatAuthAction == CLIENT_CHAT_AUTH_REGISTER)
+		str_format(m_aClientChatStatus, sizeof(m_aClientChatStatus), "Account %s created.", m_aClientChatAccountUsername);
+	else
+		str_format(m_aClientChatStatus, sizeof(m_aClientChatStatus), "Signed in as %s.", m_aClientChatAccountUsername);
+	m_ClientChatAuthAction = CLIENT_CHAT_AUTH_NONE;
+	json_value_free(pJson);
+	StartClientChatFetch();
+}
+
+void CMenus::SendClientChatMessage()
+{
+	if(m_pClientChatSendTask || g_Config.m_ClClientChatUrl[0] == '\0' || g_Config.m_ClClientChatAuthToken[0] == '\0' || m_aClientChatAccountId[0] == '\0')
+		return;
+
+	char aMessage[192];
+	str_copy(aMessage, m_ClientChatInput.GetString(), sizeof(aMessage));
+	char *pTrimmedMessage = str_skip_whitespaces(aMessage);
+	str_utf8_trim_right(pTrimmedMessage);
+	if(pTrimmedMessage[0] == '\0')
+		return;
+
+	const char *pPlayerName = Client()->PlayerName();
+	if(pPlayerName == nullptr || pPlayerName[0] == '\0')
+		pPlayerName = "unnamed";
+	const bool DirectMessage = m_aClientChatDirectTargetName[0] != '\0' || m_aClientChatDirectTargetId[0] != '\0';
+	if(DirectMessage && IsClientChatBlocked(m_aClientChatDirectTargetId, m_aClientChatDirectTargetName))
+	{
+		str_copy(m_aClientChatStatus, "Unblock this user before sending LS.", sizeof(m_aClientChatStatus));
+		m_ClientChatStatusError = true;
+		return;
+	}
+
+	CJsonStringWriter JsonWriter;
+	JsonWriter.BeginObject();
+	JsonWriter.WriteAttribute("action");
+	JsonWriter.WriteStrValue("send");
+	JsonWriter.WriteAttribute("name");
+	JsonWriter.WriteStrValue(pPlayerName);
+	JsonWriter.WriteAttribute("sender_instance_id");
+	JsonWriter.WriteStrValue(m_aClientChatRuntimeIdentity);
+	JsonWriter.WriteAttribute("text");
+	JsonWriter.WriteStrValue(pTrimmedMessage);
+	JsonWriter.WriteAttribute("skin");
+	JsonWriter.WriteStrValue(g_Config.m_ClPlayerSkin);
+	JsonWriter.WriteAttribute("use_custom_color");
+	JsonWriter.WriteBoolValue(g_Config.m_ClPlayerUseCustomColor != 0);
+	JsonWriter.WriteAttribute("color_body");
+	JsonWriter.WriteIntValue(g_Config.m_ClPlayerColorBody);
+	JsonWriter.WriteAttribute("color_feet");
+	JsonWriter.WriteIntValue(g_Config.m_ClPlayerColorFeet);
+	JsonWriter.WriteAttribute("channel");
+	JsonWriter.WriteStrValue(DirectMessage ? "direct" : "room");
+	if(DirectMessage)
+	{
+		JsonWriter.WriteAttribute("target_id");
+		JsonWriter.WriteStrValue(m_aClientChatDirectTargetId);
+		JsonWriter.WriteAttribute("target_name");
+		JsonWriter.WriteStrValue(m_aClientChatDirectTargetName);
+	}
+	JsonWriter.EndObject();
+
+	std::string JsonBody = JsonWriter.GetOutputString();
+	std::shared_ptr<CHttpRequest> pRequest = HttpPostJson(g_Config.m_ClClientChatUrl, JsonBody.c_str());
+	pRequest->Timeout(CLIENT_CHAT_TIMEOUT);
+	pRequest->LogProgress(HTTPLOG::FAILURE);
+	pRequest->FailOnErrorStatus(false);
+	pRequest->MaxResponseSize(256 * 1024);
+	pRequest->HeaderString(CLIENT_CHAT_HEADER_NAME, CLIENT_CHAT_HEADER_VALUE);
+	pRequest->HeaderString(CLIENT_CHAT_AUTH_HEADER_NAME, g_Config.m_ClClientChatAuthToken);
+	Http()->Run(pRequest);
+
+	m_pClientChatSendTask = pRequest;
+	str_copy(m_aClientChatStatus, DirectMessage ? "Sending private message..." : Localize("Sending message..."), sizeof(m_aClientChatStatus));
+	m_ClientChatStatusError = false;
+}
+
+void CMenus::HandleClientChatSendCompletion(const std::shared_ptr<CHttpRequest> &pTask)
+{
+	if(!pTask)
+		return;
+
+	if(pTask->State() != EHttpState::DONE)
+	{
+		str_copy(m_aClientChatStatus, Localize("Couldn't send the message."), sizeof(m_aClientChatStatus));
+		m_ClientChatStatusError = true;
+		return;
+	}
+
+	if(pTask->StatusCode() >= 400)
+	{
+		if(pTask->StatusCode() == 401 || pTask->StatusCode() == 403)
+		{
+			++m_ClientChatTransientAuthFailures;
+			if(m_ClientChatTransientAuthFailures < 3 && g_Config.m_ClClientChatAuthToken[0] != '\0')
+			{
+				m_aClientChatAccountId[0] = '\0';
+				str_format(m_aClientChatStatus, sizeof(m_aClientChatStatus), "Reconnecting chat session (%d/3)...", m_ClientChatTransientAuthFailures);
+				m_ClientChatStatusError = false;
+				m_ClientChatLastPollTime = 0ns;
+			}
+			else
+			{
+				ClearClientChatAuthState(true);
+				str_copy(m_aClientChatStatus, "Session expired. Log in again.", sizeof(m_aClientChatStatus));
+				m_ClientChatStatusError = true;
+			}
+			return;
+		}
+		str_format(m_aClientChatStatus, sizeof(m_aClientChatStatus), Localize("Message rejected with %d."), pTask->StatusCode());
+		m_ClientChatStatusError = true;
+		return;
+	}
+
+	m_ClientChatInput.Clear();
+	m_aClientChatStatus[0] = '\0';
+	m_ClientChatStatusError = false;
+	m_ClientChatTransientAuthFailures = 0;
+	m_ClientChatLastPollTime = 0ns;
+	StartClientChatFetch();
+}
+
+void CMenus::StartClientChatActionRequest(const std::string &JsonBody, const char *pPendingStatus)
+{
+	if(m_pClientChatActionTask || g_Config.m_ClClientChatUrl[0] == '\0' || g_Config.m_ClClientChatAuthToken[0] == '\0' || m_aClientChatAccountId[0] == '\0')
+		return;
+
+	std::shared_ptr<CHttpRequest> pRequest = HttpPostJson(g_Config.m_ClClientChatUrl, JsonBody.c_str());
+	pRequest->Timeout(CLIENT_CHAT_TIMEOUT);
+	pRequest->LogProgress(HTTPLOG::FAILURE);
+	pRequest->FailOnErrorStatus(false);
+	pRequest->MaxResponseSize(256 * 1024);
+	pRequest->HeaderString(CLIENT_CHAT_HEADER_NAME, CLIENT_CHAT_HEADER_VALUE);
+	pRequest->HeaderString(CLIENT_CHAT_AUTH_HEADER_NAME, g_Config.m_ClClientChatAuthToken);
+	Http()->Run(pRequest);
+	m_pClientChatActionTask = pRequest;
+	if(pPendingStatus != nullptr)
+		str_copy(m_aClientChatStatus, pPendingStatus, sizeof(m_aClientChatStatus));
+	m_ClientChatStatusError = false;
+}
+
+void CMenus::HandleClientChatActionCompletion(const std::shared_ptr<CHttpRequest> &pTask)
+{
+	if(!pTask)
+		return;
+
+	if(pTask->State() != EHttpState::DONE)
+	{
+		str_copy(m_aClientChatStatus, "Chat action failed: network error.", sizeof(m_aClientChatStatus));
+		m_ClientChatStatusError = true;
+		return;
+	}
+
+	if(pTask->StatusCode() >= 400)
+	{
+		str_format(m_aClientChatStatus, sizeof(m_aClientChatStatus), "Chat action rejected with %d.", pTask->StatusCode());
+		m_ClientChatStatusError = true;
+		return;
+	}
+
+	json_value *pJson = pTask->ResultJson();
+	if(pJson == nullptr || pJson->type != json_object)
+	{
+		str_copy(m_aClientChatStatus, "Chat action returned invalid data.", sizeof(m_aClientChatStatus));
+		m_ClientChatStatusError = true;
+		if(pJson != nullptr)
+			json_value_free(pJson);
+		return;
+	}
+
+	if(const json_value *pOk = json_object_get(pJson, "ok"); pOk != nullptr && pOk->type == json_boolean && !json_boolean_get(pOk))
+	{
+		const json_value *pError = json_object_get(pJson, "error");
+		if(pError != nullptr && pError->type == json_string)
+			str_format(m_aClientChatStatus, sizeof(m_aClientChatStatus), "Action failed: %s", json_string_get(pError));
+		else
+			str_copy(m_aClientChatStatus, "Chat action failed.", sizeof(m_aClientChatStatus));
+		m_ClientChatStatusError = true;
+		json_value_free(pJson);
+		return;
+	}
+
+	m_aClientChatStatus[0] = '\0';
+	m_ClientChatStatusError = false;
+	m_ClientChatLastPollTime = 0ns;
+	json_value_free(pJson);
+	StartClientChatFetch();
+}
+
+bool CMenus::IsClientChatBlocked(const char *pUserId, const char *pName) const
+{
+	for(const CClientChatBlockedUser &Blocked : m_vClientChatBlockedUsers)
+	{
+		if(pUserId != nullptr && pUserId[0] != '\0' && Blocked.m_aUserId[0] != '\0' && ClientChatIdsEqual(Blocked.m_aUserId, pUserId))
+			return true;
+		if((pUserId == nullptr || pUserId[0] == '\0' || Blocked.m_aUserId[0] == '\0') && pName != nullptr && pName[0] != '\0' && ClientChatNamesEqual(Blocked.m_aName, pName))
+			return true;
+	}
+	return false;
+}
+
+void CMenus::ToggleClientChatBlock(const char *pUserId, const char *pName, bool Block)
+{
+	if((pUserId == nullptr || pUserId[0] == '\0') && (pName == nullptr || pName[0] == '\0'))
+		return;
+
+	CJsonStringWriter JsonWriter;
+	JsonWriter.BeginObject();
+	JsonWriter.WriteAttribute("action");
+	JsonWriter.WriteStrValue(Block ? "block_user" : "unblock_user");
+	if(pUserId != nullptr && pUserId[0] != '\0')
+	{
+		JsonWriter.WriteAttribute("target_id");
+		JsonWriter.WriteStrValue(pUserId);
+	}
+	if(pName != nullptr && pName[0] != '\0')
+	{
+		JsonWriter.WriteAttribute("target_name");
+		JsonWriter.WriteStrValue(pName);
+	}
+	JsonWriter.EndObject();
+	StartClientChatActionRequest(JsonWriter.GetOutputString(), Block ? "Blocking user..." : "Removing block...");
+}
+
+void CMenus::SendClientChatFriendRequest(const char *pUserId, const char *pName)
+{
+	if((pUserId == nullptr || pUserId[0] == '\0') && (pName == nullptr || pName[0] == '\0'))
+		return;
+
+	CJsonStringWriter JsonWriter;
+	JsonWriter.BeginObject();
+	JsonWriter.WriteAttribute("action");
+	JsonWriter.WriteStrValue("friend_request");
+	if(pUserId != nullptr && pUserId[0] != '\0')
+	{
+		JsonWriter.WriteAttribute("target_id");
+		JsonWriter.WriteStrValue(pUserId);
+	}
+	if(pName != nullptr && pName[0] != '\0')
+	{
+		JsonWriter.WriteAttribute("target_name");
+		JsonWriter.WriteStrValue(pName);
+	}
+	JsonWriter.EndObject();
+	StartClientChatActionRequest(JsonWriter.GetOutputString(), "Sending friend request...");
+}
+
+void CMenus::SetClientChatPresenceStatus(const char *pStatus)
+{
+	if(pStatus == nullptr || pStatus[0] == '\0')
+		return;
+
+	CJsonStringWriter JsonWriter;
+	JsonWriter.BeginObject();
+	JsonWriter.WriteAttribute("action");
+	JsonWriter.WriteStrValue("set_status");
+	JsonWriter.WriteAttribute("status");
+	JsonWriter.WriteStrValue(pStatus);
+	JsonWriter.EndObject();
+	StartClientChatActionRequest(JsonWriter.GetOutputString(), "Updating status...");
+}
+
+void CMenus::UpdateClientChat()
+{
+	if(m_ClientChatToast.m_Active && time_get_nanoseconds() >= m_ClientChatToast.m_ExpiresAt)
+		m_ClientChatToast.m_Active = false;
+
+	if(!m_ClientChatToast.m_Active && !m_vClientChatToastQueue.empty())
+	{
+		m_ClientChatToast = m_vClientChatToastQueue.front();
+		m_vClientChatToastQueue.erase(m_vClientChatToastQueue.begin());
+		m_ClientChatToast.m_Active = true;
+		m_ClientChatToast.m_ExpiresAt = time_get_nanoseconds() + CLIENT_CHAT_TOAST_DURATION;
+	}
+
+	if(m_pClientChatAuthTask && m_pClientChatAuthTask->Done())
+	{
+		std::shared_ptr<CHttpRequest> pCompletedTask = m_pClientChatAuthTask;
+		m_pClientChatAuthTask.reset();
+		HandleClientChatAuthCompletion(pCompletedTask);
+	}
+
+	if(m_pClientChatSendTask && m_pClientChatSendTask->Done())
+	{
+		std::shared_ptr<CHttpRequest> pCompletedTask = m_pClientChatSendTask;
+		m_pClientChatSendTask.reset();
+		HandleClientChatSendCompletion(pCompletedTask);
+	}
+
+	if(m_pClientChatFetchTask && m_pClientChatFetchTask->Done())
+	{
+		std::shared_ptr<CHttpRequest> pCompletedTask = m_pClientChatFetchTask;
+		m_pClientChatFetchTask.reset();
+		HandleClientChatFetchCompletion(pCompletedTask);
+	}
+
+	if(m_pClientChatActionTask && m_pClientChatActionTask->Done())
+	{
+		std::shared_ptr<CHttpRequest> pCompletedTask = m_pClientChatActionTask;
+		m_pClientChatActionTask.reset();
+		HandleClientChatActionCompletion(pCompletedTask);
+	}
+
+	if(g_Config.m_ClClientChatUrl[0] == '\0')
+		return;
+	if(Client()->State() != IClient::STATE_OFFLINE && Client()->State() != IClient::STATE_ONLINE)
+		return;
+
+	const std::chrono::nanoseconds Now = time_get_nanoseconds();
+	const std::chrono::nanoseconds PollInterval = IsClientChatPageActive() ? CLIENT_CHAT_ACTIVE_POLL_INTERVAL : CLIENT_CHAT_BACKGROUND_POLL_INTERVAL;
+	if(g_Config.m_ClClientChatAuthToken[0] != '\0' && !m_pClientChatAuthTask && !m_pClientChatFetchTask &&
+		(m_aClientChatAccountId[0] == '\0' || m_ClientChatLastPollTime == 0ns || Now - m_ClientChatLastPollTime >= PollInterval))
+		StartClientChatFetch();
+	if(g_Config.m_ClClientChatAuthToken[0] == '\0' || m_aClientChatAccountId[0] == '\0')
+		return;
+
+	if(!m_pClientChatActionTask && !m_pClientChatAuthTask && !m_pClientChatSendTask)
+	{
+		char aCurrentServer[96] = "";
+		if(Client()->State() == IClient::STATE_ONLINE)
+			net_addr_str(&Client()->ServerAddress(), aCurrentServer, sizeof(aCurrentServer), true);
+		if((m_ClientChatPresenceLastSync == 0ns || Now - m_ClientChatPresenceLastSync >= 8s || str_comp(aCurrentServer, m_aClientChatPresenceServer) != 0))
+		{
+			CJsonStringWriter JsonWriter;
+			JsonWriter.BeginObject();
+			JsonWriter.WriteAttribute("action");
+			JsonWriter.WriteStrValue("set_presence_server");
+			JsonWriter.WriteAttribute("server");
+			JsonWriter.WriteStrValue(aCurrentServer);
+			JsonWriter.EndObject();
+			StartClientChatActionRequest(JsonWriter.GetOutputString(), nullptr);
+			str_copy(m_aClientChatPresenceServer, aCurrentServer, sizeof(m_aClientChatPresenceServer));
+			m_ClientChatPresenceLastSync = Now;
+		}
+	}
+
+	if(IsClientChatPageActive() && (m_aClientChatDirectTargetName[0] != '\0' || m_aClientChatDirectTargetId[0] != '\0'))
+	{
+		for(CClientChatConversation &Conversation : m_vClientChatConversations)
+		{
+			if((m_aClientChatDirectTargetId[0] != '\0' && ClientChatIdsEqual(Conversation.m_aUserId, m_aClientChatDirectTargetId)) ||
+				(m_aClientChatDirectTargetId[0] == '\0' && ClientChatNamesEqual(Conversation.m_aName, m_aClientChatDirectTargetName)))
+			{
+				Conversation.m_UnreadCount = 0;
+				break;
+			}
+		}
+	}
+}
+
+void CMenus::RenderClientChatToast()
+{
+	if(!m_ClientChatToast.m_Active || IsClientChatPageActive())
+		return;
+
+	if(time_get_nanoseconds() >= m_ClientChatToast.m_ExpiresAt)
+	{
+		m_ClientChatToast.m_Active = false;
+		return;
+	}
+
+	const float ScreenHeight = 300.0f;
+	const float ScreenWidth = ScreenHeight * Graphics()->ScreenAspect();
+	Graphics()->MapScreen(0.0f, 0.0f, ScreenWidth, ScreenHeight);
+
+	char aPreview[96];
+	char aToastName[48];
+	ClientChatFormatToastLine(aPreview, sizeof(aPreview), m_ClientChatToast.m_aText, 34);
+	ClientChatFormatToastLine(aToastName, sizeof(aToastName), m_ClientChatToast.m_aName, 18);
+
+	CUIRect Toast;
+	Toast.w = 118.0f;
+	Toast.h = 34.0f;
+	Toast.x = ScreenWidth - Toast.w - 10.0f;
+	Toast.y = ScreenHeight - Toast.h - 18.0f;
+	Toast.Draw(ColorRGBA(0.02f, 0.03f, 0.06f, 0.94f), IGraphics::CORNER_ALL, 8.0f);
+
+	CUIRect Accent;
+	Toast.VSplitLeft(3.0f, &Accent, &Toast);
+	Accent.Draw(ClientChatAccentColor(m_ClientChatToast.m_UseCustomColor, m_ClientChatToast.m_ColorBody, 0.9f), IGraphics::CORNER_L, 8.0f);
+	Toast.Margin(6.0f, &Toast);
+
+	CUIRect Avatar, Content;
+	Toast.VSplitLeft(18.0f, &Avatar, &Content);
+	Content.VSplitLeft(6.0f, nullptr, &Content);
+
+	CTeeRenderInfo TeeInfo = GetTeeRenderInfo(vec2(16.0f, 16.0f), m_ClientChatToast.m_aSkin, m_ClientChatToast.m_UseCustomColor, m_ClientChatToast.m_ColorBody, m_ClientChatToast.m_ColorFeet);
+	RenderTools()->RenderTee(CAnimState::GetIdle(), &TeeInfo, EMOTE_NORMAL, vec2(1.0f, 0.0f), vec2(Avatar.x + Avatar.w / 2.0f, Avatar.y + Avatar.h / 2.0f));
+
+	CUIRect TopRow, TextRow, Badge, NameRow;
+	Content.HSplitTop(11.0f, &TopRow, &Content);
+	Content.HSplitTop(3.0f, nullptr, &Content);
+	TextRow = Content;
+
+	TopRow.VSplitLeft(20.0f, &Badge, &NameRow);
+	NameRow.VSplitLeft(4.0f, nullptr, &NameRow);
+	Badge.Draw(m_ClientChatToast.m_Direct ? ColorRGBA(ms_GuiColor.r, ms_GuiColor.g, ms_GuiColor.b, 0.30f) : ColorRGBA(0.93f, 0.70f, 0.16f, 0.30f), IGraphics::CORNER_ALL, 4.0f);
+	TextRender()->TextColor(ColorRGBA(1.0f, 1.0f, 1.0f, 0.72f));
+	Ui()->DoLabel(&Badge, m_ClientChatToast.m_aTitle, 6.3f, TEXTALIGN_MC);
+
+	TextRender()->TextColor(ColorRGBA(1.0f, 1.0f, 1.0f, 0.95f));
+	Ui()->DoLabel(&NameRow, aToastName, 7.2f, TEXTALIGN_ML, {.m_MaxWidth = NameRow.w});
+	TextRender()->TextColor(ColorRGBA(0.84f, 0.90f, 1.0f, 0.74f));
+	Ui()->DoLabel(&TextRow, aPreview, 6.6f, TEXTALIGN_ML, {.m_MaxWidth = TextRow.w});
+	TextRender()->TextColor(TextRender()->DefaultTextColor());
+}
+
+void CMenus::RenderClientChat(CUIRect MainView)
+{
+	if(Client()->State() == IClient::STATE_OFFLINE)
+		GameClient()->m_MenuBackground.ChangePosition(CMenuBackground::POS_SETTINGS_RESERVED0);
+
+	const bool DirectView = m_aClientChatDirectTargetName[0] != '\0' || m_aClientChatDirectTargetId[0] != '\0';
+	const bool Authenticated = m_aClientChatAccountId[0] != '\0';
+	const bool HasSavedSession = g_Config.m_ClClientChatAuthToken[0] != '\0';
+	enum
+	{
+		CLIENT_CHAT_VIEW_MESSAGES = 0,
+		CLIENT_CHAT_VIEW_FRIENDS = 1,
+		CLIENT_CHAT_VIEW_SETTINGS = 2,
+	};
+	static int s_ClientChatView = CLIENT_CHAT_VIEW_MESSAGES;
+	if(DirectView)
+		s_ClientChatView = CLIENT_CHAT_VIEW_MESSAGES;
+	const char *pLocalNameRaw = Client()->PlayerName();
+	const char *pLocalName = pLocalNameRaw != nullptr ? pLocalNameRaw : "";
+	const char *pLocalId = m_aClientChatAccountId[0] != '\0' ? m_aClientChatAccountId : (m_aClientChatRuntimeIdentity[0] != '\0' ? m_aClientChatRuntimeIdentity : g_Config.m_ClClientChatIdentity);
+	const CClientChatDirectContact *pSelectedContact = DirectView ? FindClientChatDirectContact(m_aClientChatDirectTargetId, m_aClientChatDirectTargetName) : nullptr;
+	const bool DirectBlocked = DirectView && IsClientChatBlocked(m_aClientChatDirectTargetId, m_aClientChatDirectTargetName);
+	bool DirectFriend = false;
+	const CClientChatFriend *pDirectFriendInfo = nullptr;
+	if(DirectView)
+	{
+		for(const CClientChatFriend &Friend : m_vClientChatFriends)
+		{
+			if((m_aClientChatDirectTargetId[0] != '\0' && Friend.m_aUserId[0] != '\0' && ClientChatIdsEqual(Friend.m_aUserId, m_aClientChatDirectTargetId)) ||
+				(m_aClientChatDirectTargetId[0] == '\0' && ClientChatNamesEqual(Friend.m_aName, m_aClientChatDirectTargetName)))
+			{
+				DirectFriend = true;
+				pDirectFriendInfo = &Friend;
+				break;
+			}
+		}
+	}
+	auto FindFriendByConversation = [&](const char *pUserId, const char *pName) -> const CClientChatFriend * {
+		for(const CClientChatFriend &Friend : m_vClientChatFriends)
+		{
+			if((pUserId != nullptr && pUserId[0] != '\0' && Friend.m_aUserId[0] != '\0' && ClientChatIdsEqual(Friend.m_aUserId, pUserId)) ||
+				((pUserId == nullptr || pUserId[0] == '\0') && pName != nullptr && pName[0] != '\0' && ClientChatNamesEqual(Friend.m_aName, pName)))
+				return &Friend;
+		}
+		return nullptr;
+	};
+	auto IsLocalMessage = [&](const CClientChatMessage &Message) {
+		return ClientChatIsLocalMessage(Message.m_aSenderId, Message.m_aSenderInstanceId, Message.m_aName, pLocalId, pLocalName, m_aClientChatRuntimeIdentity, m_aClientChatAccountId[0] != '\0');
+	};
+	auto MessageMatchesDirectTarget = [&](const CClientChatMessage &Message) {
+		if(!Message.m_Direct || !DirectView)
+			return false;
+		if(pSelectedContact != nullptr && (!pSelectedContact->m_Visible || Message.m_Id <= pSelectedContact->m_HiddenBeforeId))
+			return false;
+		if(IsLocalMessage(Message))
+		{
+			if(m_aClientChatDirectTargetId[0] != '\0' && Message.m_aTargetId[0] != '\0')
+				return ClientChatIdsEqual(Message.m_aTargetId, m_aClientChatDirectTargetId);
+			return ClientChatNamesEqual(Message.m_aTargetName, m_aClientChatDirectTargetName);
+		}
+		if(m_aClientChatDirectTargetId[0] != '\0' && Message.m_aSenderId[0] != '\0')
+			return ClientChatIdsEqual(Message.m_aSenderId, m_aClientChatDirectTargetId);
+		return ClientChatNamesEqual(Message.m_aName, m_aClientChatDirectTargetName);
+	};
+
+	MainView.Draw(ColorRGBA(0.018f, 0.022f, 0.038f, 0.94f), IGraphics::CORNER_B, 14.0f);
+	CUIRect AccentBar;
+	MainView.HSplitTop(3.0f, &AccentBar, &MainView);
+	AccentBar.Draw(ColorRGBA(ms_GuiColor.r, ms_GuiColor.g, ms_GuiColor.b, 0.62f), IGraphics::CORNER_T, 14.0f);
+	MainView.Margin(12.0f, &MainView);
+
+	if(!Authenticated)
+	{
+		CUIRect AuthCard;
+		AuthCard.w = minimum(MainView.w, 360.0f);
+		AuthCard.h = 210.0f;
+		AuthCard.x = MainView.x + (MainView.w - AuthCard.w) / 2.0f;
+		AuthCard.y = MainView.y + (MainView.h - AuthCard.h) / 2.0f;
+		AuthCard.Draw(ColorRGBA(0.036f, 0.046f, 0.078f, 0.94f), IGraphics::CORNER_ALL, 14.0f);
+		AuthCard.Margin(14.0f, &AuthCard);
+
+		CUIRect TitleRow, SubRow, StatusRow, LabelRow, InputRow, ButtonsRow, FooterRow;
+		AuthCard.HSplitTop(22.0f, &TitleRow, &AuthCard);
+		AuthCard.HSplitTop(6.0f, nullptr, &AuthCard);
+		AuthCard.HSplitTop(28.0f, &SubRow, &AuthCard);
+		AuthCard.HSplitTop(8.0f, nullptr, &AuthCard);
+		StatusRow = AuthCard;
+		if(m_aClientChatStatus[0] != '\0')
+		{
+			AuthCard.HSplitTop(24.0f, &StatusRow, &AuthCard);
+			AuthCard.HSplitTop(8.0f, nullptr, &AuthCard);
+		}
+		CUIRect UserLabel, UserInput, PassLabel, PassInput;
+		AuthCard.HSplitTop(12.0f, &UserLabel, &AuthCard);
+		AuthCard.HSplitTop(24.0f, &UserInput, &AuthCard);
+		AuthCard.HSplitTop(8.0f, nullptr, &AuthCard);
+		AuthCard.HSplitTop(12.0f, &PassLabel, &AuthCard);
+		AuthCard.HSplitTop(24.0f, &PassInput, &AuthCard);
+		AuthCard.HSplitTop(12.0f, nullptr, &AuthCard);
+		AuthCard.HSplitTop(28.0f, &ButtonsRow, &AuthCard);
+		FooterRow = AuthCard;
+
+		Ui()->DoLabel(&TitleRow, "Client chat account", 17.0f, TEXTALIGN_ML, {.m_MaxWidth = TitleRow.w});
+		TextRender()->TextColor(ColorRGBA(0.82f, 0.87f, 1.0f, 0.58f));
+		Ui()->DoLabel(&SubRow, "Register once, then log in. Private messages are now tied to your account.", 10.0f, TEXTALIGN_TL, {.m_MaxWidth = SubRow.w});
+		TextRender()->TextColor(TextRender()->DefaultTextColor());
+
+		if(m_aClientChatStatus[0] != '\0')
+		{
+			StatusRow.Draw(m_ClientChatStatusError ? ColorRGBA(0.30f, 0.09f, 0.10f, 0.92f) : ColorRGBA(0.08f, 0.16f, 0.26f, 0.90f), IGraphics::CORNER_ALL, 8.0f);
+			StatusRow.Margin(8.0f, &StatusRow);
+			TextRender()->TextColor(m_ClientChatStatusError ? ColorRGBA(1.0f, 0.78f, 0.78f, 1.0f) : ColorRGBA(0.84f, 0.92f, 1.0f, 1.0f));
+			Ui()->DoLabel(&StatusRow, m_aClientChatStatus, 9.6f, TEXTALIGN_ML, {.m_MaxWidth = StatusRow.w});
+			TextRender()->TextColor(TextRender()->DefaultTextColor());
+		}
+
+		TextRender()->TextColor(ColorRGBA(0.82f, 0.87f, 1.0f, 0.70f));
+		Ui()->DoLabel(&UserLabel, "Username", 9.5f, TEXTALIGN_ML);
+		Ui()->DoLabel(&PassLabel, "Password", 9.5f, TEXTALIGN_ML);
+		TextRender()->TextColor(TextRender()->DefaultTextColor());
+		UserInput.Draw(ColorRGBA(0.02f, 0.03f, 0.05f, 0.70f), IGraphics::CORNER_ALL, 7.0f);
+		PassInput.Draw(ColorRGBA(0.02f, 0.03f, 0.05f, 0.70f), IGraphics::CORNER_ALL, 7.0f);
+		UserInput.Margin(6.0f, &UserInput);
+		PassInput.Margin(6.0f, &PassInput);
+		Ui()->DoEditBox(&m_ClientChatAuthNameInput, &UserInput, 10.5f);
+		Ui()->DoEditBox(&m_ClientChatAuthPasswordInput, &PassInput, 10.5f);
+
+		const bool AllowAuthButtons = !m_pClientChatAuthTask && !m_pClientChatFetchTask;
+		CUIRect LoginButton, RegisterButton, ResetButton;
+		ButtonsRow.VSplitMid(&LoginButton, &RegisterButton, 6.0f);
+		static CButtonContainer s_LoginButton;
+		static CButtonContainer s_RegisterButton;
+		if((DoButton_Menu(&s_LoginButton, AllowAuthButtons ? "Log in" : "Please wait", 0, &LoginButton, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, 8.0f, 0.0f, ColorRGBA(ms_GuiColor.r, ms_GuiColor.g, ms_GuiColor.b, 0.34f)) && AllowAuthButtons) ||
+			(AllowAuthButtons && m_ClientChatAuthPasswordInput.IsActive() && Ui()->ConsumeHotkey(CUi::HOTKEY_ENTER)))
+			StartClientChatAuthRequest(CLIENT_CHAT_AUTH_LOGIN);
+		if(DoButton_Menu(&s_RegisterButton, "Register", 0, &RegisterButton, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, 8.0f, 0.0f, ColorRGBA(0.16f, 0.19f, 0.25f, 0.92f)) && AllowAuthButtons)
+			StartClientChatAuthRequest(CLIENT_CHAT_AUTH_REGISTER);
+
+		if(HasSavedSession)
+		{
+			FooterRow.HSplitTop(8.0f, nullptr, &FooterRow);
+			FooterRow.HSplitTop(24.0f, &ResetButton, &FooterRow);
+			static CButtonContainer s_ResetSessionButton;
+			if(DoButton_Menu(&s_ResetSessionButton, "Use another account", 0, &ResetButton, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, 8.0f, 0.0f, ColorRGBA(0.13f, 0.14f, 0.18f, 0.90f)) && !m_pClientChatAuthTask)
+			{
+				ClearClientChatAuthState(true);
+				str_copy(m_aClientChatStatus, "Saved session cleared.", sizeof(m_aClientChatStatus));
+				m_ClientChatStatusError = false;
+			}
+		}
+
+		return;
+	}
+
+	CUIRect Header, Content, Composer;
+	MainView.HSplitTop(52.0f, &Header, &MainView);
+	MainView.HSplitTop(8.0f, nullptr, &MainView);
+	MainView.HSplitBottom(62.0f, &Content, &Composer);
+
+	Header.Draw(ColorRGBA(0.042f, 0.052f, 0.085f, 0.92f), IGraphics::CORNER_ALL, 12.0f);
+	Header.Margin(10.0f, &Header);
+	CUIRect HeaderLeft, HeaderRight;
+	Header.VSplitRight(DirectView ? 380.0f : 288.0f, &HeaderLeft, &HeaderRight);
+	CUIRect TitleRow, SubtitleRow;
+	HeaderLeft.HSplitTop(19.0f, &TitleRow, &HeaderLeft);
+	HeaderLeft.HSplitTop(4.0f, nullptr, &HeaderLeft);
+	SubtitleRow = HeaderLeft;
+	char aPanelTitle[128];
+	if(DirectView)
+		str_format(aPanelTitle, sizeof(aPanelTitle), "%s %s", FontIcon::COMMENT, m_aClientChatDirectTargetName);
+	else
+		str_format(aPanelTitle, sizeof(aPanelTitle), "%s %s", FontIcon::COMMENT, Localize("Client chat"));
+	Ui()->DoLabel(&TitleRow, aPanelTitle, 16.0f, TEXTALIGN_ML, {.m_MaxWidth = TitleRow.w});
+	char aSubtitle[160];
+	if(DirectView)
+		str_format(aSubtitle, sizeof(aSubtitle), "Private line with %s. Signed in as %s.", m_aClientChatDirectTargetName, m_aClientChatAccountUsername);
+	else
+		str_format(aSubtitle, sizeof(aSubtitle), "Signed in as %s. Public room for this client.", m_aClientChatAccountUsername);
+	TextRender()->TextColor(ColorRGBA(0.82f, 0.87f, 1.0f, 0.56f));
+	Ui()->DoLabel(&SubtitleRow, aSubtitle, 9.8f, TEXTALIGN_ML, {.m_MaxWidth = SubtitleRow.w});
+	TextRender()->TextColor(TextRender()->DefaultTextColor());
+
+	CUIRect RefreshButton, Badge, BackButton, DeleteButton, LogoutButton, StatusButton, FriendButton, BlockButton, JoinButton;
+	DeleteButton = HeaderRight;
+	DeleteButton.w = 0.0f;
+	BackButton = HeaderRight;
+	BackButton.w = 0.0f;
+	LogoutButton = HeaderRight;
+	LogoutButton.w = 0.0f;
+	FriendButton = HeaderRight;
+	FriendButton.w = 0.0f;
+	BlockButton = HeaderRight;
+	BlockButton.w = 0.0f;
+	StatusButton = HeaderRight;
+	StatusButton.w = 0.0f;
+	JoinButton = HeaderRight;
+	JoinButton.w = 0.0f;
+	HeaderRight.VSplitRight(88.0f, &HeaderRight, &RefreshButton);
+	HeaderRight.VSplitRight(8.0f, &HeaderRight, nullptr);
+	HeaderRight.VSplitRight(92.0f, &HeaderRight, &StatusButton);
+	HeaderRight.VSplitRight(8.0f, &HeaderRight, nullptr);
+	HeaderRight.VSplitRight(88.0f, &HeaderRight, &LogoutButton);
+	HeaderRight.VSplitRight(8.0f, &HeaderRight, nullptr);
+	if(DirectView)
+	{
+		HeaderRight.VSplitRight(86.0f, &HeaderRight, &JoinButton);
+		HeaderRight.VSplitRight(8.0f, &HeaderRight, nullptr);
+		HeaderRight.VSplitRight(92.0f, &HeaderRight, &BlockButton);
+		HeaderRight.VSplitRight(8.0f, &HeaderRight, nullptr);
+		HeaderRight.VSplitRight(92.0f, &HeaderRight, &FriendButton);
+		HeaderRight.VSplitRight(8.0f, &HeaderRight, nullptr);
+		HeaderRight.VSplitRight(88.0f, &HeaderRight, &DeleteButton);
+		HeaderRight.VSplitRight(8.0f, &HeaderRight, nullptr);
+		HeaderRight.VSplitRight(72.0f, &HeaderRight, &BackButton);
+		HeaderRight.VSplitRight(8.0f, &HeaderRight, nullptr);
+	}
+	Badge = HeaderRight;
+	Badge.HMargin(12.0f, &Badge);
+	Badge.Draw(DirectView ? ColorRGBA(ms_GuiColor.r, ms_GuiColor.g, ms_GuiColor.b, 0.18f) : ColorRGBA(0.82f, 0.87f, 1.0f, 0.11f), IGraphics::CORNER_ALL, 6.0f);
+	Ui()->DoLabel(&Badge, DirectView ? "LS" : "room", 9.2f, TEXTALIGN_MC);
+	if(DirectView)
+	{
+		static CButtonContainer s_BackToRoomButton;
+		if(DoButton_Menu(&s_BackToRoomButton, "Room", 0, &BackButton, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, 7.0f, 0.0f, ColorRGBA(0.12f, 0.16f, 0.22f, 0.96f)))
+			ActivateClientChatRoom();
+
+		static CButtonContainer s_DeleteDirectButton;
+		if(DoButton_Menu(&s_DeleteDirectButton, "Delete LS", 0, &DeleteButton, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, 7.0f, 0.0f, ColorRGBA(0.25f, 0.10f, 0.11f, 0.92f)))
+			DeleteClientChatDirectContact(m_aClientChatDirectTargetId, m_aClientChatDirectTargetName);
+
+		static CButtonContainer s_JoinFriendButton;
+		const bool CanJoinFriendServer = pDirectFriendInfo != nullptr && pDirectFriendInfo->m_CanJoin && pDirectFriendInfo->m_aCurrentServer[0] != '\0';
+		if(DoButton_Menu(&s_JoinFriendButton, CanJoinFriendServer ? "Join" : "-", 0, &JoinButton, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, 7.0f, 0.0f, CanJoinFriendServer ? ColorRGBA(0.11f, 0.20f, 0.14f, 0.94f) : ColorRGBA(0.09f, 0.11f, 0.14f, 0.90f)))
+		{
+			if(CanJoinFriendServer)
+			{
+				char aCmd[160];
+				str_format(aCmd, sizeof(aCmd), "connect %s", pDirectFriendInfo->m_aCurrentServer);
+				Console()->ExecuteLine(aCmd, IConsole::CLIENT_ID_GAME);
+				SetActive(false);
+			}
+		}
+
+		static CButtonContainer s_FriendRequestButton;
+		if(DoButton_Menu(&s_FriendRequestButton, DirectFriend ? "Friend" : "Add friend", 0, &FriendButton, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, 7.0f, 0.0f, ColorRGBA(0.14f, 0.20f, 0.30f, 0.94f)) && !DirectFriend)
+			SendClientChatFriendRequest(m_aClientChatDirectTargetId, m_aClientChatDirectTargetName);
+
+		static CButtonContainer s_BlockUserButton;
+		if(DoButton_Menu(&s_BlockUserButton, DirectBlocked ? "Unblock" : "Block", 0, &BlockButton, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, 7.0f, 0.0f, DirectBlocked ? ColorRGBA(0.14f, 0.20f, 0.30f, 0.94f) : ColorRGBA(0.27f, 0.10f, 0.11f, 0.94f)))
+			ToggleClientChatBlock(m_aClientChatDirectTargetId, m_aClientChatDirectTargetName, !DirectBlocked);
+	}
+
+	char aStatusLabel[32];
+	const bool StatusOnline = str_comp_nocase(m_aClientChatPresenceStatus, "online") == 0;
+	const bool StatusIdle = str_comp_nocase(m_aClientChatPresenceStatus, "idle") == 0;
+	const bool StatusDnd = str_comp_nocase(m_aClientChatPresenceStatus, "dnd") == 0;
+	if(StatusOnline)
+		str_copy(aStatusLabel, "Online", sizeof(aStatusLabel));
+	else if(StatusIdle)
+		str_copy(aStatusLabel, "Idle", sizeof(aStatusLabel));
+	else if(StatusDnd)
+		str_copy(aStatusLabel, "DND", sizeof(aStatusLabel));
+	else
+		str_copy(aStatusLabel, "Invisible", sizeof(aStatusLabel));
+	static CButtonContainer s_StatusButton;
+	if(DoButton_Menu(&s_StatusButton, aStatusLabel, 0, &StatusButton, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, 7.0f, 0.0f, ColorRGBA(0.12f, 0.16f, 0.23f, 0.96f)))
+	{
+		if(StatusOnline)
+			SetClientChatPresenceStatus("idle");
+		else if(StatusIdle)
+			SetClientChatPresenceStatus("dnd");
+		else if(StatusDnd)
+			SetClientChatPresenceStatus("invisible");
+		else
+			SetClientChatPresenceStatus("online");
+	}
+	static CButtonContainer s_LogoutButton;
+	if(DoButton_Menu(&s_LogoutButton, m_pClientChatAuthTask ? "..." : "Logout", 0, &LogoutButton, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, 7.0f, 0.0f, ColorRGBA(0.14f, 0.14f, 0.18f, 0.94f)) &&
+		!m_pClientChatAuthTask && !m_pClientChatSendTask && !m_pClientChatFetchTask && !m_pClientChatActionTask)
+		StartClientChatAuthRequest(CLIENT_CHAT_AUTH_LOGOUT);
+	static CButtonContainer s_RefreshButton;
+	const char *pRefreshLabel = m_pClientChatFetchTask ? Localize("Refreshing") : Localize("Refresh");
+	if(DoButton_Menu(&s_RefreshButton, pRefreshLabel, 0, &RefreshButton, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, 7.0f, 0.0f, ColorRGBA(ms_GuiColor.r, ms_GuiColor.g, ms_GuiColor.b, 0.28f)) && !m_pClientChatFetchTask)
+	{
+		m_ClientChatLastPollTime = 0ns;
+		StartClientChatFetch();
+	}
+
+	CUIRect Layout = Content;
+	CUIRect IconRail, Sidebar, Conversation;
+	Layout.VSplitLeft(52.0f, &IconRail, &Layout);
+	Layout.VSplitLeft(8.0f, nullptr, &Layout);
+	Layout.VSplitLeft(248.0f, &Sidebar, &Layout);
+	Layout.VSplitLeft(10.0f, nullptr, &Layout);
+	Conversation = Layout;
+
+	IconRail.Draw(ColorRGBA(0.022f, 0.028f, 0.050f, 0.95f), IGraphics::CORNER_ALL, 12.0f);
+	IconRail.Margin(6.0f, &IconRail);
+	static CButtonContainer s_ViewMessagesIcon;
+	static CButtonContainer s_ViewFriendsIcon;
+	static CButtonContainer s_ViewSettingsIcon;
+	static CButtonContainer s_ViewRoomIcon;
+	CUIRect RailButton;
+	IconRail.HSplitTop(36.0f, &RailButton, &IconRail);
+	if(DoButton_MenuTab(&s_ViewMessagesIcon, FontIcon::COMMENT, !DirectView && s_ClientChatView == CLIENT_CHAT_VIEW_MESSAGES, &RailButton, IGraphics::CORNER_ALL, &m_aAnimatorsSmallPage[SMALL_TAB_SETTINGS]))
+	{
+		s_ClientChatView = CLIENT_CHAT_VIEW_MESSAGES;
+		if(DirectView)
+			ActivateClientChatRoom();
+	}
+	GameClient()->m_Tooltips.DoToolTip(&s_ViewMessagesIcon, &RailButton, Localize("Messages"));
+
+	IconRail.HSplitTop(6.0f, nullptr, &IconRail);
+	IconRail.HSplitTop(36.0f, &RailButton, &IconRail);
+	if(DoButton_MenuTab(&s_ViewFriendsIcon, FontIcon::ICON_USERS, !DirectView && s_ClientChatView == CLIENT_CHAT_VIEW_FRIENDS, &RailButton, IGraphics::CORNER_ALL, &m_aAnimatorsSmallPage[SMALL_TAB_SETTINGS]))
+	{
+		s_ClientChatView = CLIENT_CHAT_VIEW_FRIENDS;
+		if(DirectView)
+			ActivateClientChatRoom();
+	}
+	GameClient()->m_Tooltips.DoToolTip(&s_ViewFriendsIcon, &RailButton, Localize("Friends"));
+
+	IconRail.HSplitTop(6.0f, nullptr, &IconRail);
+	IconRail.HSplitTop(36.0f, &RailButton, &IconRail);
+	if(DoButton_MenuTab(&s_ViewSettingsIcon, FontIcon::GEAR, !DirectView && s_ClientChatView == CLIENT_CHAT_VIEW_SETTINGS, &RailButton, IGraphics::CORNER_ALL, &m_aAnimatorsSmallPage[SMALL_TAB_SETTINGS]))
+	{
+		s_ClientChatView = CLIENT_CHAT_VIEW_SETTINGS;
+		if(DirectView)
+			ActivateClientChatRoom();
+	}
+	GameClient()->m_Tooltips.DoToolTip(&s_ViewSettingsIcon, &RailButton, Localize("Settings"));
+
+	IconRail.HSplitBottom(36.0f, &IconRail, &RailButton);
+	if(DoButton_MenuTab(&s_ViewRoomIcon, "#", !DirectView, &RailButton, IGraphics::CORNER_ALL, &m_aAnimatorsSmallPage[SMALL_TAB_SETTINGS]))
+		ActivateClientChatRoom();
+	GameClient()->m_Tooltips.DoToolTip(&s_ViewRoomIcon, &RailButton, Localize("Public room"));
+
+	Sidebar.Draw(ColorRGBA(0.032f, 0.042f, 0.071f, 0.94f), IGraphics::CORNER_ALL, 12.0f);
+	Sidebar.Margin(10.0f, &Sidebar);
+	CUIRect SidebarTitle, SidebarSubTitle, SidebarList;
+	Sidebar.HSplitTop(15.0f, &SidebarTitle, &Sidebar);
+	Sidebar.HSplitTop(2.0f, nullptr, &Sidebar);
+	Sidebar.HSplitTop(13.0f, &SidebarSubTitle, &Sidebar);
+	Sidebar.HSplitTop(7.0f, nullptr, &Sidebar);
+	SidebarList = Sidebar;
+	Ui()->DoLabel(&SidebarTitle, DirectView ? "Direct messages" : "Conversation list", 11.2f, TEXTALIGN_ML, {.m_MaxWidth = SidebarTitle.w});
+	TextRender()->TextColor(ColorRGBA(0.82f, 0.87f, 1.0f, 0.58f));
+	Ui()->DoLabel(&SidebarSubTitle, "VoiceChat-style hub layout", 8.8f, TEXTALIGN_ML, {.m_MaxWidth = SidebarSubTitle.w});
+	TextRender()->TextColor(TextRender()->DefaultTextColor());
+
+	if(!m_vClientChatFriendRequestsIn.empty())
+	{
+		CUIRect RequestsHead;
+		SidebarList.HSplitTop(14.0f, &RequestsHead, &SidebarList);
+		SidebarList.HSplitTop(4.0f, nullptr, &SidebarList);
+		char aRequestsTitle[48];
+		str_format(aRequestsTitle, sizeof(aRequestsTitle), "Requests (%d)", (int)m_vClientChatFriendRequestsIn.size());
+		TextRender()->TextColor(ColorRGBA(0.84f, 0.90f, 1.0f, 0.68f));
+		Ui()->DoLabel(&RequestsHead, aRequestsTitle, 9.2f, TEXTALIGN_ML, {.m_MaxWidth = RequestsHead.w});
+		TextRender()->TextColor(TextRender()->DefaultTextColor());
+
+		const int MaxRequests = minimum((int)m_vClientChatFriendRequestsIn.size(), 2);
+		static std::array<CButtonContainer, 2> s_RequestAccept;
+		static std::array<CButtonContainer, 2> s_RequestDecline;
+		for(int i = 0; i < MaxRequests; ++i)
+		{
+			const CClientChatFriendRequest &Request = m_vClientChatFriendRequestsIn[i];
+			CUIRect RequestRow;
+			SidebarList.HSplitTop(24.0f, &RequestRow, &SidebarList);
+			SidebarList.HSplitTop(4.0f, nullptr, &SidebarList);
+			CUIRect NamePart, AcceptPart, DeclinePart;
+			RequestRow.VSplitRight(22.0f, &RequestRow, &DeclinePart);
+			RequestRow.VSplitRight(3.0f, &RequestRow, nullptr);
+			RequestRow.VSplitRight(22.0f, &RequestRow, &AcceptPart);
+			NamePart = RequestRow;
+			NamePart.Draw(ColorRGBA(0.05f, 0.07f, 0.11f, 0.80f), IGraphics::CORNER_ALL, 6.0f);
+			NamePart.Margin(5.0f, &NamePart);
+			Ui()->DoLabel(&NamePart, Request.m_aName, 8.8f, TEXTALIGN_ML, {.m_MaxWidth = NamePart.w});
+
+			if(DoButton_Menu(&s_RequestAccept[i], "+", 0, &AcceptPart, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, 5.0f, 0.0f, ColorRGBA(0.12f, 0.24f, 0.16f, 0.96f)))
+			{
+				CJsonStringWriter JsonWriter;
+				JsonWriter.BeginObject();
+				JsonWriter.WriteAttribute("action");
+				JsonWriter.WriteStrValue("friend_accept");
+				JsonWriter.WriteAttribute("request_id");
+				JsonWriter.WriteIntValue(Request.m_Id);
+				JsonWriter.EndObject();
+				StartClientChatActionRequest(JsonWriter.GetOutputString(), "Accepting friend request...");
+			}
+			if(DoButton_Menu(&s_RequestDecline[i], "-", 0, &DeclinePart, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, 5.0f, 0.0f, ColorRGBA(0.23f, 0.10f, 0.10f, 0.96f)))
+			{
+				CJsonStringWriter JsonWriter;
+				JsonWriter.BeginObject();
+				JsonWriter.WriteAttribute("action");
+				JsonWriter.WriteStrValue("friend_decline");
+				JsonWriter.WriteAttribute("request_id");
+				JsonWriter.WriteIntValue(Request.m_Id);
+				JsonWriter.EndObject();
+				StartClientChatActionRequest(JsonWriter.GetOutputString(), "Declining friend request...");
+			}
+		}
+		SidebarList.HSplitTop(6.0f, nullptr, &SidebarList);
+	}
+
+	CUIRect PrivacyHead;
+	SidebarList.HSplitTop(12.0f, &PrivacyHead, &SidebarList);
+	SidebarList.HSplitTop(4.0f, nullptr, &SidebarList);
+	TextRender()->TextColor(ColorRGBA(0.84f, 0.90f, 1.0f, 0.62f));
+	Ui()->DoLabel(&PrivacyHead, "Privacy", 8.7f, TEXTALIGN_ML, {.m_MaxWidth = PrivacyHead.w});
+	TextRender()->TextColor(TextRender()->DefaultTextColor());
+	CUIRect DmPrivacyRow;
+	SidebarList.HSplitTop(20.0f, &DmPrivacyRow, &SidebarList);
+	SidebarList.HSplitTop(3.0f, nullptr, &SidebarList);
+	CUIRect FriendPrivacyRow;
+	SidebarList.HSplitTop(20.0f, &FriendPrivacyRow, &SidebarList);
+	SidebarList.HSplitTop(6.0f, nullptr, &SidebarList);
+	static CButtonContainer s_DmPrivacyButton;
+	static CButtonContainer s_AddFriendsPrivacyButton;
+	char aDmPrivacy[64];
+	str_format(aDmPrivacy, sizeof(aDmPrivacy), "DM: %s", m_aClientChatPrivacyWhoCanDm);
+	char aAddPrivacy[64];
+	str_format(aAddPrivacy, sizeof(aAddPrivacy), "Add: %s", m_aClientChatPrivacyWhoCanAddFriends);
+	if(DoButton_Menu(&s_DmPrivacyButton, aDmPrivacy, 0, &DmPrivacyRow, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, 6.0f, 0.0f, ColorRGBA(0.08f, 0.12f, 0.18f, 0.92f)))
+	{
+		const char *pNext = "everyone";
+		if(str_comp(m_aClientChatPrivacyWhoCanDm, "everyone") == 0)
+			pNext = "friends";
+		else if(str_comp(m_aClientChatPrivacyWhoCanDm, "friends") == 0)
+			pNext = "no_one";
+		CJsonStringWriter JsonWriter;
+		JsonWriter.BeginObject();
+		JsonWriter.WriteAttribute("action");
+		JsonWriter.WriteStrValue("set_privacy");
+		JsonWriter.WriteAttribute("who_can_dm");
+		JsonWriter.WriteStrValue(pNext);
+		JsonWriter.EndObject();
+		StartClientChatActionRequest(JsonWriter.GetOutputString(), "Updating DM privacy...");
+	}
+	if(DoButton_Menu(&s_AddFriendsPrivacyButton, aAddPrivacy, 0, &FriendPrivacyRow, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, 6.0f, 0.0f, ColorRGBA(0.08f, 0.12f, 0.18f, 0.92f)))
+	{
+		const char *pNext = "everyone";
+		if(str_comp(m_aClientChatPrivacyWhoCanAddFriends, "everyone") == 0)
+			pNext = "friends_of_friends";
+		else if(str_comp(m_aClientChatPrivacyWhoCanAddFriends, "friends_of_friends") == 0)
+			pNext = "no_one";
+		CJsonStringWriter JsonWriter;
+		JsonWriter.BeginObject();
+		JsonWriter.WriteAttribute("action");
+		JsonWriter.WriteStrValue("set_privacy");
+		JsonWriter.WriteAttribute("who_can_add_friends");
+		JsonWriter.WriteStrValue(pNext);
+		JsonWriter.EndObject();
+		StartClientChatActionRequest(JsonWriter.GetOutputString(), "Updating friend privacy...");
+	}
+
+	static CButtonContainer s_RoomButton;
+	CUIRect RoomRow;
+	SidebarList.HSplitTop(40.0f, &RoomRow, &SidebarList);
+	SidebarList.HSplitTop(5.0f, nullptr, &SidebarList);
+	const bool RoomSelected = !DirectView;
+	RoomRow.Draw(RoomSelected ? ColorRGBA(0.10f, 0.17f, 0.28f, 0.96f) : ColorRGBA(0.055f, 0.068f, 0.10f, Ui()->MouseInside(&RoomRow) ? 0.90f : 0.76f), IGraphics::CORNER_ALL, 9.0f);
+	if(Ui()->DoButtonLogic(&s_RoomButton, 0, &RoomRow, BUTTONFLAG_LEFT))
+		ActivateClientChatRoom();
+	CUIRect RoomIcon, RoomInfo;
+	RoomRow.Margin(8.0f, &RoomRow);
+	RoomRow.VSplitLeft(24.0f, &RoomIcon, &RoomInfo);
+	RoomInfo.VSplitLeft(7.0f, nullptr, &RoomInfo);
+	Ui()->DoLabel(&RoomIcon, "#", 15.0f, TEXTALIGN_MC);
+	CUIRect RoomName, RoomPreview;
+	RoomInfo.HSplitTop(14.0f, &RoomName, &RoomInfo);
+	RoomInfo.HSplitTop(2.0f, nullptr, &RoomInfo);
+	RoomPreview = RoomInfo;
+	Ui()->DoLabel(&RoomName, "Public room", 11.0f, TEXTALIGN_ML, {.m_MaxWidth = RoomName.w});
+	TextRender()->TextColor(ColorRGBA(0.82f, 0.87f, 1.0f, 0.54f));
+	Ui()->DoLabel(&RoomPreview, "@nickname pings people", 8.8f, TEXTALIGN_ML, {.m_MaxWidth = RoomPreview.w});
+	TextRender()->TextColor(TextRender()->DefaultTextColor());
+
+	static std::array<CButtonContainer, CLIENT_CHAT_MAX_VISIBLE_ITEMS> s_ConversationButtons;
+	const int VisibleConversations = minimum((int)m_vClientChatConversations.size(), CLIENT_CHAT_MAX_VISIBLE_ITEMS);
+	for(int Index = 0; Index < VisibleConversations; ++Index)
+	{
+		const CClientChatConversation &ConversationData = m_vClientChatConversations[Index];
+		CUIRect Row;
+		SidebarList.HSplitTop(42.0f, &Row, &SidebarList);
+		SidebarList.HSplitTop(5.0f, nullptr, &SidebarList);
+		const bool Selected = DirectView && ((m_aClientChatDirectTargetId[0] != '\0' && ClientChatIdsEqual(ConversationData.m_aUserId, m_aClientChatDirectTargetId)) ||
+												(m_aClientChatDirectTargetId[0] == '\0' && ClientChatNamesEqual(ConversationData.m_aName, m_aClientChatDirectTargetName)));
+		Row.Draw(Selected ? ColorRGBA(0.12f, 0.19f, 0.31f, 0.97f) : ColorRGBA(0.055f, 0.07f, 0.11f, Ui()->MouseInside(&Row) ? 0.90f : 0.76f), IGraphics::CORNER_ALL, 9.0f);
+		if(Ui()->DoButtonLogic(&s_ConversationButtons[Index], 0, &Row, BUTTONFLAG_LEFT))
+			ActivateClientChatDirect(ConversationData.m_aUserId, ConversationData.m_aName, ConversationData.m_aSkin, ConversationData.m_UseCustomColor, ConversationData.m_ColorBody, ConversationData.m_ColorFeet);
+		CUIRect Avatar, Info, UnreadBadge;
+		Row.Margin(8.0f, &Row);
+		Row.VSplitLeft(24.0f, &Avatar, &Info);
+		Info.VSplitLeft(7.0f, nullptr, &Info);
+		const CClientChatFriend *pFriendInfo = FindFriendByConversation(ConversationData.m_aUserId, ConversationData.m_aName);
+		const bool VisibleOnline = pFriendInfo != nullptr ? pFriendInfo->m_Online : false;
+		const char *pVisibleStatus = pFriendInfo != nullptr ? pFriendInfo->m_aStatus : "offline";
+		CUIRect StatusIndicator;
+		Info.VSplitRight(14.0f, &Info, &StatusIndicator);
+		Info.VSplitRight(3.0f, &Info, nullptr);
+		if(ConversationData.m_UnreadCount > 0)
+		{
+			Info.VSplitRight(18.0f, &Info, &UnreadBadge);
+			UnreadBadge.HMargin(11.0f, &UnreadBadge);
+			UnreadBadge.Draw(ColorRGBA(ms_GuiColor.r, ms_GuiColor.g, ms_GuiColor.b, 0.84f), IGraphics::CORNER_ALL, 6.0f);
+			char aUnread[8];
+			str_format(aUnread, sizeof(aUnread), "%d", ConversationData.m_UnreadCount);
+			Ui()->DoLabel(&UnreadBadge, aUnread, 9.0f, TEXTALIGN_MC);
+		}
+		CTeeRenderInfo TeeInfo = GetTeeRenderInfo(vec2(20.0f, 20.0f), ConversationData.m_aSkin, ConversationData.m_UseCustomColor, ConversationData.m_ColorBody, ConversationData.m_ColorFeet);
+		RenderTools()->RenderTee(CAnimState::GetIdle(), &TeeInfo, EMOTE_NORMAL, vec2(1.0f, 0.0f), vec2(Avatar.x + Avatar.w / 2.0f, Avatar.y + Avatar.h / 2.0f + 0.5f));
+		TextRender()->SetFontPreset(EFontPreset::ICON_FONT);
+		TextRender()->TextColor(ClientChatStatusColorFor(pVisibleStatus, VisibleOnline));
+		Ui()->DoLabel(&StatusIndicator, ClientChatStatusIconFor(pVisibleStatus, VisibleOnline), 8.5f, TEXTALIGN_MC);
+		TextRender()->TextColor(TextRender()->DefaultTextColor());
+		TextRender()->SetFontPreset(EFontPreset::DEFAULT_FONT);
+		CUIRect NameRow, PreviewRow;
+		Info.HSplitTop(14.0f, &NameRow, &Info);
+		Info.HSplitTop(2.0f, nullptr, &Info);
+		PreviewRow = Info;
+		Ui()->DoLabel(&NameRow, ConversationData.m_aName, 10.8f, TEXTALIGN_ML, {.m_MaxWidth = NameRow.w});
+		TextRender()->TextColor(ColorRGBA(0.82f, 0.87f, 1.0f, 0.54f));
+		Ui()->DoLabel(&PreviewRow, ConversationData.m_aPreview, 8.6f, TEXTALIGN_ML, {.m_MaxWidth = PreviewRow.w});
+		TextRender()->TextColor(TextRender()->DefaultTextColor());
+	}
+
+	if(VisibleConversations == 0)
+	{
+		CUIRect EmptyDirects = SidebarList;
+		EmptyDirects.Margin(6.0f, &EmptyDirects);
+		TextRender()->TextColor(ColorRGBA(0.82f, 0.87f, 1.0f, 0.46f));
+		Ui()->DoLabel(&EmptyDirects, "LS list is empty.\nPress LS on a room message.", 10.0f, TEXTALIGN_TL, {.m_MaxWidth = EmptyDirects.w});
+		TextRender()->TextColor(TextRender()->DefaultTextColor());
+	}
+
+	Conversation.Draw(ColorRGBA(0.028f, 0.036f, 0.062f, 0.93f), IGraphics::CORNER_ALL, 12.0f);
+	Conversation.Margin(10.0f, &Conversation);
+	CUIRect ConversationHeader, MessageArea;
+	Conversation.HSplitTop(42.0f, &ConversationHeader, &Conversation);
+	Conversation.HSplitTop(8.0f, nullptr, &Conversation);
+	MessageArea = Conversation;
+	ConversationHeader.Draw(ColorRGBA(0.040f, 0.050f, 0.082f, 0.92f), IGraphics::CORNER_ALL, 10.0f);
+	ConversationHeader.Margin(9.0f, &ConversationHeader);
+	CUIRect HeaderAvatar, HeaderText, ActiveTitle, ActiveInfo;
+	if(DirectView)
+	{
+		ConversationHeader.VSplitLeft(30.0f, &HeaderAvatar, &HeaderText);
+		HeaderText.VSplitLeft(8.0f, nullptr, &HeaderText);
+		CTeeRenderInfo HeaderTeeInfo = GetTeeRenderInfo(vec2(22.0f, 22.0f), m_aClientChatDirectTargetSkin, m_ClientChatDirectTargetUseCustomColor, m_ClientChatDirectTargetColorBody, m_ClientChatDirectTargetColorFeet);
+		RenderTools()->RenderTee(CAnimState::GetIdle(), &HeaderTeeInfo, EMOTE_NORMAL, vec2(1.0f, 0.0f), vec2(HeaderAvatar.x + HeaderAvatar.w / 2.0f, HeaderAvatar.y + HeaderAvatar.h / 2.0f));
+	}
+	else
+	{
+		HeaderText = ConversationHeader;
+	}
+	HeaderText.HSplitTop(16.0f, &ActiveTitle, &HeaderText);
+	HeaderText.HSplitTop(3.0f, nullptr, &HeaderText);
+	ActiveInfo = HeaderText;
+	Ui()->DoLabel(&ActiveTitle, DirectView ? m_aClientChatDirectTargetName : "Public room", 13.0f, TEXTALIGN_ML, {.m_MaxWidth = ActiveTitle.w});
+	TextRender()->TextColor(ColorRGBA(0.82f, 0.87f, 1.0f, 0.58f));
+	if(DirectView && pDirectFriendInfo != nullptr)
+	{
+		char aPresenceInfo[160];
+		if(pDirectFriendInfo->m_aCurrentServer[0] != '\0' && pDirectFriendInfo->m_CanJoin)
+			str_format(aPresenceInfo, sizeof(aPresenceInfo), "%s • playing on %s", pDirectFriendInfo->m_aStatus, pDirectFriendInfo->m_aCurrentServer);
+		else
+			str_format(aPresenceInfo, sizeof(aPresenceInfo), "%s", pDirectFriendInfo->m_aStatus);
+		Ui()->DoLabel(&ActiveInfo, aPresenceInfo, 9.2f, TEXTALIGN_ML, {.m_MaxWidth = ActiveInfo.w});
+	}
+	else if(!DirectView && s_ClientChatView == CLIENT_CHAT_VIEW_FRIENDS)
+		Ui()->DoLabel(&ActiveInfo, "Friends and incoming requests", 9.2f, TEXTALIGN_ML, {.m_MaxWidth = ActiveInfo.w});
+	else if(!DirectView && s_ClientChatView == CLIENT_CHAT_VIEW_SETTINGS)
+		Ui()->DoLabel(&ActiveInfo, "Integrated chat settings (VoiceChat style)", 9.2f, TEXTALIGN_ML, {.m_MaxWidth = ActiveInfo.w});
+	else
+		Ui()->DoLabel(&ActiveInfo, DirectView ? "Local LS dialog" : "Everybody using this client can read this room", 9.2f, TEXTALIGN_ML, {.m_MaxWidth = ActiveInfo.w});
+	TextRender()->TextColor(TextRender()->DefaultTextColor());
+
+	if(m_aClientChatStatus[0] != '\0')
+	{
+		CUIRect StatusRow;
+		MessageArea.HSplitTop(24.0f, &StatusRow, &MessageArea);
+		MessageArea.HSplitTop(8.0f, nullptr, &MessageArea);
+		StatusRow.Draw(m_ClientChatStatusError ? ColorRGBA(0.28f, 0.08f, 0.08f, 0.92f) : ColorRGBA(0.08f, 0.16f, 0.26f, 0.90f), IGraphics::CORNER_ALL, 8.0f);
+		StatusRow.Margin(8.0f, &StatusRow);
+		TextRender()->TextColor(m_ClientChatStatusError ? ColorRGBA(1.0f, 0.74f, 0.74f, 1.0f) : ColorRGBA(0.80f, 0.90f, 1.0f, 1.0f));
+		Ui()->DoLabel(&StatusRow, m_aClientChatStatus, 10.5f, TEXTALIGN_ML, {.m_MaxWidth = StatusRow.w});
+		TextRender()->TextColor(TextRender()->DefaultTextColor());
+	}
+
+	const bool FriendsView = !DirectView && s_ClientChatView == CLIENT_CHAT_VIEW_FRIENDS;
+	const bool SettingsView = !DirectView && s_ClientChatView == CLIENT_CHAT_VIEW_SETTINGS;
+	if(FriendsView)
+	{
+		CUIRect List = MessageArea;
+		const int MaxRows = minimum((int)m_vClientChatFriends.size(), CLIENT_CHAT_MAX_VISIBLE_ITEMS);
+		if(MaxRows == 0)
+		{
+			CUIRect EmptyState = List;
+			EmptyState.Draw(ColorRGBA(0.016f, 0.02f, 0.036f, 0.64f), IGraphics::CORNER_ALL, 10.0f);
+			EmptyState.Margin(16.0f, &EmptyState);
+			Ui()->DoLabel(&EmptyState, "No friends yet. Add players from room/LS actions.", 14.0f, TEXTALIGN_MC, {.m_MaxWidth = EmptyState.w});
+		}
+		else
+		{
+			static std::array<CButtonContainer, CLIENT_CHAT_MAX_VISIBLE_ITEMS> s_FriendOpenDm;
+			static std::array<CButtonContainer, CLIENT_CHAT_MAX_VISIBLE_ITEMS> s_FriendJoin;
+			static std::array<CButtonContainer, CLIENT_CHAT_MAX_VISIBLE_ITEMS> s_FriendRemove;
+			for(int i = 0; i < MaxRows; ++i)
+			{
+				const CClientChatFriend &Friend = m_vClientChatFriends[i];
+				CUIRect Row;
+				List.HSplitTop(42.0f, &Row, &List);
+				List.HSplitTop(6.0f, nullptr, &List);
+				Row.Draw(ColorRGBA(0.05f, 0.07f, 0.11f, 0.90f), IGraphics::CORNER_ALL, 8.0f);
+				Row.Margin(8.0f, &Row);
+				CUIRect NamePart, DmButton, JoinButton, RemoveButton, StatusBadge;
+				Row.VSplitRight(12.0f, &Row, &StatusBadge);
+				Row.VSplitRight(3.0f, &Row, nullptr);
+				Row.VSplitRight(74.0f, &Row, &RemoveButton);
+				Row.VSplitRight(6.0f, &Row, nullptr);
+				Row.VSplitRight(56.0f, &Row, &JoinButton);
+				Row.VSplitRight(6.0f, &Row, nullptr);
+				Row.VSplitRight(60.0f, &Row, &DmButton);
+				NamePart = Row;
+				char aFriendTitle[192];
+				if(Friend.m_aCurrentServer[0] != '\0')
+					str_format(aFriendTitle, sizeof(aFriendTitle), "%s • %s", Friend.m_aName, Friend.m_aCurrentServer);
+				else
+					str_format(aFriendTitle, sizeof(aFriendTitle), "%s", Friend.m_aName);
+				Ui()->DoLabel(&NamePart, aFriendTitle, 10.4f, TEXTALIGN_ML, {.m_MaxWidth = NamePart.w});
+				if(DoButton_Menu(&s_FriendOpenDm[i], "LS", 0, &DmButton, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, 6.0f, 0.0f, ColorRGBA(0.12f, 0.18f, 0.26f, 0.95f)))
+					ActivateClientChatDirect(Friend.m_aUserId, Friend.m_aName, "default", false, 65408, 65408);
+				if(DoButton_Menu(&s_FriendJoin[i], Friend.m_CanJoin && Friend.m_aCurrentServer[0] != '\0' ? "Join" : "-", 0, &JoinButton, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, 6.0f, 0.0f, Friend.m_CanJoin && Friend.m_aCurrentServer[0] != '\0' ? ColorRGBA(0.10f, 0.20f, 0.14f, 0.95f) : ColorRGBA(0.08f, 0.10f, 0.13f, 0.90f)))
+				{
+					if(Friend.m_CanJoin && Friend.m_aCurrentServer[0] != '\0')
+					{
+						char aCmd[160];
+						str_format(aCmd, sizeof(aCmd), "connect %s", Friend.m_aCurrentServer);
+						Console()->ExecuteLine(aCmd, IConsole::CLIENT_ID_GAME);
+						SetActive(false);
+					}
+				}
+				if(DoButton_Menu(&s_FriendRemove[i], "Remove", 0, &RemoveButton, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, 6.0f, 0.0f, ColorRGBA(0.23f, 0.10f, 0.10f, 0.95f)))
+				{
+					CJsonStringWriter JsonWriter;
+					JsonWriter.BeginObject();
+					JsonWriter.WriteAttribute("action");
+					JsonWriter.WriteStrValue("friend_remove");
+					JsonWriter.WriteAttribute("target_id");
+					JsonWriter.WriteStrValue(Friend.m_aUserId);
+					JsonWriter.EndObject();
+					StartClientChatActionRequest(JsonWriter.GetOutputString(), "Removing friend...");
+				}
+				TextRender()->SetFontPreset(EFontPreset::ICON_FONT);
+				TextRender()->TextColor(ClientChatStatusColorFor(Friend.m_aStatus, Friend.m_Online));
+				Ui()->DoLabel(&StatusBadge, ClientChatStatusIconFor(Friend.m_aStatus, Friend.m_Online), 8.5f, TEXTALIGN_MC);
+				TextRender()->TextColor(TextRender()->DefaultTextColor());
+				TextRender()->SetFontPreset(EFontPreset::DEFAULT_FONT);
+			}
+		}
+	}
+	else if(SettingsView)
+	{
+		CUIRect SettingsWrap = MessageArea;
+		SettingsWrap.Draw(ColorRGBA(0.016f, 0.022f, 0.037f, 0.78f), IGraphics::CORNER_ALL, 10.0f);
+		SettingsWrap.Margin(12.0f, &SettingsWrap);
+		CUIRect Row;
+
+		SettingsWrap.HSplitTop(22.0f, &Row, &SettingsWrap);
+		Ui()->DoLabel(&Row, "Chat Notifications", 11.0f, TEXTALIGN_ML, {.m_MaxWidth = Row.w});
+		SettingsWrap.HSplitTop(26.0f, &Row, &SettingsWrap);
+		static CButtonContainer s_NotificationsToggle;
+		if(DoButton_Menu(&s_NotificationsToggle, g_Config.m_ClClientChatNotifications ? "Enabled" : "Disabled", 0, &Row, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, 7.0f, 0.0f, ColorRGBA(ms_GuiColor.r, ms_GuiColor.g, ms_GuiColor.b, 0.30f)))
+			g_Config.m_ClClientChatNotifications ^= 1;
+
+		SettingsWrap.HSplitTop(8.0f, nullptr, &SettingsWrap);
+		SettingsWrap.HSplitTop(22.0f, &Row, &SettingsWrap);
+		Ui()->DoLabel(&Row, "Chat Open Bind", 11.0f, TEXTALIGN_ML, {.m_MaxWidth = Row.w});
+		SettingsWrap.HSplitTop(26.0f, &Row, &SettingsWrap);
+		char aBind[64];
+		GameClient()->m_Binds.GetKey("toggle_client_chat", aBind, sizeof(aBind));
+		if(aBind[0] == '\0')
+			str_copy(aBind, "Not set", sizeof(aBind));
+		char aBindLine[96];
+		str_format(aBindLine, sizeof(aBindLine), "toggle_client_chat: %s", aBind);
+		Ui()->DoLabel(&Row, aBindLine, 10.0f, TEXTALIGN_ML, {.m_MaxWidth = Row.w});
+
+		SettingsWrap.HSplitTop(8.0f, nullptr, &SettingsWrap);
+		SettingsWrap.HSplitTop(22.0f, &Row, &SettingsWrap);
+		Ui()->DoLabel(&Row, "Presence Status", 11.0f, TEXTALIGN_ML, {.m_MaxWidth = Row.w});
+		SettingsWrap.HSplitTop(26.0f, &Row, &SettingsWrap);
+		static CButtonContainer s_StatusCycleInSettings;
+		char aStatusLabel[48];
+		str_format(aStatusLabel, sizeof(aStatusLabel), "Now: %s", m_aClientChatPresenceStatus);
+		if(DoButton_Menu(&s_StatusCycleInSettings, aStatusLabel, 0, &Row, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, 7.0f, 0.0f, ColorRGBA(0.10f, 0.15f, 0.22f, 0.95f)))
+		{
+			if(str_comp_nocase(m_aClientChatPresenceStatus, "online") == 0)
+				SetClientChatPresenceStatus("idle");
+			else if(str_comp_nocase(m_aClientChatPresenceStatus, "idle") == 0)
+				SetClientChatPresenceStatus("dnd");
+			else if(str_comp_nocase(m_aClientChatPresenceStatus, "dnd") == 0)
+				SetClientChatPresenceStatus("invisible");
+			else
+				SetClientChatPresenceStatus("online");
+		}
+
+		SettingsWrap.HSplitTop(8.0f, nullptr, &SettingsWrap);
+		SettingsWrap.HSplitTop(22.0f, &Row, &SettingsWrap);
+		Ui()->DoLabel(&Row, "Privacy", 11.0f, TEXTALIGN_ML, {.m_MaxWidth = Row.w});
+		SettingsWrap.HSplitTop(26.0f, &Row, &SettingsWrap);
+		static CButtonContainer s_DmPrivacyInSettings;
+		char aDmPrivacy[64];
+		str_format(aDmPrivacy, sizeof(aDmPrivacy), "Who can DM: %s", m_aClientChatPrivacyWhoCanDm);
+		if(DoButton_Menu(&s_DmPrivacyInSettings, aDmPrivacy, 0, &Row, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, 7.0f, 0.0f, ColorRGBA(0.10f, 0.15f, 0.22f, 0.95f)))
+		{
+			const char *pNext = "everyone";
+			if(str_comp(m_aClientChatPrivacyWhoCanDm, "everyone") == 0)
+				pNext = "friends";
+			else if(str_comp(m_aClientChatPrivacyWhoCanDm, "friends") == 0)
+				pNext = "no_one";
+			CJsonStringWriter JsonWriter;
+			JsonWriter.BeginObject();
+			JsonWriter.WriteAttribute("action");
+			JsonWriter.WriteStrValue("set_privacy");
+			JsonWriter.WriteAttribute("who_can_dm");
+			JsonWriter.WriteStrValue(pNext);
+			JsonWriter.EndObject();
+			StartClientChatActionRequest(JsonWriter.GetOutputString(), "Updating DM privacy...");
+		}
+		SettingsWrap.HSplitTop(4.0f, nullptr, &SettingsWrap);
+		SettingsWrap.HSplitTop(26.0f, &Row, &SettingsWrap);
+		static CButtonContainer s_AddFriendsPrivacyInSettings;
+		char aAddPrivacy[72];
+		str_format(aAddPrivacy, sizeof(aAddPrivacy), "Who can add friends: %s", m_aClientChatPrivacyWhoCanAddFriends);
+		if(DoButton_Menu(&s_AddFriendsPrivacyInSettings, aAddPrivacy, 0, &Row, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, 7.0f, 0.0f, ColorRGBA(0.10f, 0.15f, 0.22f, 0.95f)))
+		{
+			const char *pNext = "everyone";
+			if(str_comp(m_aClientChatPrivacyWhoCanAddFriends, "everyone") == 0)
+				pNext = "friends_of_friends";
+			else if(str_comp(m_aClientChatPrivacyWhoCanAddFriends, "friends_of_friends") == 0)
+				pNext = "no_one";
+			CJsonStringWriter JsonWriter;
+			JsonWriter.BeginObject();
+			JsonWriter.WriteAttribute("action");
+			JsonWriter.WriteStrValue("set_privacy");
+			JsonWriter.WriteAttribute("who_can_add_friends");
+			JsonWriter.WriteStrValue(pNext);
+			JsonWriter.EndObject();
+			StartClientChatActionRequest(JsonWriter.GetOutputString(), "Updating friend privacy...");
+		}
+	}
+	else
+	{
+		std::vector<const CClientChatMessage *> vpMessages;
+		if(DirectView)
+		{
+			for(const CClientChatMessage &Message : m_vClientChatDirectMessages)
+				if(MessageMatchesDirectTarget(Message))
+					vpMessages.push_back(&Message);
+		}
+		else
+		{
+			for(const CClientChatMessage &Message : m_vClientChatRoomMessages)
+				vpMessages.push_back(&Message);
+		}
+
+		if(vpMessages.empty())
+		{
+			CUIRect EmptyState = MessageArea;
+			EmptyState.Draw(ColorRGBA(0.016f, 0.02f, 0.036f, 0.64f), IGraphics::CORNER_ALL, 10.0f);
+			EmptyState.Margin(16.0f, &EmptyState);
+			Ui()->DoLabel(&EmptyState, DirectView ? "No messages in this LS yet." : "Room is quiet. Send the first message.", 14.0f, TEXTALIGN_MC, {.m_MaxWidth = EmptyState.w});
+		}
+		else
+		{
+			const float RowHeight = 56.0f;
+			const float RowSpacing = 6.0f;
+			const int VisibleMessages = maximum(1, minimum(minimum((int)vpMessages.size(), CLIENT_CHAT_MAX_VISIBLE_ITEMS), (int)((MessageArea.h + RowSpacing) / (RowHeight + RowSpacing))));
+			const int StartIndex = maximum(0, (int)vpMessages.size() - VisibleMessages);
+			static std::array<CButtonContainer, CLIENT_CHAT_MAX_VISIBLE_ITEMS> s_MessageActionButtons;
+			for(int VisibleIndex = 0; VisibleIndex < VisibleMessages; ++VisibleIndex)
+			{
+				CUIRect Row;
+				MessageArea.HSplitTop(RowHeight, &Row, &MessageArea);
+				MessageArea.HSplitTop(RowSpacing, nullptr, &MessageArea);
+				const CClientChatMessage &Message = *vpMessages[StartIndex + VisibleIndex];
+				const bool LocalMessage = IsLocalMessage(Message);
+				const float BubbleWidth = minimum(Row.w * 0.82f, Row.w - 18.0f);
+				CUIRect Bubble;
+				if(LocalMessage)
+					Row.VSplitRight(BubbleWidth, nullptr, &Bubble);
+				else
+					Row.VSplitLeft(BubbleWidth, &Bubble, nullptr);
+				const bool Hover = Ui()->MouseInside(&Bubble);
+				ColorRGBA BubbleColor = LocalMessage ? ColorRGBA(ms_GuiColor.r * 0.40f, ms_GuiColor.g * 0.42f, ms_GuiColor.b * 0.46f, 0.36f) : ColorRGBA(0.055f, 0.07f, 0.10f, 0.95f);
+				if(Message.m_Direct)
+					BubbleColor = LocalMessage ? ColorRGBA(0.10f, 0.14f, 0.22f, 0.94f) : ColorRGBA(0.05f, 0.08f, 0.13f, 0.96f);
+				if(Message.m_MentionsLocal)
+					BubbleColor = ColorRGBA(0.24f, 0.16f, 0.05f, 0.92f);
+				Bubble.Draw(BubbleColor, IGraphics::CORNER_ALL, 10.0f);
+				CUIRect Accent;
+				Bubble.VSplitLeft(4.0f, &Accent, &Bubble);
+				Accent.Draw(ClientChatAccentColor(Message.m_UseCustomColor, Message.m_ColorBody, LocalMessage ? 0.74f : 0.58f), IGraphics::CORNER_L, 10.0f);
+				Bubble.Margin(7.0f, &Bubble);
+				CUIRect Avatar, TextArea;
+				Bubble.VSplitLeft(28.0f, &Avatar, &TextArea);
+				TextArea.VSplitLeft(6.0f, nullptr, &TextArea);
+				CTeeRenderInfo TeeInfo = GetTeeRenderInfo(vec2(20.0f, 20.0f), Message.m_aSkin, Message.m_UseCustomColor, Message.m_ColorBody, Message.m_ColorFeet);
+				RenderTools()->RenderTee(CAnimState::GetIdle(), &TeeInfo, EMOTE_NORMAL, vec2(1.0f, 0.0f), vec2(Avatar.x + Avatar.w / 2.0f, Avatar.y + Avatar.h / 2.0f + 1.0f));
+				CUIRect MetaRow, TextRow;
+				TextArea.HSplitTop(14.0f, &MetaRow, &TextArea);
+				TextArea.HSplitTop(3.0f, nullptr, &TextArea);
+				TextRow = TextArea;
+				char aTimestamp[32] = "";
+				if(Message.m_Timestamp > 0)
+					str_timestamp_ex((time_t)Message.m_Timestamp, aTimestamp, sizeof(aTimestamp), "%H:%M");
+				CUIRect ActionButton, TimeLabel, NameLabel;
+				if(!LocalMessage && !DirectView)
+				{
+					MetaRow.VSplitRight(Hover ? 96.0f : 0.0f, &MetaRow, &ActionButton);
+					if(Hover)
+					{
+						CUIRect LsButton, FriendAction, BlockAction;
+						ActionButton.VSplitLeft(30.0f, &LsButton, &ActionButton);
+						ActionButton.VSplitLeft(3.0f, nullptr, &ActionButton);
+						ActionButton.VSplitLeft(30.0f, &FriendAction, &ActionButton);
+						ActionButton.VSplitLeft(3.0f, nullptr, &ActionButton);
+						BlockAction = ActionButton;
+						if(DoButton_Menu(&s_MessageActionButtons[VisibleIndex], "LS", 0, &LsButton, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, 6.0f, 0.0f, ColorRGBA(0.14f, 0.18f, 0.24f, 0.98f)))
+							ActivateClientChatDirect(Message.m_aSenderId, Message.m_aName, Message.m_aSkin, Message.m_UseCustomColor, Message.m_ColorBody, Message.m_ColorFeet);
+						static std::array<CButtonContainer, CLIENT_CHAT_MAX_VISIBLE_ITEMS> s_MessageFriendButtons;
+						static std::array<CButtonContainer, CLIENT_CHAT_MAX_VISIBLE_ITEMS> s_MessageBlockButtons;
+						if(DoButton_Menu(&s_MessageFriendButtons[VisibleIndex], "+", 0, &FriendAction, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, 6.0f, 0.0f, ColorRGBA(0.12f, 0.20f, 0.30f, 0.98f)))
+							SendClientChatFriendRequest(Message.m_aSenderId, Message.m_aName);
+						if(DoButton_Menu(&s_MessageBlockButtons[VisibleIndex], "B", 0, &BlockAction, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, 6.0f, 0.0f, ColorRGBA(0.27f, 0.10f, 0.11f, 0.98f)))
+							ToggleClientChatBlock(Message.m_aSenderId, Message.m_aName, true);
+					}
+				}
+				MetaRow.VSplitRight(42.0f, &NameLabel, &TimeLabel);
+				Ui()->DoLabel(&NameLabel, LocalMessage ? "You" : Message.m_aName, 10.8f, TEXTALIGN_ML, {.m_MaxWidth = NameLabel.w});
+				if(aTimestamp[0] != '\0')
+				{
+					TextRender()->TextColor(ColorRGBA(1.0f, 1.0f, 1.0f, 0.42f));
+					Ui()->DoLabel(&TimeLabel, aTimestamp, 8.5f, TEXTALIGN_MR);
+					TextRender()->TextColor(TextRender()->DefaultTextColor());
+				}
+				if(Message.m_MentionsLocal)
+				{
+					CUIRect PingBadge = MetaRow;
+					PingBadge.VSplitRight(42.0f, nullptr, &PingBadge);
+					PingBadge.HMargin(1.0f, &PingBadge);
+					PingBadge.Draw(ColorRGBA(0.95f, 0.72f, 0.16f, 0.24f), IGraphics::CORNER_ALL, 6.0f);
+					Ui()->DoLabel(&PingBadge, "@you", 8.2f, TEXTALIGN_MC);
+				}
+				else if(Message.m_Direct)
+				{
+					CUIRect DirectBadge = MetaRow;
+					DirectBadge.VSplitRight(32.0f, nullptr, &DirectBadge);
+					DirectBadge.HMargin(1.0f, &DirectBadge);
+					DirectBadge.Draw(ColorRGBA(ms_GuiColor.r, ms_GuiColor.g, ms_GuiColor.b, 0.18f), IGraphics::CORNER_ALL, 6.0f);
+					Ui()->DoLabel(&DirectBadge, "LS", 8.2f, TEXTALIGN_MC);
+				}
+				Ui()->DoLabel(&TextRow, Message.m_aText, 11.4f, TEXTALIGN_TL, {.m_MaxWidth = TextRow.w});
+			}
+		}
+	}
+
+	if(!SettingsView)
+	{
+		Composer.Draw(ColorRGBA(0.040f, 0.050f, 0.082f, 0.94f), IGraphics::CORNER_ALL, 12.0f);
+		Composer.Margin(10.0f, &Composer);
+		CUIRect HintRow, InputRow;
+		Composer.HSplitTop(12.0f, &HintRow, &Composer);
+		Composer.HSplitTop(7.0f, nullptr, &Composer);
+		InputRow = Composer;
+		char aHint[160];
+		if(DirectView && DirectBlocked)
+			str_format(aHint, sizeof(aHint), "You blocked %s. Unblock to send direct messages.", m_aClientChatDirectTargetName);
+		else if(DirectView)
+			str_format(aHint, sizeof(aHint), "This LS is visible only to you and %s.", m_aClientChatDirectTargetName);
+		else
+			str_copy(aHint, "Tip: use LS on a room message to pin someone into your private list.", sizeof(aHint));
+		TextRender()->TextColor(ColorRGBA(0.82f, 0.87f, 1.0f, 0.55f));
+		Ui()->DoLabel(&HintRow, aHint, 8.9f, TEXTALIGN_ML, {.m_MaxWidth = HintRow.w});
+		TextRender()->TextColor(TextRender()->DefaultTextColor());
+		CUIRect InputBox, SendButton;
+		InputRow.VSplitRight(112.0f, &InputBox, &SendButton);
+		InputBox.VSplitRight(8.0f, &InputBox, nullptr);
+		Ui()->DoClearableEditBox(&m_ClientChatInput, &InputBox, 14.0f);
+		static CButtonContainer s_SendButton;
+		const bool AllowSend = !m_pClientChatSendTask && !DirectBlocked;
+		const char *pSendLabel = DirectBlocked ? "Blocked" : (AllowSend ? (DirectView ? "Send LS" : Localize("Send")) : Localize("Sending"));
+		if((DoButton_Menu(&s_SendButton, pSendLabel, 0, &SendButton, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, 8.0f, 0.0f, ColorRGBA(ms_GuiColor.r, ms_GuiColor.g, ms_GuiColor.b, 0.36f)) && AllowSend) ||
+			(AllowSend && m_ClientChatInput.IsActive() && Ui()->ConsumeHotkey(CUi::HOTKEY_ENTER)))
+			SendClientChatMessage();
+	}
+}
+
 void CMenus::OnInterfacesInit(CGameClient *pClient)
 {
 	CComponentInterfaces::OnInterfacesInit(pClient);
@@ -848,6 +3399,11 @@ void CMenus::OnInterfacesInit(CGameClient *pClient)
 	m_MenusStart.OnInterfacesInit(pClient);
 	m_MenusStartRClient.OnInterfacesInit(pClient);
 	m_CommunityIcons.OnInterfacesInit(pClient);
+}
+
+void CMenus::OnConsoleInit()
+{
+	Console()->Register("zz_clickgui_toggle", "", CFGFLAG_CLIENT, ConToggleZzClickGui, this, "Toggle ZZ ClickGUI overlay");
 }
 
 void CMenus::OnInit()
@@ -870,6 +3426,11 @@ void CMenus::OnInit()
 		m_ShowStart = false;
 	}
 	m_MenuPage = g_Config.m_UiPage;
+	if(m_MenuPage == PAGE_CLIENT_CHAT)
+	{
+		m_MenuPage = PAGE_SETTINGS;
+		g_Config.m_UiPage = PAGE_SETTINGS;
+	}
 
 	m_RefreshButton.Init(Ui(), -1);
 	m_ConnectButton.Init(Ui(), -1);
@@ -903,6 +3464,7 @@ void CMenus::OnInit()
 	Console()->Chain("demo_speed", ConchainDemoSpeed, this);
 
 	m_TextureBlob = Graphics()->LoadTexture("blob.png", IStorage::TYPE_ALL);
+	m_BestClientIconTexture = Graphics()->LoadTexture("bestclient.png", IStorage::TYPE_ALL);
 
 	// setup load amount
 	m_LoadingState.m_Current = 0;
@@ -2421,12 +4983,129 @@ void CMenus::OnReset()
 
 void CMenus::OnShutdown()
 {
+	if(m_pClientChatFetchTask)
+		m_pClientChatFetchTask->Abort();
+	if(m_pClientChatSendTask)
+		m_pClientChatSendTask->Abort();
+	if(m_pClientChatActionTask)
+		m_pClientChatActionTask->Abort();
+	m_pClientChatFetchTask.reset();
+	m_pClientChatSendTask.reset();
+	m_pClientChatActionTask.reset();
 	m_CommunityIcons.Shutdown();
+}
+
+namespace
+{
+float ZzClickGuiEaseOutBack(float T)
+{
+	T = std::clamp(T, 0.0f, 1.0f);
+	const float C1 = 1.70158f;
+	const float C3 = C1 + 1.0f;
+	return 1.0f + C3 * powf(T - 1.0f, 3.0f) + C1 * powf(T - 1.0f, 2.0f);
+}
+
+float ZzClickGuiSmoothStep(float T)
+{
+	T = std::clamp(T, 0.0f, 1.0f);
+	return T * T * (3.0f - 2.0f * T);
+}
+}
+
+void CMenus::RenderZzClickGuiOverlay()
+{
+	Ui()->MapScreen();
+	const float Anim = std::clamp(m_ZzClickGuiAnim, 0.0f, 1.0f);
+	if(Anim <= 0.001f)
+		return;
+	const float ShowEase = ZzClickGuiEaseOutBack(Anim);
+	const float AlphaEase = ZzClickGuiSmoothStep(Anim);
+	const float ContentEase = ZzClickGuiSmoothStep(std::clamp((Anim - 0.22f) / 0.78f, 0.0f, 1.0f));
+
+	CUIRect Screen = *Ui()->Screen();
+	Graphics()->TextureClear();
+	Graphics()->DrawRect(Screen.x, Screen.y, Screen.w, Screen.h, ColorRGBA(0.03f, 0.03f, 0.05f, 0.56f * AlphaEase), IGraphics::CORNER_ALL, 0.0f);
+
+	CUIRect Window;
+	Screen.Margin(10.0f, &Window);
+	const float MaxW = maximum(250.0f, minimum(Window.w, Screen.w * 0.67f));
+	const float MaxH = maximum(190.0f, minimum(Window.h, Screen.h * 0.78f));
+	const float Scale = 0.88f + 0.12f * ShowEase;
+	const float FinalX = Screen.x + (Screen.w - MaxW) * 0.5f;
+	const float FinalY = Screen.y + (Screen.h - MaxH) * 0.5f;
+	const float WinW = MaxW * Scale;
+	const float WinH = MaxH * Scale;
+	const float WinX = FinalX + (MaxW - WinW) * 0.5f;
+	const float WinY = FinalY + (MaxH - WinH) * 0.5f + (1.0f - ShowEase) * 10.0f;
+	Window.x = WinX;
+	Window.y = WinY;
+	Window.w = WinW;
+	Window.h = WinH;
+
+	Graphics()->DrawRect(Window.x - 1.0f, Window.y - 1.0f, Window.w + 2.0f, Window.h + 2.0f, ColorRGBA(0.16f, 0.18f, 0.22f, 0.72f * AlphaEase), IGraphics::CORNER_ALL, 13.0f);
+	Window.Draw(ColorRGBA(0.055f, 0.055f, 0.063f, 0.98f * AlphaEase), IGraphics::CORNER_ALL, 12.0f);
+
+	CUIRect Header, Content;
+	Window.HSplitTop(25.0f, &Header, &Content);
+	Header.Draw(ColorRGBA(0.094f, 0.094f, 0.106f, 0.96f * AlphaEase), IGraphics::CORNER_T, 12.0f);
+	Graphics()->DrawRect(Header.x, Header.y + Header.h - 1.0f, Header.w, 1.0f, ColorRGBA(0.345f, 0.396f, 0.949f, 0.85f * AlphaEase), IGraphics::CORNER_NONE, 0.0f);
+
+	CUIRect Sidebar, Main;
+	Content.VSplitLeft(36.0f, &Sidebar, &Main);
+	Sidebar.Draw(ColorRGBA(0.094f, 0.094f, 0.106f, (0.90f * AlphaEase) * ContentEase), IGraphics::CORNER_BL, 12.0f);
+	Main.Margin(7.0f, &Main);
+	Sidebar.Margin(5.0f, &Sidebar);
+
+	CUIRect HeaderText = Header;
+	HeaderText.VMargin(8.0f, &HeaderText);
+	Ui()->DoLabel(&HeaderText, "ZZ ClickGUI", 7.5f, TEXTALIGN_ML, {.m_MaxWidth = HeaderText.w});
+
+	CUIRect HeaderRight = HeaderText;
+	HeaderRight.VSplitLeft(HeaderText.w - 58.0f, nullptr, &HeaderRight);
+	Ui()->DoLabel(&HeaderRight, "[Insert/Esc]", 6.0f, TEXTALIGN_MR, {.m_MaxWidth = HeaderRight.w});
+
+	CUIRect SideLabel = Sidebar;
+	SideLabel.HSplitTop(16.0f, &SideLabel, &Sidebar);
+	Ui()->DoLabel(&SideLabel, "ZZ", 9.5f, TEXTALIGN_MC, {.m_MaxWidth = SideLabel.w});
+
+	CUIRect SideMode = Sidebar;
+	SideMode.HSplitBottom(16.0f, &Sidebar, &SideMode);
+	const bool HudEditActive = g_Config.m_ClZzHudEditMode != 0;
+	static CButtonContainer s_HudEditModeToggleBtn;
+	const char *pHudBtnText = HudEditActive ? "Exit" : "Edit";
+	if(DoButton_Menu(&s_HudEditModeToggleBtn, pHudBtnText, 0, &SideMode, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, 4.0f, 0.0f,
+		   HudEditActive ? ColorRGBA(0.58f, 0.23f, 0.36f, 0.92f * ContentEase) : ColorRGBA(0.345f, 0.396f, 0.949f, 0.92f * ContentEase)))
+	{
+		g_Config.m_ClZzHudEditMode = HudEditActive ? 0 : 1;
+		if(!g_Config.m_ClZzHudEditMode)
+			(void)ConfigManager()->Save();
+	}
+
+	if(ContentEase > 0.01f)
+	{
+		CUIRect AnimatedMain = Main;
+		AnimatedMain.x += (1.0f - ContentEase) * 26.0f;
+		RenderSettingsZZetClient(AnimatedMain);
+	}
+}
+
+void CMenus::ConToggleZzClickGui(IConsole::IResult *pResult, void *pUserData)
+{
+	(void)pResult;
+	CMenus *pSelf = (CMenus *)pUserData;
+	if(pSelf == nullptr || pSelf->Client()->State() != IClient::STATE_ONLINE)
+		return;
+
+	pSelf->m_ZzClickGuiActive ^= 1;
+	pSelf->Ui()->SetHotItem(nullptr);
+	pSelf->Ui()->SetActiveItem(nullptr);
+	if(pSelf->m_ZzClickGuiActive && pSelf->m_MenuActive)
+		pSelf->SetActive(false);
 }
 
 bool CMenus::OnCursorMove(float x, float y, IInput::ECursorType CursorType)
 {
-	if(!m_MenuActive)
+	if(!m_MenuActive && !m_ZzClickGuiActive && m_ZzClickGuiAnim <= 0.001f && !g_Config.m_ClZzHudEditMode)
 		return false;
 
 	Ui()->ConvertMouseMove(&x, &y, CursorType);
@@ -2437,6 +5116,45 @@ bool CMenus::OnCursorMove(float x, float y, IInput::ECursorType CursorType)
 
 bool CMenus::OnInput(const IInput::CEvent &Event)
 {
+	if((Event.m_Flags & IInput::FLAG_PRESS) != 0 &&
+		(Event.m_Key == KEY_INSERT || Event.m_Key == KEY_KP_0) &&
+		Client()->State() == IClient::STATE_ONLINE)
+	{
+		ConToggleZzClickGui(nullptr, this);
+		return true;
+	}
+
+	if(g_Config.m_ClZzHudEditMode && !m_ZzClickGuiActive && !m_MenuActive)
+	{
+		if((Event.m_Flags & IInput::FLAG_PRESS) != 0 && Event.m_Key == KEY_ESCAPE)
+		{
+			g_Config.m_ClZzHudEditMode = 0;
+			(void)ConfigManager()->Save();
+			return true;
+		}
+
+		Ui()->OnInput(Event);
+		if(Event.m_Key == KEY_MOUSE_1 || Event.m_Key == KEY_MOUSE_2 || Event.m_Key == KEY_MOUSE_3 ||
+			Event.m_Key == KEY_MOUSE_4 || Event.m_Key == KEY_MOUSE_5 ||
+			Event.m_Key == KEY_MOUSE_WHEEL_UP || Event.m_Key == KEY_MOUSE_WHEEL_DOWN)
+			return true;
+	}
+
+	if(m_ZzClickGuiActive || m_ZzClickGuiAnim > 0.001f)
+	{
+		if(m_ZzClickGuiActive && (Event.m_Flags & IInput::FLAG_PRESS) != 0 && Event.m_Key == KEY_ESCAPE)
+		{
+			m_ZzClickGuiActive = false;
+			Ui()->SetHotItem(nullptr);
+			Ui()->SetActiveItem(nullptr);
+			return true;
+		}
+
+		if(m_ZzClickGuiActive)
+			Ui()->OnInput(Event);
+		return true;
+	}
+
 	// Escape key is always handled to activate/deactivate menu
 	if((Event.m_Flags & IInput::FLAG_PRESS && Event.m_Key == KEY_ESCAPE) || IsActive())
 	{
@@ -2450,6 +5168,11 @@ void CMenus::OnStateChange(int NewState, int OldState)
 {
 	// reset active item
 	Ui()->SetActiveItem(nullptr);
+	if(NewState != IClient::STATE_ONLINE)
+	{
+		m_ZzClickGuiActive = false;
+		m_ZzClickGuiAnim = 0.0f;
+	}
 
 	if(OldState == IClient::STATE_ONLINE || OldState == IClient::STATE_OFFLINE)
 		TextRender()->DeleteTextContainer(m_MotdTextContainerIndex);
@@ -2497,6 +5220,8 @@ void CMenus::OnRender()
 	if(Client()->State() != IClient::STATE_ONLINE && Client()->State() != IClient::STATE_DEMOPLAYBACK)
 		SetActive(true);
 
+	UpdateClientChat();
+
 	if(Client()->State() == IClient::STATE_ONLINE && GameClient()->m_ServerMode == CGameClient::SERVERMODE_PUREMOD)
 	{
 		Client()->Disconnect();
@@ -2504,7 +5229,14 @@ void CMenus::OnRender()
 		PopupMessage(Localize("Disconnected"), Localize("The server is running a non-standard tuning on a pure game type."), Localize("Ok"));
 	}
 
-	if(!IsActive())
+	const float ZzGuiDt = std::clamp(Client()->RenderFrameTime(), 0.0f, 0.1f);
+	const float ZzGuiTarget = m_ZzClickGuiActive ? 1.0f : 0.0f;
+	m_ZzClickGuiAnim += (ZzGuiTarget - m_ZzClickGuiAnim) * minimum(1.0f, ZzGuiDt * 12.0f);
+	if(std::abs(m_ZzClickGuiAnim - ZzGuiTarget) < 0.001f)
+		m_ZzClickGuiAnim = ZzGuiTarget;
+	const bool ZzGuiVisible = m_ZzClickGuiActive || m_ZzClickGuiAnim > 0.001f;
+
+	if(!IsActive() && !ZzGuiVisible && !g_Config.m_ClZzHudEditMode)
 	{
 		if(Ui()->ConsumeHotkey(CUi::HOTKEY_ESCAPE))
 		{
@@ -2521,6 +5253,26 @@ void CMenus::OnRender()
 	UpdateColors();
 
 	Ui()->Update();
+
+	if(g_Config.m_ClZzHudEditMode && !IsActive() && !ZzGuiVisible)
+	{
+		Ui()->FinishCheck();
+		Ui()->ClearHotkeys();
+		return;
+	}
+
+	if(ZzGuiVisible && !IsActive())
+	{
+		Ui()->MapScreen();
+		RenderZzClickGuiOverlay();
+		Ui()->RenderPopupMenus();
+		RenderTools()->RenderCursor(Ui()->MousePos(), 24.0f);
+		if(Ui()->ConsumeHotkey(CUi::HOTKEY_ESCAPE))
+			m_ZzClickGuiActive = false;
+		Ui()->FinishCheck();
+		Ui()->ClearHotkeys();
+		return;
+	}
 
 	Render();
 
@@ -2703,6 +5455,26 @@ void CMenus::SetMenuPage(int NewPage)
 			RefreshBrowserTab(ForceRefresh);
 		}
 	}
+}
+
+void CMenus::ConToggleClientChat(IConsole::IResult *pResult, void *pUserData)
+{
+	(void)pResult;
+	CMenus *pSelf = static_cast<CMenus *>(pUserData);
+	if(pSelf == nullptr)
+		return;
+
+	if(pSelf->IsActive() && pSelf->IsClientChatPageActive())
+	{
+		pSelf->SetActive(false);
+		return;
+	}
+
+	pSelf->SetActive(true);
+	if(pSelf->Client()->State() == IClient::STATE_OFFLINE)
+		pSelf->SetMenuPage(PAGE_CLIENT_CHAT);
+	else
+		pSelf->m_GamePage = PAGE_CLIENT_CHAT;
 }
 
 void CMenus::RefreshBrowserTab(bool Force)

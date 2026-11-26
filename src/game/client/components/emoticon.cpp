@@ -288,6 +288,13 @@ void CEmoticon::Emote(int Emoticon)
 	Msg.m_Emoticon = Emoticon;
 	Client()->SendPackMsgActive(&Msg, MSGFLAG_VITAL);
 
+	if(g_Config.m_ClZzAsyncBotsMirrorEnable)
+	{
+		const int SourceId = g_Config.m_ClZzAsyncBotsMirrorClientId;
+		if(SourceId == GameClient()->m_aLocalIds[0] || SourceId == GameClient()->m_aLocalIds[1])
+			GameClient()->AsyncProxyBots().QueueEmoticonAll(Emoticon);
+	}
+
 	if(g_Config.m_ClDummyCopyMoves)
 	{
 		CMsgPacker MsgDummy(NETMSGTYPE_CL_EMOTICON, false);

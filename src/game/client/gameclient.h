@@ -31,6 +31,9 @@
 
 // components
 #include "components/background.h"
+#include "components/bestclient/3d_particles.h"
+#include "components/bestclient/magic_particles.h"
+#include "components/bestclient/orbit_aura.h"
 #include "components/binds.h"
 #include "components/broadcast.h"
 #include "components/camera.h"
@@ -92,6 +95,8 @@
 #include "components/tooltips.h"
 #include "components/touch_controls.h"
 #include "components/voting.h"
+#include "components/zz_async_proxy_bots.h"
+#include "components/zz_tas.h"
 #include "kog_ai_controller.h"
 
 #include <memory>
@@ -218,6 +223,10 @@ public:
 
 	CRaceDemo m_RaceDemo;
 	CGhost m_Ghost;
+	C3DParticles m_3DParticles;
+	CMagicParticles m_MagicParticles;
+	COrbitAura m_OrbitAura;
+	CZzTas m_ZzTas;
 
 	CTooltips m_Tooltips;
 
@@ -456,6 +465,19 @@ public:
 	int m_FentBotPlannedPathLen = 0;
 	std::array<vec2, COMPANION_MAX_PATH_POINTS_PUBLIC> m_aCompanionPath;
 	int m_CompanionPathLen = 0;
+	static constexpr int COMPANION_ROUTE_CACHE_POINTS = 96;
+	std::array<vec2, COMPANION_ROUTE_CACHE_POINTS> m_aCompanionRoutePoints;
+	int m_CompanionRouteLen = 0;
+	int m_CompanionRouteNextIndex = 0;
+	vec2 m_CompanionRouteGoal = vec2(0.0f, 0.0f);
+	vec2 m_CompanionRouteLastDummyPos = vec2(0.0f, 0.0f);
+	int m_CompanionRouteBuildTick = -1;
+	int m_CompanionRouteStuckTicks = 0;
+	int m_CompanionForceComeTicks = 0;
+	bool m_CompanionRouteHasPrevPos = false;
+	bool m_CompanionStayMode = false;
+	vec2 m_CompanionStayPos = vec2(0.0f, 0.0f);
+	int m_CompanionFrozenTicks = 0;
 	bool m_FentBotActive = false;
 	bool m_FentBotHasWaypoint = false;
 	vec2 m_FentBotWaypoint = vec2(0.0f, 0.0f);
@@ -871,6 +893,7 @@ public:
 	virtual void OnStartRound();
 	virtual void OnFlagGrab(int TeamId);
 	void OnWindowResize() override;
+	int ActiveDummyIndex() const;
 
 	void InitializeLanguage() override;
 	bool m_LanguageChanged = false;
@@ -909,7 +932,12 @@ public:
 	void SendInfo(bool Start);
 	void SendDummyInfo(bool Start) override;
 	void SendKill() const;
+	void SendDummyKill() const;
+	bool HandleCompanionChatCommand(const char *pLine);
+	void CompanionResetFollowRoute();
 	void SendReadyChange7();
+	CAsyncProxyBotManager &AsyncProxyBots() { return m_AsyncProxyBots; }
+	const CAsyncProxyBotManager &AsyncProxyBots() const { return m_AsyncProxyBots; }
 
 	void ApplyPreInputs(int Tick, bool Direct, CGameWorld &GameWorld);
 	bool GetDummyFastInput(CNetObj_PlayerInput &DummyFastInput, const CNetObj_PlayerInput *pDummyInputData, const class CCharacter *pDummyChar, int LocalTee, int DummyTee) const;
@@ -932,6 +960,7 @@ public:
 	std::array<int, NUM_DUMMIES> m_aZzAimbotGlowTargetId = {-1, -1};
 	std::array<vec2, NUM_DUMMIES> m_aZzFakeAimVisualDir = {vec2(1.0f, 0.0f), vec2(1.0f, 0.0f)};
 	std::array<bool, NUM_DUMMIES> m_aZzFakeAimVisualActive = {false, false};
+	CAsyncProxyBotManager m_AsyncProxyBots;
 	bool m_ReceivedDDNetPlayer;
 	bool m_ReceivedDDNetPlayerFinishTimes;
 	bool m_ReceivedDDNetPlayerFinishTimesMillis;

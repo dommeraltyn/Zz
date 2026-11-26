@@ -98,6 +98,7 @@ void CPlayer::Reset()
 	m_LastTargetInit = false;
 	m_TuneZone = 0;
 	m_TuneZoneOld = m_TuneZone;
+	m_PendingHubRedirect = false;
 	m_Halloween = false;
 	m_FirstPacket = true;
 
@@ -1704,7 +1705,11 @@ void CPlayer::ProcessScoreResult(CScorePlayerResult &Result)
 				{
 					const CFoxItemConfig *pCfg = GameServer()->FoxItemRegistry().FindByName(It.m_aItemName);
 					if(pCfg)
+					{
+						if(g_Config.m_SvBlockMode == 0 && pCfg->m_Type == EFoxItemType::Weapon)
+							continue;
 						pCfg->m_Apply(*this, *pCfg, -1);
+					}
 				}
 			}
 			m_PersonalMenuDirty = true;

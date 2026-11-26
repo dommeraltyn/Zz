@@ -1,0 +1,13 @@
+{
+  "name": "ddnet-sqlite-sync-service",
+  "version": "1.0.0",
+  "private": true,
+  "description": "TCP SQLite sync service for DDNet servers",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.8.1"
+  }
+}

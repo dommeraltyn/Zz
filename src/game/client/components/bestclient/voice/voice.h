@@ -177,6 +177,20 @@ private:
 		int64_t m_LastPingSendTick = 0;
 		bool m_PingInFlight = false;
 	};
+	struct CBroadcastRelayConnection
+	{
+		std::string m_ServerAddress;
+		NETADDR m_ServerAddr = NETADDR_ZEROED;
+		NETSOCKET m_Socket = nullptr;
+		bool m_HasServerAddr = false;
+		bool m_Registered = false;
+		uint16_t m_ClientVoiceId = 0;
+		uint16_t m_SendSequence = 0;
+		int64_t m_LastHelloTick = 0;
+		int64_t m_LastHeartbeatTick = 0;
+		int64_t m_LastServerPacketTick = 0;
+		bool m_HelloResetPending = false;
+	};
 
 	NETSOCKET m_Socket = nullptr;
 	NETSOCKET m_SecondarySocket = nullptr;
@@ -258,8 +272,12 @@ private:
 	std::vector<std::string> m_vOnlineServers;
 	std::vector<CVoiceServerEntry> m_vServerEntries;
 	std::vector<CButtonContainer> m_ServerRowButtons;
+	std::vector<std::string> m_vBroadcastServers;
+	std::unordered_map<std::string, CBroadcastRelayConnection> m_BroadcastRelays;
 	std::shared_ptr<CHttpRequest> m_pServerListTask = nullptr;
 	int m_SelectedServerIndex = -1;
+	int64_t m_LastBroadcastServersRefreshTick = 0;
+	char m_aSpeakerSpooferInput[16] = "";
 	std::string m_AdvertisedRoomKey;
 	int m_AdvertisedGameClientId = BestClientVoice::INVALID_GAME_CLIENT_ID - 1;
 	int m_AdvertisedTeam = std::numeric_limits<int>::min();
@@ -291,6 +309,8 @@ private:
 	CButtonContainer m_InGameOnlyButton;
 	CButtonContainer m_UseTeam0Button;
 	CButtonContainer m_EnableYourGroupButton;
+	CButtonContainer m_BroadcastEverywhereButton;
+	CButtonContainer m_SpeakerSpooferButton;
 	CButtonContainer m_ActivationModeButton;
 	CButtonContainer m_RadiusFilterButton;
 	CButtonContainer m_ReloadServerListButton;
@@ -334,6 +354,12 @@ private:
 	void ProcessServerListPing();
 	void ProcessCapture();
 	void ProcessPlayback();
+	void RefreshBroadcastServers();
+	void UpdateBroadcastRelays();
+	void ProcessBroadcastRelayNetwork(CBroadcastRelayConnection &Relay);
+	void SendBroadcastRelayHello(CBroadcastRelayConnection &Relay);
+	void SendBroadcastRelayFrame(CBroadcastRelayConnection &Relay, const uint8_t *pOpusData, int OpusSize, int Team, vec2 Position);
+	void CloseBroadcastRelays();
 	void CleanupPeers();
 	bool ShouldTransmit() const;
 	bool IsInGameOnlyBlocked() const;
@@ -346,6 +372,9 @@ private:
 	vec2 LocalPosition() const;
 	std::string CurrentRoomKey() const;
 	int LocalGameClientId() const;
+	void SyncSpeakerSpooferInputFromConfig();
+	void ApplySpeakerSpooferInputToConfig();
+	int EffectiveSpeakerClientId() const;
 	void BeginReconnect();
 	void InvalidatePeerCaches(bool MappingDirty = true, bool TalkingDirty = true);
 	void RefreshPeerCaches();

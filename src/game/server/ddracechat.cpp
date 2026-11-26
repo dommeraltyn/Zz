@@ -1302,7 +1302,32 @@ void CGameContext::ConTeam(IConsole::IResult *pResult, void *pUserData)
 	CGameContext *pSelf = (CGameContext *)pUserData;
 	if(!CheckClientId(pResult->m_ClientId))
 		return;
-	pSelf->SendChatTarget(pResult->m_ClientId, "The /team command is disabled on this server.");
+
+	if(g_Config.m_SvBlockMode != 0)
+	{
+		pSelf->SendChatTarget(pResult->m_ClientId, "The /team command is not available.");
+		return;
+	}
+
+	if(pResult->NumArguments() == 0)
+	{
+		char aBuf[128];
+		str_format(aBuf, sizeof(aBuf), "You are in team %d", pSelf->GetDDRaceTeam(pResult->m_ClientId));
+		pSelf->SendChatTarget(pResult->m_ClientId, aBuf);
+		return;
+	}
+
+	const int Team = pResult->GetInteger(0);
+	if(Team < 0)
+	{
+		pSelf->SendChatTarget(pResult->m_ClientId, "Invalid team number.");
+		return;
+	}
+
+	if(pSelf->ProcessSpamProtection(pResult->m_ClientId, false))
+		return;
+
+	pSelf->AttemptJoinTeam(pResult->m_ClientId, Team);
 }
 
 void CGameContext::ConJoin(IConsole::IResult *pResult, void *pUserData)
@@ -2714,6 +2739,11 @@ void CGameContext::ConDuel(IConsole::IResult *pResult, void *pUserData)
 	if(ClientId == -1) return;
 	CPlayer *pPlayer = pSelf->m_apPlayers[ClientId];
 	if(!pPlayer) return;
+	if(!g_Config.m_SvDuelEnabled)
+	{
+		pSelf->SendChatTarget(ClientId, "Duels are disabled on this server.");
+		return;
+	}
 
 	if(pPlayer->m_InDuel)
 	{
@@ -2771,6 +2801,11 @@ void CGameContext::ConAcceptDuel(IConsole::IResult *pResult, void *pUserData)
 	if(ClientId == -1) return;
 	CPlayer *pPlayer = pSelf->m_apPlayers[ClientId];
 	if(!pPlayer) return;
+	if(!g_Config.m_SvDuelEnabled)
+	{
+		pSelf->SendChatTarget(ClientId, "Duels are disabled on this server.");
+		return;
+	}
 
 	if(pPlayer->m_InDuel)
 	{
@@ -2837,4 +2872,23 @@ void CGameContext::ConAcceptDuel(IConsole::IResult *pResult, void *pUserData)
 	}
 
 	pSelf->StartDuel(TargetId, ClientId, Side1);
+}
+
+void CGameContext::ConHub(IConsole::IResult *pResult, void *pUserData)
+{
+	CGameContext *pSelf = (CGameContext *)pUserData;
+	const int ClientId = pResult->m_ClientId;
+	if(ClientId < 0)
+		return;
+
+	if(!g_Config.m_SvHubCommand)
+	{
+		pSelf->SendChatTarget(ClientId, "Command /hub is disabled on this server.");
+		return;
+	}
+
+	if(!pSelf->RedirectToServerHub(ClientId, true))
+	{
+		pSelf->SendChatTarget(ClientId, "Hub redirect failed.");
+	}
 }

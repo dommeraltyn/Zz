@@ -111,7 +111,9 @@ public:
 	}
 	int GetJumped() const { return m_Core.m_Jumped; }
 	int GetAttackTick() const { return m_AttackTick; }
+	void SetAttackTick(int AttackTick) { m_AttackTick = AttackTick; }
 	int GetReloadTimer() const { return m_ReloadTimer; }
+	void SetReloadTimer(int ReloadTimer) { m_ReloadTimer = ReloadTimer; }
 	int GetStrongWeakId() const { return m_StrongWeakId; }
 
 	CCharacter(CGameWorld *pGameWorld, int Id, CNetObj_Character *pChar, CNetObj_DDNetCharacter *pExtended = nullptr);

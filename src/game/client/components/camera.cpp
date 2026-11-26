@@ -48,6 +48,11 @@ CCamera::CCamera()
 	m_AutoSpecCameraZooming = false;
 	m_CanUseCameraInfo = false;
 	m_UsingAutoSpecCamera = false;
+	m_DriftTargetOffset = vec2(0.0f, 0.0f);
+	m_DriftCurrentOffset = vec2(0.0f, 0.0f);
+	m_DynamicFovCurrent = 1.0f;
+	m_DynamicFovTarget = 1.0f;
+	m_DynamicFovAppliedFactor = 1.0f;
 
 	m_aAutoSpecCameraTooltip[0] = '\0';
 }
@@ -116,6 +121,13 @@ void CCamera::ResetAutoSpecCamera()
 
 void CCamera::UpdateCamera()
 {
+	// Remove previous frame's dynamic FOV multiplier so base zoom stays stable.
+	if(m_DynamicFovAppliedFactor != 1.0f)
+	{
+		m_Zoom /= m_DynamicFovAppliedFactor;
+		m_DynamicFovAppliedFactor = 1.0f;
+	}
+
 	// use hardcoded smooth camera for spectating unless player explicitly turn it off
 	bool CanUseCameraInfo = !GameClient()->m_MultiViewActivated;
 	if(Client()->State() == IClient::STATE_DEMOPLAYBACK)
@@ -287,6 +299,69 @@ void CCamera::UpdateCamera()
 	m_aDyncamCurrentCameraOffset[g_Config.m_ClDummy] = CurrentCameraOffset;
 	m_CanUseCameraInfo = CanUseCameraInfo;
 	m_UsingAutoSpecCamera = UsingAutoSpecCamera;
+
+	const bool IsOnline = Client()->State() == IClient::STATE_ONLINE;
+	const bool IsFngServer = IsOnline && GameClient()->m_GameInfo.m_PredictFNG;
+	const bool Is0xFServer = IsOnline && str_comp_nocase(GameClient()->m_GameInfo.m_aGameType, "0xf") == 0;
+	const bool IsBlockedCameraServer = IsFngServer || Is0xFServer;
+
+	if(g_Config.m_ClZzCameraDrift &&
+		!IsBlockedCameraServer &&
+		!GameClient()->m_Snap.m_SpecInfo.m_Active)
+	{
+		// Follow predicted horizontal speed so drift aligns with local movement.
+		const vec2 PlayerVel = vec2(GameClient()->m_PredictedChar.m_Vel.x, 0.0f);
+		vec2 DriftDirection = normalize(PlayerVel);
+		if(g_Config.m_ClZzCameraDriftReverse)
+			DriftDirection *= -1.0f;
+
+		const float VelocityFactor = length(PlayerVel);
+		const float DriftMultiplier = 1.0f + (VelocityFactor / 10.0f);
+		const float DriftAmount = VelocityFactor * (g_Config.m_ClZzCameraDriftAmount / 50.0f) * DriftMultiplier;
+
+		m_DriftTargetOffset = DriftDirection * DriftAmount;
+
+		if(g_Config.m_ClZzCameraDriftSmoothness > 0)
+		{
+			const float SmoothFactor = (1.0f - (g_Config.m_ClZzCameraDriftSmoothness / 100.0f)) * 10.0f;
+			m_DriftCurrentOffset += (m_DriftTargetOffset - m_DriftCurrentOffset) * minimum(DeltaTime * SmoothFactor, 1.0f);
+		}
+		else
+			m_DriftCurrentOffset = m_DriftTargetOffset;
+
+		m_aDyncamCurrentCameraOffset[g_Config.m_ClDummy] += m_DriftCurrentOffset;
+	}
+	else
+	{
+		m_DriftTargetOffset = vec2(0.0f, 0.0f);
+		m_DriftCurrentOffset = vec2(0.0f, 0.0f);
+	}
+
+	const bool DynamicFovActive = g_Config.m_ClZzDynamicFov &&
+		!IsBlockedCameraServer &&
+		!GameClient()->m_Snap.m_SpecInfo.m_Active;
+	m_DynamicFovTarget = 1.0f;
+	if(DynamicFovActive)
+	{
+		const vec2 PlayerVel = GameClient()->m_PredictedChar.m_Vel;
+		const float VelocityFactor = length(PlayerVel);
+		const float DynamicFovMultiplier = 1.0f + (VelocityFactor / 10.0f);
+		const float DynamicFovAmount = VelocityFactor * (g_Config.m_ClZzDynamicFovAmount / 50.0f) * DynamicFovMultiplier;
+
+		m_DynamicFovTarget = std::clamp(1.0f + DynamicFovAmount / 500.0f, 1.0f, 5.0f);
+	}
+
+	if(DynamicFovActive && g_Config.m_ClZzDynamicFovSmoothness > 0)
+	{
+		const float SmoothFactor = (1.0f - (g_Config.m_ClZzDynamicFovSmoothness / 100.0f)) * 10.0f;
+		m_DynamicFovCurrent += (m_DynamicFovTarget - m_DynamicFovCurrent) * minimum(DeltaTime * SmoothFactor, 1.0f);
+	}
+	else
+		m_DynamicFovCurrent = m_DynamicFovTarget;
+
+	m_DynamicFovCurrent = maximum(1.0f, m_DynamicFovCurrent);
+	m_Zoom *= m_DynamicFovCurrent;
+	m_DynamicFovAppliedFactor = m_DynamicFovCurrent;
 }
 
 void CCamera::OnRender()
@@ -341,7 +416,9 @@ void CCamera::OnRender()
 			m_CamType = CAMTYPE_PLAYER;
 		}
 
-		if(GameClient()->m_Snap.m_SpecInfo.m_Active)
+		if(GameClient()->m_ZzTas.IsRecording() && GameClient()->m_ZzTas.IsWorldInitialized() && !GameClient()->m_Snap.m_SpecInfo.m_Active)
+			m_Center = GameClient()->m_ZzTas.GetInterpolatedPlayerPos() + m_aDyncamCurrentCameraOffset[GameClient()->m_ZzTas.GetDisplayDummyIndex()];
+		else if(GameClient()->m_Snap.m_SpecInfo.m_Active)
 			m_Center = GameClient()->m_Snap.m_SpecInfo.m_Position + m_aDyncamCurrentCameraOffset[g_Config.m_ClDummy];
 		else
 			m_Center = GameClient()->m_LocalCharacterPos + m_aDyncamCurrentCameraOffset[g_Config.m_ClDummy];
@@ -426,6 +503,11 @@ void CCamera::OnReset()
 	m_Zooming = false;
 	m_AutoSpecCameraZooming = false;
 	m_UserZoomTarget = CCamera::ZoomStepsToValue(g_Config.m_ClDefaultZoom - 10);
+	m_DriftTargetOffset = vec2(0.0f, 0.0f);
+	m_DriftCurrentOffset = vec2(0.0f, 0.0f);
+	m_DynamicFovCurrent = 1.0f;
+	m_DynamicFovTarget = 1.0f;
+	m_DynamicFovAppliedFactor = 1.0f;
 }
 
 void CCamera::ConZoomPlus(IConsole::IResult *pResult, void *pUserData)
@@ -614,7 +696,11 @@ void CCamera::SetZoom(float Target, int Smoothness, bool IsUser)
 
 bool CCamera::ZoomAllowed() const
 {
-	return true;
+	const bool DefaultZoomAllowed =
+		GameClient()->m_Snap.m_SpecInfo.m_Active ||
+		GameClient()->m_GameInfo.m_AllowZoom ||
+		Client()->State() == IClient::STATE_DEMOPLAYBACK;
+	return DefaultZoomAllowed || g_Config.m_ClZzForceZoom;
 }
 
 int CCamera::Deadzone() const

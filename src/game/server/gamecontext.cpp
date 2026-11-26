@@ -18,6 +18,7 @@
 #include <base/aio.h>
 #include <base/logger.h>
 #include <base/math.h>
+#include <base/net.h>
 #include <base/str.h>
 #include <base/system.h>
 
@@ -548,10 +549,10 @@ void CGameContext::PrepareVoteOptions(int ClientId, std::vector<std::string> &vD
 	else if(Page == 1)
 	{
 		vDescriptions.emplace_back(pPl->L("╭───────── Server Info", "╭───────── Инфо сервера"));
-		vDescriptions.emplace_back(pPl->L("│ Name: RatTee", "│ Название: RatTee"));
-		vDescriptions.emplace_back(pPl->L("│ Version: 0.3", "│ Версия: 0.3"));
-		vDescriptions.emplace_back(pPl->L("│ Created by: aarr", "│ Создатель: aarr"));
-		vDescriptions.emplace_back(pPl->L("│ Telegram: @RatTeeRUS", "│ Телеграм: @RatTeeRUS"));
+		vDescriptions.emplace_back(pPl->L("│ Name: ClEmUn Vibe", "│ Название: ClEmUn Vibe"));
+		vDescriptions.emplace_back(pPl->L("│ Version: 0.6", "│ Версия: 0.6"));
+		vDescriptions.emplace_back(pPl->L("│ Created by: aarr & ClEmUn", "│ Создатель: aarr & ClEmUn"));
+		vDescriptions.emplace_back(pPl->L("│ Telegram: @ClemunServer", "│ Телеграм: @ClemunServer"));
 		vDescriptions.emplace_back(pPl->L("│ Discord: coming soon", "│ Дискорд: скоро будет"));
 		vDescriptions.emplace_back("╰────────────────────");
 	}
@@ -561,12 +562,13 @@ void CGameContext::PrepareVoteOptions(int ClientId, std::vector<std::string> &vD
 		vDescriptions.emplace_back("│ VIP даёт:");
 		vDescriptions.emplace_back("│ - x2 Money");
 		vDescriptions.emplace_back("│ - x2 XP");
-		vDescriptions.emplace_back("│ - Все ганы");
+		vDescriptions.emplace_back("│ - Все ганы (Only block)");
 		vDescriptions.emplace_back("│ - Защита ника");
+		vDescriptions.emplace_back("│ - Вип зона");
 		vDescriptions.emplace_back("│ ");
 		vDescriptions.emplace_back("│ В будущем будут VIP эффекты и фичи.");
 		vDescriptions.emplace_back("│ ");
-		vDescriptions.emplace_back("│ Цена: 150 рублей");
+		vDescriptions.emplace_back("│ Цена: 150 рублей в месяц");
 		vDescriptions.emplace_back("│ Купить: напиши @ATH_Studio в Telegram");
 		vDescriptions.emplace_back("╰────────────────────");
 		vDescriptions.emplace_back(" ");
@@ -1267,6 +1269,11 @@ bool CGameContext::OnCallVoteVoteMenu(const CNetMsg_Cl_CallVote *pMsg, int Clien
 				}
 				if(Cfg.m_Type == EFoxItemType::Weapon)
 				{
+					if(g_Config.m_SvBlockMode == 0)
+					{
+						SendChatTarget(ClientId, pPl->L("Weapon purchases are disabled.", "Покупка оружия отключена."));
+						return true;
+					}
 					pPl->m_AccountMoney -= Cfg.m_Price;
 					Score()->AddAccountReward(pPl->m_AccountId, 0, -Cfg.m_Price);
 					Cfg.m_Apply(*pPl, Cfg, -1);
@@ -2979,6 +2986,19 @@ void CGameContext::OnTick()
 	{
 		if(pPlayer)
 			pPlayer->PostPostTick();
+	}
+
+	// Process hub redirects after world/player ticks to avoid destroying
+	// player/character objects while character code is still executing.
+	for(int i = 0; i < MAX_CLIENTS; i++)
+	{
+		CPlayer *pPlayer = m_apPlayers[i];
+		if(!pPlayer || !pPlayer->m_PendingHubRedirect)
+			continue;
+
+		pPlayer->m_PendingHubRedirect = false;
+		if(Server()->ClientIngame(i) && pPlayer->GetCharacter())
+			RedirectToServerHub(i, false);
 	}
 
 	// update voting
@@ -5899,6 +5919,11 @@ void CGameContext::OnConsoleInit()
 	Console()->Register("vip_list", "", CFGFLAG_SERVER, ConVipList, this, "List all VIP accounts with grant date and expiry");
 	Console()->Register("set_vip", "s[login] i[days]", CFGFLAG_SERVER, ConSetVip, this, "Grant VIP to account for N days (0 = remove VIP)");
 	Console()->Register("set_jetpack", "s[login] i[days]", CFGFLAG_SERVER, ConSetJetpack, this, "Grant always-on jetpack to account for N days (0 = remove)");
+	Console()->Register("killall", "?r[reason]", CFGFLAG_SERVER, ConKillAll, this, "Kill all alive players without changing their teams");
+	Console()->Register("duels", "?i['0'|'1']", CFGFLAG_SERVER, ConDuels, this, "Get/set duel command availability");
+	Console()->Register("block_mode", "?i['0'|'1']", CFGFLAG_SERVER, ConBlockMode, this, "Get/set block mode");
+	Console()->Register("tune_hub", "?i[zone]", CFGFLAG_SERVER, ConTuneHub, this, "Get/set tune zone that redirects players to sv_serverhub (-1 disables)");
+	Console()->Register("tune_hub_reset", "", CFGFLAG_SERVER, ConTuneHubReset, this, "Reset tune_hub zone to disabled (-1)");
 	Console()->Register("say", "r[message]", CFGFLAG_SERVER, ConSay, this, "Say in chat");
 	Console()->Register("set_team", "i[id] i[team-id] ?i[delay in minutes]", CFGFLAG_SERVER, ConSetTeam, this, "Set team for a player (spectators = -1, game = 0)");
 	Console()->Register("set_team_all", "i[team-id]", CFGFLAG_SERVER, ConSetTeamAll, this, "Set team for all players (spectators = -1, game = 0)");
@@ -6010,6 +6035,7 @@ void CGameContext::RegisterChatCommands()
 {
 	Console()->Register("duel", "s[player] ?s[side]", CFGFLAG_CHAT, ConDuel, this, "Challenge a player");
 	Console()->Register("accept", "?s[player]", CFGFLAG_CHAT, ConAcceptDuel, this, "Accept a duel");
+	Console()->Register("hub", "", CFGFLAG_CHAT | CFGFLAG_SERVER, ConHub, this, "Redirect to server hub");
 	Console()->Register("credits", "", CFGFLAG_CHAT | CFGFLAG_SERVER, ConCredits, this, "Shows the credits of the DDNet mod");
 	Console()->Register("rules", "", CFGFLAG_CHAT | CFGFLAG_SERVER, ConRules, this, "Shows the server rules");
 	Console()->Register("emote", "?s[emote name] i[duration in seconds]", CFGFLAG_CHAT | CFGFLAG_SERVER, ConEyeEmote, this, "Sets your tee's eye emote");
@@ -6060,7 +6086,7 @@ void CGameContext::RegisterChatCommands()
 	Console()->Register("top5points", "?i[number]", CFGFLAG_CHAT | CFGFLAG_SERVER, ConTopPoints, this, "Shows five points of the global point ladder beginning with rank i (1 by default)");
 	Console()->Register("timecp", "?r[player name]", CFGFLAG_CHAT | CFGFLAG_SERVER, ConTimeCP, this, "Set your checkpoints based on another player");
 
-	// Console()->Register("team", "?i[id]", CFGFLAG_CHAT | CFGFLAG_SERVER, ConTeam, this, "Lets you join team i (shows your team if left blank)");
+	Console()->Register("team", "?i[id]", CFGFLAG_CHAT | CFGFLAG_SERVER, ConTeam, this, "Lets you join team i (shows your team if left blank)");
 	Console()->Register("lock", "?i['0'|'1']", CFGFLAG_CHAT | CFGFLAG_SERVER, ConLock, this, "Toggle team lock so no one else can join and so the team restarts when a player dies. /lock 0 to unlock, /lock 1 to lock");
 	Console()->Register("unlock", "", CFGFLAG_CHAT | CFGFLAG_SERVER, ConUnlock, this, "Unlock a team");
 	Console()->Register("invite", "r[player name]", CFGFLAG_CHAT | CFGFLAG_SERVER, ConInvite, this, "Invite a person to a locked team");
@@ -6529,6 +6555,9 @@ void CGameContext::OnInit(const void *pPersistentData)
 	m_pConfigManager->SetGameSettingsReadOnly(false);
 
 	Console()->ExecuteFile(g_Config.m_SvResetFile, IConsole::CLIENT_ID_UNSPECIFIED);
+
+	// Always start each map with tune_hub disabled unless map settings enable it.
+	g_Config.m_SvTuneHubZone = -1;
 
 	LoadMapSettings();
 
@@ -8019,6 +8048,11 @@ void CGameContext::ConSetJetpack(IConsole::IResult *pResult, void *pUserData)
 	CGameContext *pSelf = (CGameContext *)pUserData;
 	const char *pLogin = pResult->GetString(0);
 	const int Days = pResult->GetInteger(1);
+	if(g_Config.m_SvBlockMode == 0 && Days > 0)
+	{
+		pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "admin", "block_mode=0: privileged jetpack grants are disabled");
+		return;
+	}
 	pSelf->Score()->SetJetpack(pLogin, Days);
 	for(int i = 0; i < MAX_CLIENTS; i++)
 	{
@@ -8048,6 +8082,99 @@ void CGameContext::ConSetJetpack(IConsole::IResult *pResult, void *pUserData)
 	else
 		str_format(aBuf, sizeof(aBuf), "Removed always-on jetpack from '%s'", pLogin);
 	pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "admin", aBuf);
+}
+
+bool CGameContext::RedirectToServerHub(int ClientId, bool VerboseErrors)
+{
+	if(!CheckClientId(ClientId) || !m_apPlayers[ClientId])
+		return false;
+
+	NETADDR HubAddr;
+	if(net_addr_from_str(&HubAddr, g_Config.m_SvServerhub) != 0 || HubAddr.port <= 0)
+	{
+		if(VerboseErrors)
+		{
+			char aBuf[192];
+			str_format(aBuf, sizeof(aBuf), "Invalid sv_serverhub '%s' (expected ip:port)", g_Config.m_SvServerhub);
+			SendChatTarget(ClientId, aBuf);
+		}
+		return false;
+	}
+
+	Server()->RedirectClient(ClientId, HubAddr.port);
+	return true;
+}
+
+void CGameContext::ConKillAll(IConsole::IResult *pResult, void *pUserData)
+{
+	CGameContext *pSelf = (CGameContext *)pUserData;
+	int Killed = 0;
+	for(int i = 0; i < MAX_CLIENTS; i++)
+	{
+		CPlayer *pPl = pSelf->m_apPlayers[i];
+		if(!pPl || pPl->GetTeam() == TEAM_SPECTATORS)
+			continue;
+		if(pPl->GetCharacter())
+		{
+			pPl->KillCharacter(WEAPON_GAME, false);
+			Killed++;
+		}
+	}
+
+	char aBuf[192];
+	if(pResult->NumArguments() > 0)
+	{
+		str_format(aBuf, sizeof(aBuf), "Killall: %d players killed (%s)", Killed, pResult->GetString(0));
+	}
+	else
+	{
+		str_format(aBuf, sizeof(aBuf), "Killall: %d players killed", Killed);
+	}
+	pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "admin", aBuf);
+}
+
+void CGameContext::ConDuels(IConsole::IResult *pResult, void *pUserData)
+{
+	CGameContext *pSelf = (CGameContext *)pUserData;
+	if(pResult->NumArguments() > 0)
+		g_Config.m_SvDuelEnabled = pResult->GetInteger(0) ? 1 : 0;
+
+	char aBuf[96];
+	str_format(aBuf, sizeof(aBuf), "duels: %s", g_Config.m_SvDuelEnabled ? "enabled" : "disabled");
+	pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "admin", aBuf);
+}
+
+void CGameContext::ConBlockMode(IConsole::IResult *pResult, void *pUserData)
+{
+	CGameContext *pSelf = (CGameContext *)pUserData;
+	if(pResult->NumArguments() > 0)
+		g_Config.m_SvBlockMode = pResult->GetInteger(0) ? 1 : 0;
+
+	char aBuf[96];
+	str_format(aBuf, sizeof(aBuf), "block_mode: %d", g_Config.m_SvBlockMode);
+	pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "admin", aBuf);
+}
+
+void CGameContext::ConTuneHub(IConsole::IResult *pResult, void *pUserData)
+{
+	CGameContext *pSelf = (CGameContext *)pUserData;
+	if(pResult->NumArguments() > 0)
+		g_Config.m_SvTuneHubZone = std::clamp(pResult->GetInteger(0), -1, 255);
+
+	char aBuf[160];
+	if(g_Config.m_SvTuneHubZone < 0)
+		str_format(aBuf, sizeof(aBuf), "tune_hub: disabled (zone = %d)", g_Config.m_SvTuneHubZone);
+	else
+		str_format(aBuf, sizeof(aBuf), "tune_hub: enabled for zone %d -> %s", g_Config.m_SvTuneHubZone, g_Config.m_SvServerhub);
+	pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "admin", aBuf);
+}
+
+void CGameContext::ConTuneHubReset(IConsole::IResult *pResult, void *pUserData)
+{
+	(void)pResult;
+	CGameContext *pSelf = (CGameContext *)pUserData;
+	g_Config.m_SvTuneHubZone = -1;
+	pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "admin", "tune_hub: disabled (zone = -1)");
 }
 
 void CGameContext::ConVipList(IConsole::IResult *pResult, void *pUserData)

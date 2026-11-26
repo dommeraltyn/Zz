@@ -214,9 +214,39 @@ int CClient::SendMsgActive(CMsgPacker *pMsg, int Flags)
 
 void CClient::SendTClientInfo(int Conn)
 {
-	CMsgPacker Msg(NETMSG_IAMTATER, true);
-	Msg.AddString(TCLIENT_VERSION " built on " __DATE__ ", " __TIME__);
-	SendMsg(Conn, &Msg, MSGFLAG_VITAL);
+	int IdentityMsg = 0;
+	switch(g_Config.m_ClZzNetIdentity)
+	{
+	case 1: IdentityMsg = NETMSG_IAM_QXD; break;
+	case 2: IdentityMsg = NETMSG_IAMTATER; break;
+	case 3: IdentityMsg = NETMSG_IAM_CACTUS; break;
+	case 4: IdentityMsg = NETMSG_IAM_AIODOB; break;
+	case 5: IdentityMsg = NETMSG_IAM_FEX; break;
+	case 6: IdentityMsg = NETMSG_IAM_STA; break;
+	case 7: IdentityMsg = NETMSG_IAM_PULSE; break;
+	case 8: IdentityMsg = NETMSG_IAM_SCLIENT; break;
+	case 9: IdentityMsg = NETMSG_IAM_CHILLERBOT; break;
+	case 10: IdentityMsg = NETMSG_IAM_KOSHKA; break;
+	case 11: IdentityMsg = NETMSG_IAM_RUSHIE; break;
+	case 12: IdentityMsg = NETMSG_IAM_DUCKCLIENT; break;
+	case 13: IdentityMsg = NETMSG_IAM_AXIS; break;
+	case 14: IdentityMsg = NETMSG_IAM_KAIZO; break;
+	case 15: IdentityMsg = NETMSG_IAM_JSCLIENT; break;
+	case 16: IdentityMsg = NETMSG_IAM_NOFIS; break;
+	default: IdentityMsg = 0; break; // ddnet mode: no IAM message
+	}
+
+	if(IdentityMsg != 0)
+	{
+		CMsgPacker Msg(IdentityMsg, true);
+		Msg.AddString(GameClient()->DDNetVersionStr());
+		SendMsg(Conn, &Msg, MSGFLAG_VITAL);
+	}
+
+	// Legacy TClient identity packet (disabled by default):
+	// CMsgPacker Msg(NETMSG_IAMTATER, true);
+	// Msg.AddString(TCLIENT_VERSION " built on " __DATE__ ", " __TIME__);
+	// SendMsg(Conn, &Msg, MSGFLAG_VITAL);
 }
 
 void CClient::SendInfo(int Conn)
@@ -406,42 +436,14 @@ void CClient::SendInput()
 				Msg.AddInt(m_aPredTick[g_Config.m_ClDummy]);
 				Msg.AddInt(Size);
 
-				// Pack target as normalized direction, so the server always receives default-distance aim.
-				const int TargetXOffset = offsetof(CNetObj_PlayerInput, m_TargetX) / sizeof(int);
-				const int TargetYOffset = offsetof(CNetObj_PlayerInput, m_TargetY) / sizeof(int);
 				const int FlagsOffset = offsetof(CNetObj_PlayerInput, m_PlayerFlags) / sizeof(int);
-				const bool SpecCamInput = (m_aInputs[i][m_aCurrentInput[i]].m_aData[FlagsOffset] & PLAYERFLAG_SPEC_CAM) != 0;
-				int PackedTargetX = 1;
-				int PackedTargetY = 0;
-				if(!SpecCamInput)
-				{
-					vec2 Aim((float)m_aInputs[i][m_aCurrentInput[i]].m_aData[TargetXOffset], (float)m_aInputs[i][m_aCurrentInput[i]].m_aData[TargetYOffset]);
-					if(length(Aim) < 0.001f)
-						Aim = vec2(1.0f, 0.0f);
-					Aim = normalize(Aim) * 1000.0f;
-					PackedTargetX = round_to_int(Aim.x);
-					PackedTargetY = round_to_int(Aim.y);
-					if(PackedTargetX == 0 && PackedTargetY == 0)
-						PackedTargetX = 1;
-				}
-				else
-				{
-					PackedTargetX = m_aInputs[i][m_aCurrentInput[i]].m_aData[TargetXOffset];
-					PackedTargetY = m_aInputs[i][m_aCurrentInput[i]].m_aData[TargetYOffset];
-				}
 
 				for(int k = 0; k < Size / 4; k++)
 				{
-					int PackedValue = m_aInputs[i][m_aCurrentInput[i]].m_aData[k];
-					if(k == TargetXOffset)
-						PackedValue = PackedTargetX;
-					else if(k == TargetYOffset)
-						PackedValue = PackedTargetY;
-
 					if(k == FlagsOffset && IsSixup())
-						Msg.AddInt(PlayerFlags_SixToSeven(PackedValue));
+						Msg.AddInt(PlayerFlags_SixToSeven(m_aInputs[i][m_aCurrentInput[i]].m_aData[k]));
 					else
-						Msg.AddInt(PackedValue);
+						Msg.AddInt(m_aInputs[i][m_aCurrentInput[i]].m_aData[k]);
 				}
 
 				SendMsg(i, &Msg, MSGFLAG_FLUSH);
@@ -3225,41 +3227,14 @@ void CClient::FlushDelayedInputs()
 		Msg.AddInt(Delayed.m_PredTick);
 		Msg.AddInt(Delayed.m_Size);
 
-		const int TargetXOffset = offsetof(CNetObj_PlayerInput, m_TargetX) / sizeof(int);
-		const int TargetYOffset = offsetof(CNetObj_PlayerInput, m_TargetY) / sizeof(int);
 		const int FlagsOffset = offsetof(CNetObj_PlayerInput, m_PlayerFlags) / sizeof(int);
-		const bool SpecCamInput = (Delayed.m_aData[FlagsOffset] & PLAYERFLAG_SPEC_CAM) != 0;
-		int PackedTargetX = 1;
-		int PackedTargetY = 0;
-		if(!SpecCamInput)
-		{
-			vec2 Aim((float)Delayed.m_aData[TargetXOffset], (float)Delayed.m_aData[TargetYOffset]);
-			if(length(Aim) < 0.001f)
-				Aim = vec2(1.0f, 0.0f);
-			Aim = normalize(Aim) * 1000.0f;
-			PackedTargetX = round_to_int(Aim.x);
-			PackedTargetY = round_to_int(Aim.y);
-			if(PackedTargetX == 0 && PackedTargetY == 0)
-				PackedTargetX = 1;
-		}
-		else
-		{
-			PackedTargetX = Delayed.m_aData[TargetXOffset];
-			PackedTargetY = Delayed.m_aData[TargetYOffset];
-		}
 
 		for(int k = 0; k < Delayed.m_Size / 4; k++)
 		{
-			int PackedValue = Delayed.m_aData[k];
-			if(k == TargetXOffset)
-				PackedValue = PackedTargetX;
-			else if(k == TargetYOffset)
-				PackedValue = PackedTargetY;
-
 			if(k == FlagsOffset && IsSixup())
-				Msg.AddInt(PlayerFlags_SixToSeven(PackedValue));
+				Msg.AddInt(PlayerFlags_SixToSeven(Delayed.m_aData[k]));
 			else
-				Msg.AddInt(PackedValue);
+				Msg.AddInt(Delayed.m_aData[k]);
 		}
 
 		SendMsg(Delayed.m_Conn, &Msg, MSGFLAG_FLUSH);

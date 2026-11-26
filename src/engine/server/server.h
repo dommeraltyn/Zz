@@ -262,6 +262,10 @@ public:
 	unsigned m_aCurrentMapCrc[NUM_MAP_TYPES];
 	unsigned char *m_apCurrentMapData[NUM_MAP_TYPES];
 	unsigned int m_aCurrentMapSize[NUM_MAP_TYPES];
+	SHA256_DIGEST m_aCapMapSha256[NUM_MAP_TYPES];
+	unsigned m_aCapMapCrc[NUM_MAP_TYPES];
+	unsigned char *m_apCapMapData[NUM_MAP_TYPES];
+	unsigned int m_aCapMapSize[NUM_MAP_TYPES];
 	char m_aMapDownloadUrl[256];
 
 	CDemoRecorder m_aDemoRecorder[NUM_RECORDERS];
@@ -350,7 +354,7 @@ public:
 	void SendRconType(int ClientId, bool UsernameReq);
 	void SendCapabilities(int ClientId);
 	void SendMap(int ClientId);
-	void SendMapData(int ClientId, int Chunk);
+	void SendMapData(int ClientId, int Chunk, bool Flush = true);
 	void SendMapReload(int ClientId);
 	void SendConnectionReady(int ClientId);
 	void SendRconLine(int ClientId, const char *pLine);
@@ -391,6 +395,8 @@ public:
 	void AddCapTrustedIp(const NETADDR *pAddr, int64_t ExpiresAt);
 	void SaveCapTrustedIp(const char *pIp, int64_t ExpiresAt);
 	void PrepareClientCapChallenge(int ClientId);
+	bool UseCapMapForClient(int ClientId) const;
+	bool LoadCapMapData(int MapType, const char *pPath, const char *pLogScope);
 	const char *ClientMapNameForSend(int ClientId);
 
 	class CCache

@@ -3,6 +3,7 @@
 
 #include "effects.h"
 
+#include <base/color.h>
 #include <base/time.h>
 
 #include <engine/demo.h>
@@ -15,6 +16,9 @@
 #include <game/client/components/particles.h>
 #include <game/client/components/sounds.h>
 #include <game/client/gameclient.h>
+
+#include <algorithm>
+#include <cmath>
 
 CEffects::CEffects()
 {
@@ -391,22 +395,92 @@ void CEffects::Explosion(vec2 Pos, float Alpha)
 	}
 }
 
-void CEffects::HammerHit(vec2 Pos, float Alpha, float Volume)
+void CEffects::HammerHit(vec2 Pos, float Alpha, float Volume, int PreferredClientId)
 {
-	// add the explosion
+	// add the default explosion effect (optional)
 	CParticle p;
-	p.SetDefault();
-	p.m_Spr = SPRITE_PART_HIT01;
-	p.m_Pos = Pos;
-	p.m_LifeSpan = 0.3f;
-	p.m_StartSize = 120.0f;
-	p.m_EndSize = 0.0f;
-	p.m_Rot = random_angle();
-	p.m_Color.a = Alpha;
-	p.m_StartAlpha = Alpha;
-	GameClient()->m_Particles.Add(CParticles::GROUP_EXPLOSIONS, &p);
+	if(!g_Config.m_ClZzHammerHitParticlesHideDefaultHitEffect)
+	{
+		p.SetDefault();
+		p.m_Spr = SPRITE_PART_HIT01;
+		p.m_Pos = Pos;
+		p.m_LifeSpan = 0.3f;
+		p.m_StartSize = 120.0f;
+		p.m_EndSize = 0.0f;
+		p.m_Rot = random_angle();
+		p.m_Color.a = Alpha;
+		p.m_StartAlpha = Alpha;
+		GameClient()->m_Particles.Add(CParticles::GROUP_EXPLOSIONS, &p);
+	}
 	if(g_Config.m_SndGame)
 		GameClient()->m_Sounds.PlayAt(CSounds::CHN_WORLD, SOUND_HAMMER_HIT, Volume, Pos);
+
+	if(!g_Config.m_ClZzHammerHitParticles)
+		return;
+
+	const int Count = std::clamp(g_Config.m_ClZzHammerHitParticlesCount, 1, 80);
+	const float BaseSize = std::clamp((float)g_Config.m_ClZzHammerHitParticlesSize, 2.0f, 36.0f);
+	const float Speed = std::clamp((float)g_Config.m_ClZzHammerHitParticlesSpeed, 20.0f, 1200.0f);
+	const float Life = std::clamp(g_Config.m_ClZzHammerHitParticlesLifetime / 1000.0f, 0.10f, 2.50f);
+	const float BaseAlpha = std::clamp(g_Config.m_ClZzHammerHitParticlesAlpha / 100.0f, 0.01f, 1.0f) * Alpha;
+	const int Type = std::clamp(g_Config.m_ClZzHammerHitParticlesType, 1, 3);
+	const int ColorMode = std::clamp(g_Config.m_ClZzHammerHitParticlesColorMode, 1, 2);
+	vec2 SpawnCenter = Pos;
+	float BestDistSq = 160.0f * 160.0f;
+	const int LocalId = GameClient()->m_Snap.m_LocalClientId;
+	for(int ClientId = 0; ClientId < MAX_CLIENTS; ClientId++)
+	{
+		if(!GameClient()->m_Snap.m_aCharacters[ClientId].m_Active || !GameClient()->m_aClients[ClientId].m_Active)
+			continue;
+		if(in_range(PreferredClientId, MAX_CLIENTS - 1) && ClientId != PreferredClientId)
+			continue;
+		const vec2 CharPos = vec2(
+			(float)GameClient()->m_Snap.m_aCharacters[ClientId].m_Cur.m_X,
+			(float)GameClient()->m_Snap.m_aCharacters[ClientId].m_Cur.m_Y);
+		const vec2 Delta = CharPos - Pos;
+		const float DistSq = Delta.x * Delta.x + Delta.y * Delta.y;
+		if(ClientId == LocalId && DistSq < 36.0f * 36.0f)
+			continue;
+		if(DistSq < BestDistSq)
+		{
+			BestDistSq = DistSq;
+			SpawnCenter = CharPos;
+		}
+	}
+
+	for(int i = 0; i < Count; i++)
+	{
+		CParticle Fx;
+		Fx.SetDefault();
+		Fx.m_Pos = SpawnCenter + random_direction() * random_float(4.0f, 14.0f);
+		const vec2 RandomDir = normalize(vec2(random_float(-1.0f, 1.0f), random_float(-1.2f, -0.2f)));
+		Fx.m_Vel = RandomDir * random_float(Speed * 0.40f, Speed);
+		Fx.m_LifeSpan = Life * random_float(0.85f, 1.20f);
+		Fx.m_StartSize = BaseSize * random_float(0.80f, 1.30f);
+		Fx.m_EndSize = Fx.m_StartSize * random_float(0.40f, 0.65f);
+		Fx.m_Rot = random_angle();
+		Fx.m_Rotspeed = random_float(-7.0f, 7.0f);
+		Fx.m_Gravity = random_float(680.0f, 980.0f);
+		Fx.m_Friction = 0.83f;
+		Fx.m_UseAlphaFading = true;
+		Fx.m_StartAlpha = BaseAlpha;
+		Fx.m_EndAlpha = 0.0f;
+		Fx.m_Collides = false;
+		const int FxType = Type == 3 ? ((i % 2) + 1) : Type;
+		const bool IsExtraSprite = true;
+		Fx.m_Spr = FxType == 2 ? SPRITE_PART_SPARKLE : SPRITE_PART_HECTAGON;
+
+		if(ColorMode == 1)
+		{
+			Fx.m_Color = color_cast<ColorRGBA>(ColorHSLA(g_Config.m_ClZzHammerHitParticlesColor));
+		}
+		else
+		{
+			Fx.m_Color = color_cast<ColorRGBA>(ColorHSLA(std::fmod(Client()->LocalTime() * 0.25f + (float)i * 0.071f, 1.0f), 0.90f, 0.64f, 1.0f));
+		}
+		Fx.m_Color.a = BaseAlpha;
+		GameClient()->m_Particles.Add(IsExtraSprite ? CParticles::GROUP_EXTRA : CParticles::GROUP_GENERAL, &Fx);
+	}
 }
 
 void CEffects::OnRender()

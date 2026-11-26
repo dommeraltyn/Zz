@@ -234,7 +234,22 @@ void CMenus::RenderServerbrowserServerList(CUIRect View, bool &WasListboxItemAct
 		}
 		else if(Col.m_Id == COL_BESTCLIENT)
 		{
-			Ui()->DoLabel(&Col.m_Rect, "BC", 9.0f, TEXTALIGN_MC);
+			if(g_Config.m_ClZzBestclientShowInBrowser && m_BestClientIconTexture.IsValid())
+			{
+				CUIRect IconRect = Col.m_Rect;
+				IconRect.Margin(4.0f, &IconRect);
+				const float IconSide = minimum(IconRect.w, IconRect.h);
+				IconRect.x += (IconRect.w - IconSide) * 0.5f;
+				IconRect.y += (IconRect.h - IconSide) * 0.5f;
+				IconRect.w = IconSide;
+				IconRect.h = IconSide;
+				Graphics()->TextureSet(m_BestClientIconTexture);
+				Graphics()->QuadsBegin();
+				Graphics()->SetColor(1.0f, 1.0f, 1.0f, 1.0f);
+				IGraphics::CQuadItem Quad(IconRect.x, IconRect.y, IconRect.w, IconRect.h);
+				Graphics()->QuadsDrawTL(&Quad, 1);
+				Graphics()->QuadsEnd();
+			}
 		}
 	}
 
@@ -471,13 +486,32 @@ void CMenus::RenderServerbrowserServerList(CUIRect View, bool &WasListboxItemAct
 			}
 			else if(Id == COL_BESTCLIENT)
 			{
-				const int NumBestClientPlayers = GameClient()->m_ZzBestClientPresence.CountBestClientPlayersOnServer(pItem);
+				const int NumBestClientPlayers = g_Config.m_ClZzBestclientShowInBrowser ? GameClient()->m_ZzBestClientPresence.CountBestClientPlayersOnServer(pItem) : 0;
 				if(NumBestClientPlayers > 0)
 				{
-					str_format(aTemp, sizeof(aTemp), "BC%d", NumBestClientPlayers);
-					TextRender()->TextColor(1.0f, 0.82f, 0.25f, 1.0f);
-					Ui()->DoLabelStreamed(*pUiElement->Rect(UI_ELEM_BESTCLIENT_ICON), &Button, aTemp, 9.0f, TEXTALIGN_MC);
-					TextRender()->TextColor(TextRender()->DefaultTextColor());
+					CUIRect IconRect = Button;
+					IconRect.Margin(3.0f, &IconRect);
+					const float IconSide = minimum(IconRect.w, IconRect.h);
+					IconRect.x += (IconRect.w - IconSide) * 0.5f;
+					IconRect.y += (IconRect.h - IconSide) * 0.5f;
+					IconRect.w = IconSide;
+					IconRect.h = IconSide;
+					if(m_BestClientIconTexture.IsValid())
+					{
+						Graphics()->TextureSet(m_BestClientIconTexture);
+						Graphics()->QuadsBegin();
+						Graphics()->SetColor(1.0f, 1.0f, 1.0f, 1.0f);
+						IGraphics::CQuadItem Quad(IconRect.x, IconRect.y, IconRect.w, IconRect.h);
+						Graphics()->QuadsDrawTL(&Quad, 1);
+						Graphics()->QuadsEnd();
+					}
+					if(NumBestClientPlayers > 1)
+					{
+						str_format(aTemp, sizeof(aTemp), "%d", NumBestClientPlayers);
+						TextRender()->TextColor(1.0f, 0.82f, 0.25f, 1.0f);
+						Ui()->DoLabel(&Button, aTemp, 8.0f, TEXTALIGN_MR);
+						TextRender()->TextColor(TextRender()->DefaultTextColor());
+					}
 				}
 			}
 			else if(Id == COL_PLAYERS)
@@ -1445,24 +1479,23 @@ void CMenus::RenderServerbrowserInfoScoreboard(CUIRect View, const CServerInfo *
 			});
 		if(!Printed)
 			TextRender()->TextEx(&NameCursor, pName, -1);
-		if(GameClient()->m_ZzBestClientPresence.IsBestClientPlayerOnServer(pSelectedServer, CurrentClient.m_aName))
+		if(g_Config.m_ClZzBestclientShowInBrowser && GameClient()->m_ZzBestClientPresence.IsBestClientPlayerOnServer(pSelectedServer, CurrentClient.m_aName))
 		{
-			const float IconSize = FontSize * 0.9f;
-			const float IconSpacing = 4.0f;
+			const float IconSize = maximum(8.0f, FontSize - 2.0f);
 			CUIRect IconRect;
-			IconRect.x = NameCursor.m_X + IconSpacing;
+			IconRect.x = NameCursor.m_X + 4.0f;
 			IconRect.y = Name.y + (Name.h - IconSize) / 2.0f;
 			IconRect.w = IconSize;
 			IconRect.h = IconSize;
-
-			Graphics()->TextureSet(g_pData->m_aImages[IMAGE_BCICON].m_Id);
-			Graphics()->QuadsBegin();
-			Graphics()->SetColor(1.0f, 0.82f, 0.25f, 1.0f);
-			Graphics()->QuadsSetSubset(0.0f, 0.0f, 1.0f, 1.0f);
-			IGraphics::CQuadItem Quad(IconRect.x, IconRect.y, IconRect.w, IconRect.h);
-			Graphics()->QuadsDrawTL(&Quad, 1);
-			Graphics()->QuadsEnd();
-			Graphics()->SetColor(1.0f, 1.0f, 1.0f, 1.0f);
+			if(m_BestClientIconTexture.IsValid())
+			{
+				Graphics()->TextureSet(m_BestClientIconTexture);
+				Graphics()->QuadsBegin();
+				Graphics()->SetColor(1.0f, 1.0f, 1.0f, 1.0f);
+				IGraphics::CQuadItem Quad(IconRect.x, IconRect.y, IconRect.w, IconRect.h);
+				Graphics()->QuadsDrawTL(&Quad, 1);
+				Graphics()->QuadsEnd();
+			}
 		}
 
 		// clan

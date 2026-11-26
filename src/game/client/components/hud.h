@@ -11,6 +11,8 @@
 
 #include <game/client/component.h>
 
+#include <vector>
+
 struct SScoreInfo
 {
 	SScoreInfo()
@@ -45,6 +47,13 @@ struct SScoreInfo
 
 class CHud : public CComponent
 {
+	struct SZzToggleNotification
+	{
+		char m_aFeature[48];
+		bool m_Enabled = false;
+		int64_t m_StartTime = 0;
+	};
+
 	float m_Width, m_Height;
 
 	int m_HudQuadContainerIndex;
@@ -119,6 +128,7 @@ class CHud : public CComponent
 	float m_ZzIslandY = 0.0f;
 	float m_ZzIslandW = 0.0f;
 	float m_ZzIslandH = 0.0f;
+	std::vector<SZzToggleNotification> m_vZzToggleNotifications;
 
 	static constexpr float MOVEMENT_INFORMATION_LINE_HEIGHT = 8.0f;
 
@@ -132,6 +142,7 @@ public:
 	void OnRender() override;
 	void OnInit() override;
 	void OnNewSnapshot() override;
+	void PushZzToggleNotification(const char *pFeatureName, bool Enabled);
 
 	// DDRace
 

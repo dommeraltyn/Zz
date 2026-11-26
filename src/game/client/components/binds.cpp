@@ -271,6 +271,8 @@ void CBinds::SetDefaults()
 	Bind(KEY_TAB, "+scoreboard");
 	Bind(KEY_EQUALS, "+statboard");
 	Bind(KEY_F10, "screenshot");
+	Bind(KEY_INSERT, "zz_clickgui_toggle");
+	Bind(KEY_HOME, "zz_hud_edit_toggle");
 
 	Bind(KEY_A, "+left");
 	Bind(KEY_D, "+right");
@@ -328,12 +330,16 @@ void CBinds::OnConsoleInit()
 		Bind(g_Config.m_ClZzAvoidToggleKey, "+zz_avoid_toggle", false, g_Config.m_ClZzAvoidToggleMod);
 	if(g_Config.m_ClZzSaveInBlockKey >= KEY_FIRST && g_Config.m_ClZzSaveInBlockKey < KEY_LAST)
 		Bind(g_Config.m_ClZzSaveInBlockKey, "+zz_tile_aimbot", false, g_Config.m_ClZzSaveInBlockMod);
+	if(g_Config.m_ClZzAimbotAutoHookPlayersKey >= KEY_FIRST && g_Config.m_ClZzAimbotAutoHookPlayersKey < KEY_LAST)
+		Bind(g_Config.m_ClZzAimbotAutoHookPlayersKey, "+zz_auto_hook_players", false, g_Config.m_ClZzAimbotAutoHookPlayersMod);
 	if(g_Config.m_ClZzFentBotWaypointKey >= KEY_FIRST && g_Config.m_ClZzFentBotWaypointKey < KEY_LAST)
 		Bind(g_Config.m_ClZzFentBotWaypointKey, "+zz_fentbot_waypoint", false, g_Config.m_ClZzFentBotWaypointMod);
 	if(g_Config.m_ClZzBalanceBotKey >= KEY_FIRST && g_Config.m_ClZzBalanceBotKey < KEY_LAST)
 		Bind(g_Config.m_ClZzBalanceBotKey, "+zz_balance_bot_toggle", false, g_Config.m_ClZzBalanceBotMod);
 	if(g_Config.m_ClZzFakeLagKey >= KEY_FIRST && g_Config.m_ClZzFakeLagKey < KEY_LAST)
 		Bind(g_Config.m_ClZzFakeLagKey, "+zz_fake_lag_toggle", false, g_Config.m_ClZzFakeLagMod);
+	if(g_Config.m_ClZzFlyAutoTripleflyToggleKey >= KEY_FIRST && g_Config.m_ClZzFlyAutoTripleflyToggleKey < KEY_LAST)
+		Bind(g_Config.m_ClZzFlyAutoTripleflyToggleKey, "+zz_fly_auto_triplefly_toggle", false, g_Config.m_ClZzFlyAutoTripleflyToggleMod);
 }
 
 void CBinds::ConBind(IConsole::IResult *pResult, void *pUserData)

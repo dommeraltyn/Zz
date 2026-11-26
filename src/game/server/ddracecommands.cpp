@@ -282,6 +282,11 @@ void CGameContext::ConLaser(IConsole::IResult *pResult, void *pUserData)
 void CGameContext::ConJetpack(IConsole::IResult *pResult, void *pUserData)
 {
 	CGameContext *pSelf = (CGameContext *)pUserData;
+	if(g_Config.m_SvBlockMode == 0)
+	{
+		pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "chatresp", "block_mode=0: jetpack grants are disabled");
+		return;
+	}
 	CCharacter *pChr = pSelf->GetPlayerChar(pResult->m_ClientId);
 	if(pChr)
 		pChr->SetJetpack(true);
@@ -399,6 +404,12 @@ void CGameContext::ModifyWeapons(IConsole::IResult *pResult, void *pUserData,
 	{
 		pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "info",
 			"invalid weapon id");
+		return;
+	}
+
+	if(!Remove && g_Config.m_SvBlockMode == 0)
+	{
+		pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "chatresp", "block_mode=0: privileged weapon grants are disabled");
 		return;
 	}
 

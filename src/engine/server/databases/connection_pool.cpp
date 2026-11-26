@@ -4,10 +4,12 @@
 
 #include <base/system.h>
 #include <base/thread.h>
+#include <base/math.h>
 
 #include <engine/console.h>
 #include <engine/shared/config.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <iterator>
@@ -121,25 +123,46 @@ CSqlExecData::CSqlExecData(IConsole *pConsole, CDbConnectionPool::Mode m) :
 	m_Ptr.m_Print.m_Mode = m;
 }
 
+bool CDbConnectionPool::Enqueue(std::unique_ptr<CSqlExecData> pQuery)
+{
+	const int QueueCapacity = (int)std::size(m_pShared->m_aQueries);
+	if(pQuery->m_Mode == CSqlExecData::READ_ACCESS || pQuery->m_Mode == CSqlExecData::WRITE_ACCESS)
+	{
+		const int MaxPending = std::clamp(g_Config.m_SvSqliteSyncMaxPending, 1, QueueCapacity - 1);
+		const int Pending = m_pShared->m_PendingQueries.load();
+		if(Pending >= MaxPending)
+		{
+			dbg_msg("sql", "query queue full (%d/%d), rejecting '%s'", Pending, MaxPending, pQuery->m_pName);
+			return false;
+		}
+	}
+
+	if(m_pShared->m_aQueries[m_InsertIdx] != nullptr)
+	{
+		dbg_msg("sql", "query queue slot %d is unexpectedly occupied, rejecting '%s'", m_InsertIdx, pQuery->m_pName);
+		return false;
+	}
+
+	m_pShared->m_aQueries[m_InsertIdx] = std::move(pQuery);
+	m_InsertIdx = (m_InsertIdx + 1) % QueueCapacity;
+	m_pShared->m_PendingQueries.fetch_add(1);
+	m_pShared->m_NumBackup.Signal();
+	return true;
+}
+
 void CDbConnectionPool::Print(IConsole *pConsole, Mode DatabaseMode)
 {
-	m_pShared->m_aQueries[m_InsertIdx++] = std::make_unique<CSqlExecData>(pConsole, DatabaseMode);
-	m_InsertIdx %= std::size(m_pShared->m_aQueries);
-	m_pShared->m_NumBackup.Signal();
+	Enqueue(std::make_unique<CSqlExecData>(pConsole, DatabaseMode));
 }
 
 void CDbConnectionPool::RegisterSqliteDatabase(Mode DatabaseMode, const char aFilename[64])
 {
-	m_pShared->m_aQueries[m_InsertIdx++] = std::make_unique<CSqlExecData>(DatabaseMode, aFilename);
-	m_InsertIdx %= std::size(m_pShared->m_aQueries);
-	m_pShared->m_NumBackup.Signal();
+	Enqueue(std::make_unique<CSqlExecData>(DatabaseMode, aFilename));
 }
 
 void CDbConnectionPool::RegisterMysqlDatabase(Mode DatabaseMode, const CMysqlConfig *pMysqlConfig)
 {
-	m_pShared->m_aQueries[m_InsertIdx++] = std::make_unique<CSqlExecData>(DatabaseMode, pMysqlConfig);
-	m_InsertIdx %= std::size(m_pShared->m_aQueries);
-	m_pShared->m_NumBackup.Signal();
+	Enqueue(std::make_unique<CSqlExecData>(DatabaseMode, pMysqlConfig));
 }
 
 void CDbConnectionPool::Execute(
@@ -147,9 +170,14 @@ void CDbConnectionPool::Execute(
 	std::unique_ptr<const ISqlData> pSqlRequestData,
 	const char *pName)
 {
-	m_pShared->m_aQueries[m_InsertIdx++] = std::make_unique<CSqlExecData>(pFunc, std::move(pSqlRequestData), pName);
-	m_InsertIdx %= std::size(m_pShared->m_aQueries);
-	m_pShared->m_NumBackup.Signal();
+	std::shared_ptr<ISqlResult> pResult;
+	if(pSqlRequestData != nullptr)
+		pResult = pSqlRequestData->m_pResult;
+	if(!Enqueue(std::make_unique<CSqlExecData>(pFunc, std::move(pSqlRequestData), pName)) && pResult != nullptr)
+	{
+		pResult->m_Success = false;
+		pResult->m_Completed.store(true);
+	}
 }
 
 void CDbConnectionPool::ExecuteWrite(
@@ -157,9 +185,14 @@ void CDbConnectionPool::ExecuteWrite(
 	std::unique_ptr<const ISqlData> pSqlRequestData,
 	const char *pName)
 {
-	m_pShared->m_aQueries[m_InsertIdx++] = std::make_unique<CSqlExecData>(pFunc, std::move(pSqlRequestData), pName);
-	m_InsertIdx %= std::size(m_pShared->m_aQueries);
-	m_pShared->m_NumBackup.Signal();
+	std::shared_ptr<ISqlResult> pResult;
+	if(pSqlRequestData != nullptr)
+		pResult = pSqlRequestData->m_pResult;
+	if(!Enqueue(std::make_unique<CSqlExecData>(pFunc, std::move(pSqlRequestData), pName)) && pResult != nullptr)
+	{
+		pResult->m_Success = false;
+		pResult->m_Completed.store(true);
+	}
 }
 
 void CDbConnectionPool::OnShutdown()
@@ -296,6 +329,10 @@ void CWorker::ProcessQueries()
 		}
 		m_pShared->m_NumWorker.Wait();
 		auto pThreadData = std::move(m_pShared->m_aQueries[JobNum % std::size(m_pShared->m_aQueries)]);
+		if(pThreadData != nullptr)
+		{
+			m_pShared->m_PendingQueries.fetch_sub(1);
+		}
 		// work through all database jobs after OnShutdown is called before exiting the thread
 		if(pThreadData == nullptr)
 		{
@@ -479,6 +516,7 @@ bool CDbConnectionPool::ExecSqlFunc(IDbConnection *pConnection, CSqlExecData *pD
 CDbConnectionPool::CDbConnectionPool()
 {
 	m_pShared = std::make_shared<CSharedData>();
+	m_pShared->m_MaxPending = g_Config.m_SvSqliteSyncMaxPending;
 	m_pWorkerThread = thread_init(CWorker::Start, new CWorker(m_pShared, g_Config.m_DbgSql), "database worker thread");
 	m_pBackupThread = thread_init(CBackup::Start, new CBackup(m_pShared, g_Config.m_DbgSql), "database backup worker thread");
 }

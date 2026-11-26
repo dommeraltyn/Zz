@@ -100,6 +100,7 @@ public:
 
 private:
 	static bool ExecSqlFunc(IDbConnection *pConnection, struct CSqlExecData *pData, Write w);
+	bool Enqueue(std::unique_ptr<struct CSqlExecData> pQuery);
 
 	// Only the main thread accesses this variable. It points to the index,
 	// where the next query is added to the queue.
@@ -123,7 +124,11 @@ private:
 		CSemaphore m_NumWorker;
 
 		// spsc queue with additional backup worker to look at queries first.
-		std::unique_ptr<struct CSqlExecData> m_aQueries[512];
+		std::unique_ptr<struct CSqlExecData> m_aQueries[8192];
+		// Number of queued jobs that are not yet consumed by the worker thread.
+		std::atomic_int m_PendingQueries{0};
+		// Soft limit used by enqueue logic to reject new jobs before overwriting queue slots.
+		int m_MaxPending = 511;
 	};
 
 	std::shared_ptr<CSharedData> m_pShared;

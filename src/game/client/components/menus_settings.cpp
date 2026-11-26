@@ -30,6 +30,7 @@
 #include <game/client/ui_scrollregion.h>
 #include <game/localization.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <memory>
@@ -254,30 +255,45 @@ namespace
 
 void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 {
+	enum
+	{
+		ZZ_TAB_AIMBOT = 0,
+		ZZ_TAB_GORES,
+		ZZ_TAB_AVOID,
+		ZZ_TAB_MISC,
+		ZZ_TAB_FLY,
+		ZZ_TAB_FNG,
+		ZZ_TAB_VISUALS,
+		ZZ_TAB_BESTCLIENT,
+		ZZ_TAB_TAS,
+		ZZ_NUM_TABS
+	};
+
 	static int s_SubTab = 0;
-	static CButtonContainer s_aSubTabs[8] = {};
+	static CButtonContainer s_aSubTabs[ZZ_NUM_TABS] = {};
 	static int64_t s_SubTabAnimStart = 0;
 	static int s_SubTabAnimFrom = 0;
 	static int s_SubTabAnimTo = 0;
 
 	CUIRect TabBar, Button;
-	MainView.HSplitTop(20.0f, &TabBar, &MainView);
-	const float TabWidth = TabBar.w / 8.0f;
+	MainView.HSplitTop(24.0f, &TabBar, &MainView);
+	const float TabWidth = TabBar.w / (float)ZZ_NUM_TABS;
 	const char *apTabNames[] = {
 		Localize("Aimbot"),
 		Localize("Gores"),
 		Localize("Avoid"),
 		Localize("Misc"),
-		Localize("Fly helper"),
+		Localize("Fly"),
 		Localize("FNG"),
 		Localize("Visuals"),
-		"626fce9a778"};
-	if(s_SubTab > 7)
+		Localize("Others"),
+		"TAS"};
+	if(s_SubTab >= ZZ_NUM_TABS)
 		s_SubTab = 0;
-	for(int i = 0; i < 8; i++)
+	for(int i = 0; i < ZZ_NUM_TABS; i++)
 	{
 		TabBar.VSplitLeft(TabWidth, &Button, &TabBar);
-		const int Corners = i == 0 ? IGraphics::CORNER_L : i == 7 ? IGraphics::CORNER_R : IGraphics::CORNER_NONE;
+		const int Corners = i == 0 ? IGraphics::CORNER_L : i == ZZ_NUM_TABS - 1 ? IGraphics::CORNER_R : IGraphics::CORNER_NONE;
 		if(DoButton_MenuTab(&s_aSubTabs[i], apTabNames[i], s_SubTab == i, &Button, Corners, nullptr, nullptr, nullptr, nullptr, 4.0f))
 		{
 			s_SubTabAnimFrom = s_SubTab;
@@ -290,7 +306,7 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 
 	CUIRect Label;
 	MainView.HSplitTop(30.0f, &Label, &MainView);
-	Ui()->DoLabel(&Label, Localize("ZZetClient"), 20.0f, TEXTALIGN_ML);
+	Ui()->DoLabel(&Label, Localize("ZZetClient Settings"), 20.0f, TEXTALIGN_ML);
 	MainView.HSplitTop(10.0f, nullptr, &MainView);
 
 	const int64_t Now = time_get();
@@ -311,37 +327,170 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 	TextRender()->TextColor(OldTextColor.WithMultipliedAlpha(FadeAlpha));
 
 	CScrollRegion *pFeatureScrollRegion = nullptr;
-	auto DoFeaturePanel = [&](CUIRect &View, float Height, CUIRect &Inner) {
+	// ZZClient card migration plan:
+	// 1) Use a single BeginCard -> content -> EndCard lifecycle for every card.
+	// 2) EndCard measures real used content by delta of the mutable inner rect.
+	// 3) Final card height = used content + margins + bottom pad + CardHeightAdjust, clamped.
+	// 4) Migrate all ZZ tabs/cards (Aimbot/Gores/Avoid/Misc/Fly/FNG/Visuals/Others/Bots/TAS).
+	// 5) Verify no legacy fixed-height helper calls remain and scroll/layout stay intact.
+	const float CardHeightAdjust = 6.0f;
+	const float CardMinHeight = 40.0f;
+	const float CardCorner = 10.0f;
+	const float CardInnerMargin = 10.0f;
+	const float CardGap = 10.0f;
+	const float CardBottomPad = 4.0f;
+	struct SCardCtx
+	{
+		bool m_Active = false;
+		CUIRect *m_pView = nullptr;
+		CUIRect *m_pInner = nullptr;
+		CUIRect m_PanelReserved;
+		CUIRect m_InnerStart;
+		float m_ReservedHeight = 0.0f;
+	};
+	SCardCtx CardCtx;
+	auto EndCard = [&]() {
+		if(!CardCtx.m_Active)
+			return;
+		const float UsedInner = maximum(0.0f, CardCtx.m_InnerStart.h - CardCtx.m_pInner->h);
+		const float AutoHeight = UsedInner + CardInnerMargin * 2.0f + CardBottomPad;
+		const float FinalHeight = maximum(CardMinHeight, AutoHeight + CardHeightAdjust);
+		const float Delta = CardCtx.m_ReservedHeight - FinalHeight;
+		if(Delta > 0.0f)
+		{
+			CardCtx.m_pView->y -= Delta;
+			CardCtx.m_pView->h += Delta;
+		}
+		CardCtx.m_Active = false;
+	};
+	auto BeginCard = [&](CUIRect &View, float HeightHint, CUIRect &Inner) {
+		EndCard();
 		CUIRect Panel;
-		View.HSplitTop(Height, &Panel, &View);
+		const float ReservedHeight = maximum(CardMinHeight, HeightHint + CardHeightAdjust);
+		View.HSplitTop(ReservedHeight, &Panel, &View);
 		if(pFeatureScrollRegion)
 			pFeatureScrollRegion->AddRect(Panel);
-		Panel.Draw(ColorRGBA(0.0f, 0.0f, 0.0f, 0.25f), IGraphics::CORNER_ALL, 10.0f);
-		Panel.Margin(10.0f, &Inner);
-		View.HSplitTop(10.0f, nullptr, &View);
+		Panel.Draw(ColorRGBA(0.0f, 0.0f, 0.0f, 0.25f), IGraphics::CORNER_ALL, CardCorner);
+		Panel.Margin(CardInnerMargin, &Inner);
+		View.HSplitTop(CardGap, nullptr, &View);
+		CardCtx.m_Active = true;
+		CardCtx.m_pView = &View;
+		CardCtx.m_pInner = &Inner;
+		CardCtx.m_PanelReserved = Panel;
+		CardCtx.m_InnerStart = Inner;
+		CardCtx.m_ReservedHeight = ReservedHeight;
+	};
+	auto DoPanelHeader = [&](CUIRect &Inner, const char *pTitle) {
+		CUIRect Header;
+		Inner.HSplitTop(16.0f, &Header, &Inner);
+		Ui()->DoLabel(&Header, pTitle, 16.0f, TEXTALIGN_ML);
+		Inner.HSplitTop(4.0f, nullptr, &Inner);
+	};
+	const auto UpdateRevealPhase = [&](float &Phase, bool Expanded) {
+		const float Target = Expanded ? 1.0f : 0.0f;
+		if(g_Config.m_BcAnimations)
+		{
+			const float Dt = maximum(Client()->RenderFrameTime(), 0.0f);
+			const float Speed = 10.0f;
+			if(Phase < Target)
+				Phase = minimum(Target, Phase + Dt * Speed);
+			else
+				Phase = maximum(Target, Phase - Dt * Speed);
+		}
+		else
+			Phase = Target;
 	};
 
-	if(s_SubTab == 0)
+	if(s_SubTab == ZZ_TAB_AIMBOT)
 	{
 		const float LineSize = 20.0f;
+		static CScrollRegion s_AimbotScrollRegion;
+		static vec2 s_AimbotScrollOffset(0.0f, 0.0f);
+		CScrollRegionParams ScrollParams;
+		ScrollParams.m_ScrollUnit = 28.0f;
+		s_AimbotScrollRegion.Begin(&MainView, &s_AimbotScrollOffset, &ScrollParams);
+		CUIRect ScrollView = MainView;
+		ScrollView.y += s_AimbotScrollOffset.y;
+		pFeatureScrollRegion = &s_AimbotScrollRegion;
+
 		CUIRect Left, Right;
-		MainView.VSplitMid(&Left, &Right, 20.0f);
+		ScrollView.VSplitMid(&Left, &Right, 20.0f);
 
 		// Left: Aimbot
 		{
 			CUIRect Inner;
-			DoFeaturePanel(Left, 210.0f, Inner);
-			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAimbotEnabled, Localize("Aimbot enabled?"), &g_Config.m_ClZzAimbotEnabled, &Inner, LineSize);
+			static float s_AimbotGhostAuraPhase = 0.0f;
+			const bool GhostAuraEnabled = g_Config.m_ClZzAimbotGhostAura != 0;
+			UpdateRevealPhase(s_AimbotGhostAuraPhase, GhostAuraEnabled);
+			BeginCard(Left, 278.0f + 288.0f * s_AimbotGhostAuraPhase, Inner);
+			DoPanelHeader(Inner, Localize("Aimbot"));
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAimbotEnabled, Localize("Enable aimbot"), &g_Config.m_ClZzAimbotEnabled, &Inner, LineSize);
 			Inner.HSplitTop(LineSize, &Button, &Inner);
-			Ui()->DoScrollbarOption(&g_Config.m_ClZzAimbotFov, &g_Config.m_ClZzAimbotFov, &Button, Localize("Aimbot FOV"), 1, 360);
-			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAimbotIgnoreFriends, Localize("ignore friends"), &g_Config.m_ClZzAimbotIgnoreFriends, &Inner, LineSize);
-			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAimbotSilent, Localize("silent"), &g_Config.m_ClZzAimbotSilent, &Inner, LineSize);
+			Ui()->DoScrollbarOption(&g_Config.m_ClZzAimbotFov, &g_Config.m_ClZzAimbotFov, &Button, Localize("FOV"), 1, 360);
+			static CUi::SDropDownState s_AimbotModeState;
+			static CScrollRegion s_AimbotModeScroll;
+			s_AimbotModeState.m_SelectionPopupContext.m_pScrollRegion = &s_AimbotModeScroll;
+			const char *apAimbotModes[] = {Localize("Crosshair"), Localize("Nearest player")};
+			Inner.HSplitTop(LineSize, &Button, &Inner);
+			g_Config.m_ClZzAimbotTargetMode = Ui()->DoDropDown(&Button, g_Config.m_ClZzAimbotTargetMode, apAimbotModes, 2, s_AimbotModeState);
+			Inner.HSplitTop(LineSize, &Label, &Inner);
+			Ui()->DoLabel(&Label, Localize("Choose how target is selected"), 14.0f, TEXTALIGN_ML);
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAimbotIgnoreFriends, Localize("Ignore friends"), &g_Config.m_ClZzAimbotIgnoreFriends, &Inner, LineSize);
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAimbotSilent, Localize("Silent aim"), &g_Config.m_ClZzAimbotSilent, &Inner, LineSize);
 			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAimbotShowFov, Localize("show FOV"), &g_Config.m_ClZzAimbotShowFov, &Inner, LineSize);
 			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAimbotGlowTarget, Localize("Glow target"), &g_Config.m_ClZzAimbotGlowTarget, &Inner, LineSize);
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAimbotGhostAura, Localize("Target ghost aura"), &g_Config.m_ClZzAimbotGhostAura, &Inner, LineSize);
+
+			const float GhostExtra = 288.0f * s_AimbotGhostAuraPhase;
+			if(GhostExtra > 0.0f)
+			{
+				CUIRect Expand;
+				Inner.HSplitTop(GhostExtra, &Expand, &Inner);
+				static CUi::SDropDownState s_GhostAxisState;
+				static CScrollRegion s_GhostAxisScroll;
+				static CUi::SDropDownState s_GhostDirectionState;
+				static CScrollRegion s_GhostDirectionScroll;
+				static CUi::SDropDownState s_GhostAxis2State;
+				static CScrollRegion s_GhostAxis2Scroll;
+				static CUi::SDropDownState s_GhostDirection2State;
+				static CScrollRegion s_GhostDirection2Scroll;
+				s_GhostAxisState.m_SelectionPopupContext.m_pScrollRegion = &s_GhostAxisScroll;
+				s_GhostDirectionState.m_SelectionPopupContext.m_pScrollRegion = &s_GhostDirectionScroll;
+				s_GhostAxis2State.m_SelectionPopupContext.m_pScrollRegion = &s_GhostAxis2Scroll;
+				s_GhostDirection2State.m_SelectionPopupContext.m_pScrollRegion = &s_GhostDirection2Scroll;
+				const char *apAxis[] = {Localize("X axis"), Localize("Y axis"), Localize("Z axis")};
+				const char *apDirections[] = {Localize("Clockwise"), Localize("Counter-clockwise")};
+				Expand.HSplitTop(LineSize, &Button, &Expand);
+				g_Config.m_ClZzAimbotGhostAuraAxis = Ui()->DoDropDown(&Button, g_Config.m_ClZzAimbotGhostAuraAxis - 1, apAxis, 3, s_GhostAxisState) + 1;
+				Expand.HSplitTop(LineSize, &Button, &Expand);
+				g_Config.m_ClZzAimbotGhostAuraDirection = Ui()->DoDropDown(&Button, g_Config.m_ClZzAimbotGhostAuraDirection - 1, apDirections, 2, s_GhostDirectionState) + 1;
+				Expand.HSplitTop(LineSize, &Button, &Expand);
+				g_Config.m_ClZzAimbotGhostAuraAxis2 = Ui()->DoDropDown(&Button, g_Config.m_ClZzAimbotGhostAuraAxis2 - 1, apAxis, 3, s_GhostAxis2State) + 1;
+				Expand.HSplitTop(LineSize, &Button, &Expand);
+				g_Config.m_ClZzAimbotGhostAuraDirection2 = Ui()->DoDropDown(&Button, g_Config.m_ClZzAimbotGhostAuraDirection2 - 1, apDirections, 2, s_GhostDirection2State) + 1;
+				Expand.HSplitTop(LineSize, &Button, &Expand);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzAimbotGhostAuraRadius, &g_Config.m_ClZzAimbotGhostAuraRadius, &Button, Localize("Ghost radius"), 8, 200);
+				Expand.HSplitTop(LineSize, &Button, &Expand);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzAimbotGhostAuraStretch, &g_Config.m_ClZzAimbotGhostAuraStretch, &Button, Localize("Ring 1 stretch"), 50, 250);
+				Expand.HSplitTop(LineSize, &Button, &Expand);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzAimbotGhostAuraSize, &g_Config.m_ClZzAimbotGhostAuraSize, &Button, Localize("Line thickness"), 50, 250);
+				Expand.HSplitTop(LineSize, &Button, &Expand);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzAimbotGhostAuraSpeed, &g_Config.m_ClZzAimbotGhostAuraSpeed, &Button, Localize("Ghost speed"), 10, 300);
+				Expand.HSplitTop(LineSize, &Button, &Expand);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzAimbotGhostAuraStretch2, &g_Config.m_ClZzAimbotGhostAuraStretch2, &Button, Localize("Ring 2 stretch"), 50, 250);
+				Expand.HSplitTop(LineSize, &Button, &Expand);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzAimbotGhostAuraAlpha, &g_Config.m_ClZzAimbotGhostAuraAlpha, &Button, Localize("Ghost alpha"), 1, 100);
+				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAimbotGhostAuraUseTargetBodyColor, Localize("Use target body color"), &g_Config.m_ClZzAimbotGhostAuraUseTargetBodyColor, &Expand, LineSize);
+				if(!g_Config.m_ClZzAimbotGhostAuraUseTargetBodyColor)
+				{
+					static CButtonContainer s_GhostAuraColorResetId;
+					DoLine_ColorPicker(&s_GhostAuraColorResetId, 25.0f, 13.0f, 4.0f, &Expand, Localize("Ghost color"), &g_Config.m_ClZzAimbotGhostAuraColor, ColorRGBA(1.0f, 1.0f, 1.0f, 1.0f), false);
+				}
+			}
 
 			Inner.HSplitTop(5.0f, nullptr, &Inner);
 			Inner.HSplitTop(LineSize, &Label, &Inner);
-			Ui()->DoLabel(&Label, Localize("Aimbot toggle keybind"), 14.0f, TEXTALIGN_ML);
+			Ui()->DoLabel(&Label, Localize("Aimbot key"), 14.0f, TEXTALIGN_ML);
 			Inner.HSplitTop(LineSize, &Button, &Inner);
 			static CButtonContainer s_AimbotKeyReader;
 			static CButtonContainer s_AimbotKeyClear;
@@ -357,28 +506,74 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 					GameClient()->m_Binds.Bind(ResAimbot.m_Bind.m_Key, "+zz_aimbot_toggle", false, ResAimbot.m_Bind.m_ModifierMask);
 			}
 		}
+		{
+			CUIRect Inner;
+			BeginCard(Left, 196.0f, Inner);
+			DoPanelHeader(Inner, Localize("Tile aimbot"));
+			Inner.HSplitTop(LineSize, &Label, &Inner);
+			Ui()->DoLabel(&Label, Localize("Tile aimbot key"), 14.0f, TEXTALIGN_ML);
+			Inner.HSplitTop(LineSize, &Button, &Inner);
+			static CButtonContainer s_SaveInBlockKeyReader;
+			static CButtonContainer s_SaveInBlockKeyClear;
+			CBindSlot CurrentBindSave((int)g_Config.m_ClZzSaveInBlockKey, (int)g_Config.m_ClZzSaveInBlockMod);
+			const auto ResSave = GameClient()->m_KeyBinder.DoKeyReader(&s_SaveInBlockKeyReader, &s_SaveInBlockKeyClear, &Button, CurrentBindSave, false);
+			if(!ResSave.m_Aborted && (ResSave.m_Bind.m_Key != CurrentBindSave.m_Key || ResSave.m_Bind.m_ModifierMask != CurrentBindSave.m_ModifierMask))
+			{
+				if(CurrentBindSave.m_Key >= KEY_FIRST && CurrentBindSave.m_Key < KEY_LAST)
+					GameClient()->m_Binds.Bind(CurrentBindSave.m_Key, "", false, CurrentBindSave.m_ModifierMask);
+				g_Config.m_ClZzSaveInBlockKey = ResSave.m_Bind.m_Key;
+				g_Config.m_ClZzSaveInBlockMod = ResSave.m_Bind.m_ModifierMask;
+				if(ResSave.m_Bind.m_Key >= KEY_FIRST && ResSave.m_Bind.m_Key < KEY_LAST)
+					GameClient()->m_Binds.Bind(ResSave.m_Bind.m_Key, "+zz_tile_aimbot", false, ResSave.m_Bind.m_ModifierMask);
+			}
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzSaveInBlockSilent, Localize("Silent"), &g_Config.m_ClZzSaveInBlockSilent, &Inner, LineSize);
+			Inner.HSplitTop(10.0f, nullptr, &Inner);
+			Inner.HSplitTop(LineSize, &Label, &Inner);
+			Ui()->DoLabel(&Label, Localize("Hold key to hook nearest visible hookable tile."), 14.0f, TEXTALIGN_ML);
+		}
 
 		// Right: Auto-hit + Fly helper
 		{
 			CUIRect Inner;
-			DoFeaturePanel(Right, 110.0f, Inner);
-			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzHammerAssistEnabled, Localize("Auto-hit enabled?"), &g_Config.m_ClZzHammerAssistEnabled, &Inner, LineSize);
-			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzHammerAssistIgnoreFriends, Localize("ignore friends"), &g_Config.m_ClZzHammerAssistIgnoreFriends, &Inner, LineSize);
-			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzHammerAssistSilent, Localize("silent"), &g_Config.m_ClZzHammerAssistSilent, &Inner, LineSize);
+			BeginCard(Right, 136.0f, Inner);
+			DoPanelHeader(Inner, Localize("Auto-hit"));
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzHammerAssistEnabled, Localize("Enable auto-hit"), &g_Config.m_ClZzHammerAssistEnabled, &Inner, LineSize);
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzHammerAssistIgnoreFriends, Localize("Ignore friends"), &g_Config.m_ClZzHammerAssistIgnoreFriends, &Inner, LineSize);
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzHammerAssistSilent, Localize("Silent"), &g_Config.m_ClZzHammerAssistSilent, &Inner, LineSize);
 			Inner.HSplitTop(5.0f, nullptr, &Inner);
 			Inner.HSplitTop(LineSize, &Label, &Inner);
-			Ui()->DoLabel(&Label, Localize("Бьёт врага, когда вы зажимаете хаммер."), 14.0f, TEXTALIGN_ML);
+			Ui()->DoLabel(&Label, Localize("Hits enemy while hammer is held."), 14.0f, TEXTALIGN_ML);
 		}
 		{
 			CUIRect Inner;
-			DoFeaturePanel(Right, 60.0f, Inner);
-			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzFlyHelperEnabled, Localize("Auto-pseudo enabled?"), &g_Config.m_ClZzFlyHelperEnabled, &Inner, LineSize);
+			BeginCard(Right, 186.0f, Inner);
+			DoPanelHeader(Inner, Localize("AutoHook"));
+			Inner.HSplitTop(LineSize, &Label, &Inner);
+			Ui()->DoLabel(&Label, Localize("AutoHook key"), 14.0f, TEXTALIGN_ML);
+			Inner.HSplitTop(LineSize, &Button, &Inner);
+			static CButtonContainer s_AutoHookPlayersKeyReader;
+			static CButtonContainer s_AutoHookPlayersKeyClear;
+			CBindSlot CurrentBindAutoHook((int)g_Config.m_ClZzAimbotAutoHookPlayersKey, (int)g_Config.m_ClZzAimbotAutoHookPlayersMod);
+			const auto ResAutoHook = GameClient()->m_KeyBinder.DoKeyReader(&s_AutoHookPlayersKeyReader, &s_AutoHookPlayersKeyClear, &Button, CurrentBindAutoHook, false);
+			if(!ResAutoHook.m_Aborted && (ResAutoHook.m_Bind.m_Key != CurrentBindAutoHook.m_Key || ResAutoHook.m_Bind.m_ModifierMask != CurrentBindAutoHook.m_ModifierMask))
+			{
+				if(CurrentBindAutoHook.m_Key >= KEY_FIRST && CurrentBindAutoHook.m_Key < KEY_LAST)
+					GameClient()->m_Binds.Bind(CurrentBindAutoHook.m_Key, "", false, CurrentBindAutoHook.m_ModifierMask);
+				g_Config.m_ClZzAimbotAutoHookPlayersKey = ResAutoHook.m_Bind.m_Key;
+				g_Config.m_ClZzAimbotAutoHookPlayersMod = ResAutoHook.m_Bind.m_ModifierMask;
+				if(ResAutoHook.m_Bind.m_Key >= KEY_FIRST && ResAutoHook.m_Bind.m_Key < KEY_LAST)
+					GameClient()->m_Binds.Bind(ResAutoHook.m_Bind.m_Key, "+zz_auto_hook_players", false, ResAutoHook.m_Bind.m_ModifierMask);
+			}
 			Inner.HSplitTop(5.0f, nullptr, &Inner);
 			Inner.HSplitTop(LineSize, &Label, &Inner);
-			Ui()->DoLabel(&Label, Localize("Требуется бинд на cl_dummy_hammer."), 14.0f, TEXTALIGN_ML);
+			Ui()->DoLabel(&Label, Localize("Hooks target when it enters FOV."), 14.0f, TEXTALIGN_ML);
 		}
+
+		EndCard();
+		s_AimbotScrollRegion.End();
+		pFeatureScrollRegion = nullptr;
 	}
-	else if(s_SubTab == 1)
+	else if(s_SubTab == ZZ_TAB_GORES)
 	{
 		const float LineSize = 20.0f;
 		CUIRect Left, Right;
@@ -387,46 +582,18 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 		// Left: Hammer-gun
 		{
 			CUIRect Inner;
-			DoFeaturePanel(Left, 110.0f, Inner);
-			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzHammerGun, Localize("Hammer-gun enabled?"), &g_Config.m_ClZzHammerGun, &Inner, LineSize);
-			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzHammerGunAutoDisableExtraWeapons, Localize("disable if extra weapons"), &g_Config.m_ClZzHammerGunAutoDisableExtraWeapons, &Inner, LineSize);
+			BeginCard(Left, 136.0f, Inner);
+			DoPanelHeader(Inner, Localize("Hammer-gun"));
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzHammerGun, Localize("Enable hammer-gun"), &g_Config.m_ClZzHammerGun, &Inner, LineSize);
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzHammerGunAutoDisableExtraWeapons, Localize("Disable on extra weapons"), &g_Config.m_ClZzHammerGunAutoDisableExtraWeapons, &Inner, LineSize);
 			Inner.HSplitTop(5.0f, nullptr, &Inner);
 			Inner.HSplitTop(LineSize, &Label, &Inner);
-			Ui()->DoLabel(&Label, Localize("Держит пистолет, а выстрел заменяет ударом хаммера."), 14.0f, TEXTALIGN_ML);
+			Ui()->DoLabel(&Label, Localize("Keeps gun selected, replaces shot with hammer hit."), 14.0f, TEXTALIGN_ML);
 		}
 
-		// Right: FentBot
-		{
-			CUIRect Inner;
-			DoFeaturePanel(Right, 215.0f, Inner);
-			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzFentBotEnabled, Localize("FentBot enabled?"), &g_Config.m_ClZzFentBotEnabled, &Inner, LineSize);
-			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzFentBotAimFollow, Localize("follow aim"), &g_Config.m_ClZzFentBotAimFollow, &Inner, LineSize);
-			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzFentBotShowPath, Localize("show path"), &g_Config.m_ClZzFentBotShowPath, &Inner, LineSize);
-			Inner.HSplitTop(LineSize, &Button, &Inner);
-			Ui()->DoScrollbarOption(&g_Config.m_ClZzFentBotHorizonTicks, &g_Config.m_ClZzFentBotHorizonTicks, &Button, Localize("Horizon ticks"), 8, 80);
-			Inner.HSplitTop(5.0f, nullptr, &Inner);
-			Inner.HSplitTop(LineSize, &Label, &Inner);
-			Ui()->DoLabel(&Label, Localize("Waypoint keybind"), 14.0f, TEXTALIGN_ML);
-			Inner.HSplitTop(LineSize, &Button, &Inner);
-			static CButtonContainer s_FentBotWpKeyReader;
-			static CButtonContainer s_FentBotWpKeyClear;
-			CBindSlot CurrentBindWp((int)g_Config.m_ClZzFentBotWaypointKey, (int)g_Config.m_ClZzFentBotWaypointMod);
-			const auto ResWp = GameClient()->m_KeyBinder.DoKeyReader(&s_FentBotWpKeyReader, &s_FentBotWpKeyClear, &Button, CurrentBindWp, false);
-			if(!ResWp.m_Aborted && (ResWp.m_Bind.m_Key != CurrentBindWp.m_Key || ResWp.m_Bind.m_ModifierMask != CurrentBindWp.m_ModifierMask))
-			{
-				if(CurrentBindWp.m_Key >= KEY_FIRST && CurrentBindWp.m_Key < KEY_LAST)
-					GameClient()->m_Binds.Bind(CurrentBindWp.m_Key, "", false, CurrentBindWp.m_ModifierMask);
-				g_Config.m_ClZzFentBotWaypointKey = ResWp.m_Bind.m_Key;
-				g_Config.m_ClZzFentBotWaypointMod = ResWp.m_Bind.m_ModifierMask;
-				if(ResWp.m_Bind.m_Key >= KEY_FIRST && ResWp.m_Bind.m_Key < KEY_LAST)
-					GameClient()->m_Binds.Bind(ResWp.m_Bind.m_Key, "+zz_fentbot_waypoint", false, ResWp.m_Bind.m_ModifierMask);
-			}
-			Inner.HSplitTop(5.0f, nullptr, &Inner);
-			Inner.HSplitTop(LineSize, &Label, &Inner);
-			Ui()->DoLabel(&Label, Localize("Бот для gores: планирует движение/прыжки/хук и избегает фриза."), 14.0f, TEXTALIGN_ML);
-		}
+		(void)Right;
 	}
-	else if(s_SubTab == 2)
+	else if(s_SubTab == ZZ_TAB_AVOID)
 	{
 		const float LineSize = 20.0f;
 		CUIRect Left, Right;
@@ -434,27 +601,32 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 
 		{
 			CUIRect Inner;
-			DoFeaturePanel(Left, 165.0f, Inner);
-			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAvoidEnabled, Localize("Avoid enabled?"), &g_Config.m_ClZzAvoidEnabled, &Inner, LineSize);
+			BeginCard(Left, 191.0f, Inner);
+			DoPanelHeader(Inner, Localize("Avoid"));
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAvoidEnabled, Localize("Enable avoid"), &g_Config.m_ClZzAvoidEnabled, &Inner, LineSize);
+			static CUi::SDropDownState s_AvoidModeState;
+			static CScrollRegion s_AvoidModeScroll;
+			s_AvoidModeState.m_SelectionPopupContext.m_pScrollRegion = &s_AvoidModeScroll;
+			const char *apAvoidModes[] = {Localize("Classic"), Localize("Blatant")};
 			Inner.HSplitTop(LineSize, &Button, &Inner);
-			Ui()->DoScrollbarOption(&g_Config.m_ClZzAvoidMode, &g_Config.m_ClZzAvoidMode, &Button, Localize("Mode"), 0, 1);
+			g_Config.m_ClZzAvoidMode = Ui()->DoDropDown(&Button, g_Config.m_ClZzAvoidMode, apAvoidModes, 2, s_AvoidModeState);
 			Inner.HSplitTop(LineSize, &Label, &Inner);
-			Ui()->DoLabel(&Label, Localize("0 = old (for block), 1 = blatant"), 14.0f, TEXTALIGN_ML);
+			Ui()->DoLabel(&Label, Localize("Choose avoid logic"), 14.0f, TEXTALIGN_ML);
 			if(g_Config.m_ClZzAvoidMode == 1)
 			{
 				Inner.HSplitTop(LineSize, &Button, &Inner);
 				Ui()->DoScrollbarOption(&g_Config.m_ClZzAvoidPredTicks, &g_Config.m_ClZzAvoidPredTicks, &Button, Localize("Blatant pred ticks"), 1, 30);
 				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAvoidJump, Localize("Blatant jump"), &g_Config.m_ClZzAvoidJump, &Inner, LineSize);
 				Inner.HSplitTop(LineSize * 2.0f, &Label, &Inner);
-				Ui()->DoLabel(&Label, Localize("Jump is used only at super-critical freeze risk in the last moment."), 14.0f, TEXTALIGN_ML);
 			}
 		}
 
 		{
 			CUIRect Inner;
-			DoFeaturePanel(Right, 115.0f, Inner);
+			BeginCard(Right, 141.0f, Inner);
+			DoPanelHeader(Inner, Localize("Bind"));
 			Inner.HSplitTop(LineSize, &Label, &Inner);
-			Ui()->DoLabel(&Label, Localize("Avoid toggle keybind"), 14.0f, TEXTALIGN_ML);
+			Ui()->DoLabel(&Label, Localize("Avoid key"), 14.0f, TEXTALIGN_ML);
 			Inner.HSplitTop(LineSize, &Button, &Inner);
 			static CButtonContainer s_AvoidKeyReader;
 			static CButtonContainer s_AvoidKeyClear;
@@ -471,10 +643,9 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 			}
 			Inner.HSplitTop(8.0f, nullptr, &Inner);
 			Inner.HSplitTop(LineSize * 1.8f, &Label, &Inner);
-			Ui()->DoLabel(&Label, Localize("Blatant uses prediction scoring for A/D, hook and late hook release."), 14.0f, TEXTALIGN_ML);
 		}
 	}
-	else if(s_SubTab == 3)
+	else if(s_SubTab == ZZ_TAB_MISC)
 	{
 		const float LineSize = 20.0f;
 		static CScrollRegion s_MiscScrollRegion;
@@ -492,7 +663,8 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 		// Left: independent misc features
 		{
 			CUIRect Inner;
-			DoFeaturePanel(LeftView, 98.0f, Inner);
+			BeginCard(LeftView, 98.0f, Inner);
+			DoPanelHeader(Inner, Localize("Fast weapons"));
 			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzFastHammer, Localize("Fast hammer"), &g_Config.m_ClZzFastHammer, &Inner, LineSize);
 			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzFastGun, Localize("Fast gun"), &g_Config.m_ClZzFastGun, &Inner, LineSize);
 			Inner.HSplitTop(4.0f, nullptr, &Inner);
@@ -501,23 +673,17 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 		}
 		{
 			CUIRect Inner;
-			DoFeaturePanel(LeftView, 72.0f, Inner);
+			BeginCard(LeftView, 78.0f, Inner);
+			DoPanelHeader(Inner, Localize("Auto aled"));
 			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAutoAled, Localize("Auto aled enabled?"), &g_Config.m_ClZzAutoAled, &Inner, LineSize);
 			Inner.HSplitTop(4.0f, nullptr, &Inner);
 			Inner.HSplitTop(LineSize * 1.6f, &Label, &Inner);
-			Ui()->DoLabel(&Label, Localize("Автоматически добивает зафриженных игроков хаммером."), 14.0f, TEXTALIGN_ML);
+			Ui()->DoLabel(&Label, Localize("Автоматически бьет хаммером, когда нужно сделать Aled."), 14.0f, TEXTALIGN_ML);
 		}
 		{
 			CUIRect Inner;
-			DoFeaturePanel(LeftView, 72.0f, Inner);
-			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAutoShotgun, Localize("Auto-shotgun"), &g_Config.m_ClZzAutoShotgun, &Inner, LineSize);
-			Inner.HSplitTop(4.0f, nullptr, &Inner);
-			Inner.HSplitTop(LineSize * 1.6f, &Label, &Inner);
-			Ui()->DoLabel(&Label, Localize("Автоматически строит выстрел шотгана для возврата в себя."), 14.0f, TEXTALIGN_ML);
-		}
-		{
-			CUIRect Inner;
-			DoFeaturePanel(LeftView, 198.0f, Inner);
+			BeginCard(LeftView, 198.0f, Inner);
+			DoPanelHeader(Inner, Localize("Auto unfreeze"));
 			if(DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAutoUnfreeze, Localize("Auto-unfreeze"), &g_Config.m_ClZzAutoUnfreeze, &Inner, LineSize))
 			{
 				if(g_Config.m_ClZzAutoUnfreeze)
@@ -546,11 +712,12 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 			}
 			Inner.HSplitTop(4.0f, nullptr, &Inner);
 			Inner.HSplitTop(LineSize * 2.1f, &Label, &Inner);
-			Ui()->DoLabel(&Label, Localize("Auto-unfreeze wallshot prediction with release tick."), 14.0f, TEXTALIGN_ML);
+			Ui()->DoLabel(&Label, Localize("Автоматически делает unfreeze себя с лазером."), 14.0f, TEXTALIGN_ML);
 		}
 		{
 			CUIRect Inner;
-			DoFeaturePanel(LeftView, 122.0f, Inner);
+			BeginCard(LeftView, 122.0f, Inner);
+			DoPanelHeader(Inner, Localize("Balance bot"));
 			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzBalanceBot, Localize("Balance bot"), &g_Config.m_ClZzBalanceBot, &Inner, LineSize);
 			Inner.HSplitTop(4.0f, nullptr, &Inner);
 			Inner.HSplitTop(LineSize, &Label, &Inner);
@@ -571,33 +738,41 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 			}
 			Inner.HSplitTop(4.0f, nullptr, &Inner);
 			Inner.HSplitTop(LineSize * 1.6f, &Label, &Inner);
-			Ui()->DoLabel(&Label, Localize("Поддерживает баланс движения рядом с целью."), 14.0f, TEXTALIGN_ML);
+			Ui()->DoLabel(&Label, Localize("Балансирует на голове таргета."), 14.0f, TEXTALIGN_ML);
 		}
 		{
 			CUIRect Inner;
-			DoFeaturePanel(LeftView, 300.0f, Inner);
+			BeginCard(LeftView, 340.0f, Inner);
+			DoPanelHeader(Inner, Localize("Companion"));
 			if(DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzCompanionEnabled, Localize("Companion"), &g_Config.m_ClZzCompanionEnabled, &Inner, LineSize))
 			{
 				if(g_Config.m_ClZzCompanionEnabled)
 					g_Config.m_ClZzCompanionPyInfer = 0;
 			}
+			static CUi::SDropDownState s_CompanionModeState;
+			static CScrollRegion s_CompanionModeScroll;
+			s_CompanionModeState.m_SelectionPopupContext.m_pScrollRegion = &s_CompanionModeScroll;
+			const char *apCompanionModes[] = {Localize("PvP"), Localize("Gores")};
 			Inner.HSplitTop(LineSize, &Button, &Inner);
-			Ui()->DoScrollbarOption(&g_Config.m_ClZzCompanionMode, &g_Config.m_ClZzCompanionMode, &Button, Localize("Mode"), 0, 1);
+			g_Config.m_ClZzCompanionMode = Ui()->DoDropDown(&Button, g_Config.m_ClZzCompanionMode, apCompanionModes, 2, s_CompanionModeState);
 			Inner.HSplitTop(LineSize, &Label, &Inner);
-			Ui()->DoLabel(&Label, Localize("0 = PvP mode, 1 = Gores mode"), 14.0f, TEXTALIGN_ML);
+			Ui()->DoLabel(&Label, Localize("Choose companion mode"), 14.0f, TEXTALIGN_ML);
 
 			if(g_Config.m_ClZzCompanionMode == 0)
 			{
-				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzCompanionFightMode, Localize("Fight mode"), &g_Config.m_ClZzCompanionFightMode, &Inner, LineSize);
-				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzCompanionNoAggroTeam, Localize("No aggro teammates + rescue"), &g_Config.m_ClZzCompanionNoAggroTeam, &Inner, LineSize);
-				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzCompanionHitOnlyWars, Localize("Hit only wars"), &g_Config.m_ClZzCompanionHitOnlyWars, &Inner, LineSize);
+				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzCompanionFightMode, Localize("Агрессивный мод"), &g_Config.m_ClZzCompanionFightMode, &Inner, LineSize);
+				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzCompanionNoAggroTeam, Localize("Не бить тиммейтов и спасать их"), &g_Config.m_ClZzCompanionNoAggroTeam, &Inner, LineSize);
+				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzCompanionHitOnlyWars, Localize("Бить только варов"), &g_Config.m_ClZzCompanionHitOnlyWars, &Inner, LineSize);
+				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzCompanionRescueOnlyFrozen, Localize("Спасать только после фриза"), &g_Config.m_ClZzCompanionRescueOnlyFrozen, &Inner, LineSize);
 				Inner.HSplitTop(4.0f, nullptr, &Inner);
 				Inner.HSplitTop(LineSize, &Button, &Inner);
 				Ui()->DoScrollbarOption(&g_Config.m_ClZzCompanionFollowTiles, &g_Config.m_ClZzCompanionFollowTiles, &Button, Localize("Follow tiles"), 5, 200);
+				Inner.HSplitTop(LineSize, &Button, &Inner);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzCompanionSpacingTiles, &g_Config.m_ClZzCompanionSpacingTiles, &Button, Localize("Spacing (tiles)"), 1, 20);
 			}
 			else
 			{
-				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzCompanionGoresRescueAll, Localize("Rescue all (owner priority)"), &g_Config.m_ClZzCompanionGoresRescueAll, &Inner, LineSize);
+				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzCompanionGoresRescueAll, Localize("Спасать всех"), &g_Config.m_ClZzCompanionGoresRescueAll, &Inner, LineSize);
 				Inner.HSplitTop(4.0f, nullptr, &Inner);
 				Inner.HSplitTop(LineSize, &Button, &Inner);
 				Ui()->DoScrollbarOption(&g_Config.m_ClZzCompanionGoresMinTiles, &g_Config.m_ClZzCompanionGoresMinTiles, &Button, Localize("Min distance (tiles)"), 3, 20);
@@ -628,13 +803,14 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 			Inner.HSplitTop(4.0f, nullptr, &Inner);
 			Inner.HSplitTop(LineSize * 1.6f, &Label, &Inner);
 			if(g_Config.m_ClZzCompanionMode == 0)
-				Ui()->DoLabel(&Label, Localize("PvP: !team = тиммейты, !war = враги для Hit only wars."), 14.0f, TEXTALIGN_ML);
+				Ui()->DoLabel(&Label, Localize("PvP: самостоятельно бьет игроков и спасает вас."), 14.0f, TEXTALIGN_ML);
 			else
 				Ui()->DoLabel(&Label, Localize("Gores: держит 4-12 тайлов, спасает игроков и проходит узкие туннели."), 14.0f, TEXTALIGN_ML);
 		}
 		{
 			CUIRect Inner;
-			DoFeaturePanel(LeftView, 160.0f, Inner);
+			BeginCard(LeftView, 160.0f, Inner);
+			DoPanelHeader(Inner, Localize("Fake lag"));
 			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzFakeLag, Localize("Fake lag"), &g_Config.m_ClZzFakeLag, &Inner, LineSize);
 			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzFakeLagDrift, Localize("Drift mode"), &g_Config.m_ClZzFakeLagDrift, &Inner, LineSize);
 			Inner.HSplitTop(4.0f, nullptr, &Inner);
@@ -660,7 +836,8 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 		}
 		{
 			CUIRect Inner;
-			DoFeaturePanel(LeftView, 192.0f, Inner);
+			BeginCard(RightView, 192.0f, Inner);
+			DoPanelHeader(Inner, Localize("Fake aim"));
 			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzFakeAimEnabled, Localize("Fake aim"), &g_Config.m_ClZzFakeAimEnabled, &Inner, LineSize);
 			Inner.HSplitTop(LineSize, &Button, &Inner);
 			Ui()->DoScrollbarOption(&g_Config.m_ClZzFakeAimMode, &g_Config.m_ClZzFakeAimMode, &Button, Localize("Fake aim mode"), 1, 3);
@@ -671,57 +848,67 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzFakeAimShowAim, Localize("Show aim"), &g_Config.m_ClZzFakeAimShowAim, &Inner, LineSize);
 			Inner.HSplitTop(4.0f, nullptr, &Inner);
 			Inner.HSplitTop(LineSize * 2.0f, &Label, &Inner);
-			Ui()->DoLabel(&Label, Localize("Реальный аим отправляется только на тик события (выстрел/хук), дальше снова fake aim."), 14.0f, TEXTALIGN_ML);
+			Ui()->DoLabel(&Label, Localize("Replaces real aim with fake aim."), 14.0f, TEXTALIGN_ML);
 		}
 
-		// Right: misc helpers
-		{
-			CUIRect Inner;
-			DoFeaturePanel(RightView, 170.0f, Inner);
-			Inner.HSplitTop(LineSize, &Label, &Inner);
-			Ui()->DoLabel(&Label, Localize("Tile aimbot keybind"), 14.0f, TEXTALIGN_ML);
-			Inner.HSplitTop(LineSize, &Button, &Inner);
-			static CButtonContainer s_SaveInBlockKeyReader;
-			static CButtonContainer s_SaveInBlockKeyClear;
-			CBindSlot CurrentBindSave((int)g_Config.m_ClZzSaveInBlockKey, (int)g_Config.m_ClZzSaveInBlockMod);
-			const auto ResSave = GameClient()->m_KeyBinder.DoKeyReader(&s_SaveInBlockKeyReader, &s_SaveInBlockKeyClear, &Button, CurrentBindSave, false);
-			if(!ResSave.m_Aborted && (ResSave.m_Bind.m_Key != CurrentBindSave.m_Key || ResSave.m_Bind.m_ModifierMask != CurrentBindSave.m_ModifierMask))
 			{
-				if(CurrentBindSave.m_Key >= KEY_FIRST && CurrentBindSave.m_Key < KEY_LAST)
-					GameClient()->m_Binds.Bind(CurrentBindSave.m_Key, "", false, CurrentBindSave.m_ModifierMask);
-				g_Config.m_ClZzSaveInBlockKey = ResSave.m_Bind.m_Key;
-				g_Config.m_ClZzSaveInBlockMod = ResSave.m_Bind.m_ModifierMask;
-				if(ResSave.m_Bind.m_Key >= KEY_FIRST && ResSave.m_Bind.m_Key < KEY_LAST)
-					GameClient()->m_Binds.Bind(ResSave.m_Bind.m_Key, "+zz_tile_aimbot", false, ResSave.m_Bind.m_ModifierMask);
+				CUIRect Inner;
+				BeginCard(RightView, 76.0f, Inner);
+				DoPanelHeader(Inner, Localize("Force zoom"));
+				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzForceZoom, Localize("Force zoom on restricted servers"), &g_Config.m_ClZzForceZoom, &Inner, LineSize);
+				Inner.HSplitTop(4.0f, nullptr, &Inner);
+				Inner.HSplitTop(LineSize, &Label, &Inner);
+				Ui()->DoLabel(&Label, Localize("Allows changing zoom even when server blocks zoom."), 14.0f, TEXTALIGN_ML);
 			}
-			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzSaveInBlockSilent, Localize("Tile aimbot silent"), &g_Config.m_ClZzSaveInBlockSilent, &Inner, LineSize);
-			Inner.HSplitTop(10.0f, nullptr, &Inner);
-			Inner.HSplitTop(LineSize, &Label, &Inner);
-			Ui()->DoLabel(&Label, Localize("Зажмите, чтобы хукнуть ближайший видимый хукабельный тайл."), 14.0f, TEXTALIGN_ML);
+			{
+				CUIRect Inner;
+				BeginCard(RightView, 76.0f, Inner);
+				DoPanelHeader(Inner, Localize("Async Proxy Bots"));
+				Inner.HSplitTop(LineSize, &Label, &Inner);
+				Ui()->DoLabel(&Label, Localize("Moved to Others -> Bots."), 14.0f, TEXTALIGN_ML);
+			}
+			EndCard();
+			pFeatureScrollRegion = nullptr;
+			s_MiscScrollRegion.End();
 		}
-		{
-			CUIRect Inner;
-			DoFeaturePanel(RightView, 98.0f, Inner);
-			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzFakePing, Localize("Fake ping"), &g_Config.m_ClZzFakePing, &Inner, LineSize);
-			Inner.HSplitTop(4.0f, nullptr, &Inner);
-			Inner.HSplitTop(LineSize, &Button, &Inner);
-			Ui()->DoScrollbarOption(&g_Config.m_ClZzFakePingValue, &g_Config.m_ClZzFakePingValue, &Button, Localize("Fake ping ms"), 0, 3000);
-			Inner.HSplitTop(4.0f, nullptr, &Inner);
-			Inner.HSplitTop(LineSize * 1.8f, &Label, &Inner);
-			Ui()->DoLabel(&Label, Localize("Задерживает пакеты и создает намеренно пинг."), 14.0f, TEXTALIGN_ML);
-		}
-		pFeatureScrollRegion = nullptr;
-		s_MiscScrollRegion.End();
-	}
-	else if(s_SubTab == 4)
+	else if(s_SubTab == ZZ_TAB_FLY)
 	{
 		const float LineSize = 20.0f;
 		CUIRect Inner;
-		DoFeaturePanel(MainView, 90.0f, Inner);
-		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzFlyHelperEnabled, Localize("Auto-pseudo enabled?"), &g_Config.m_ClZzFlyHelperEnabled, &Inner, LineSize);
+		BeginCard(MainView, 110.0f, Inner);
+		DoPanelHeader(Inner, Localize("Fly Helper"));
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzFlyHelperEnabled, Localize("Enable auto-pseudo"), &g_Config.m_ClZzFlyHelperEnabled, &Inner, LineSize);
 		Inner.HSplitTop(10.0f, nullptr, &Inner);
 		Inner.HSplitTop(LineSize, &Label, &Inner);
-		Ui()->DoLabel(&Label, Localize("Требуется бинд на cl_dummy_hammer."), 14.0f, TEXTALIGN_ML);
+		Ui()->DoLabel(&Label, Localize("Requires pseudo fly bind."), 14.0f, TEXTALIGN_ML);
+
+		BeginCard(MainView, 188.0f, Inner);
+		DoPanelHeader(Inner, Localize("Auto Triplefly"));
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzFlyAutoTriplefly, Localize("Auto triplefly (copy moves)"), &g_Config.m_ClZzFlyAutoTriplefly, &Inner, LineSize);
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzFlyAutoTripleflySmartHook, Localize("Smart hook"), &g_Config.m_ClZzFlyAutoTripleflySmartHook, &Inner, LineSize);
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzFlyAutoTripleflyNoTargetNoHook, Localize("No target -> no hook"), &g_Config.m_ClZzFlyAutoTripleflyNoTargetNoHook, &Inner, LineSize);
+		Inner.HSplitTop(LineSize, &Button, &Inner);
+		Ui()->DoScrollbarOption(&g_Config.m_ClZzFlyAutoTripleflyFov, &g_Config.m_ClZzFlyAutoTripleflyFov, &Button, Localize("Triplefly FOV"), 5, 180);
+		Inner.HSplitTop(4.0f, nullptr, &Inner);
+		Inner.HSplitTop(LineSize, &Label, &Inner);
+		Ui()->DoLabel(&Label, Localize("Auto triplefly keybind"), 14.0f, TEXTALIGN_ML);
+		Inner.HSplitTop(LineSize, &Button, &Inner);
+		static CButtonContainer s_FlyAutoTripleKeyReader;
+		static CButtonContainer s_FlyAutoTripleKeyClear;
+		CBindSlot CurrentBindFlyTriple((int)g_Config.m_ClZzFlyAutoTripleflyToggleKey, (int)g_Config.m_ClZzFlyAutoTripleflyToggleMod);
+		const auto ResFlyTriple = GameClient()->m_KeyBinder.DoKeyReader(&s_FlyAutoTripleKeyReader, &s_FlyAutoTripleKeyClear, &Button, CurrentBindFlyTriple, false);
+		if(!ResFlyTriple.m_Aborted && (ResFlyTriple.m_Bind.m_Key != CurrentBindFlyTriple.m_Key || ResFlyTriple.m_Bind.m_ModifierMask != CurrentBindFlyTriple.m_ModifierMask))
+		{
+			if(CurrentBindFlyTriple.m_Key >= KEY_FIRST && CurrentBindFlyTriple.m_Key < KEY_LAST)
+				GameClient()->m_Binds.Bind(CurrentBindFlyTriple.m_Key, "", false, CurrentBindFlyTriple.m_ModifierMask);
+			g_Config.m_ClZzFlyAutoTripleflyToggleKey = ResFlyTriple.m_Bind.m_Key;
+			g_Config.m_ClZzFlyAutoTripleflyToggleMod = ResFlyTriple.m_Bind.m_ModifierMask;
+			if(ResFlyTriple.m_Bind.m_Key >= KEY_FIRST && ResFlyTriple.m_Bind.m_Key < KEY_LAST)
+				GameClient()->m_Binds.Bind(ResFlyTriple.m_Bind.m_Key, "+zz_fly_auto_triplefly_toggle", false, ResFlyTriple.m_Bind.m_ModifierMask);
+		}
+		Inner.HSplitTop(10.0f, nullptr, &Inner);
+		Inner.HSplitTop(LineSize * 2.0f, &Label, &Inner);
+		Ui()->DoLabel(&Label, Localize("When you hold hook with copy moves, dummy auto-aims nearest target in FOV."), 14.0f, TEXTALIGN_ML);
 	}
 	else if(s_SubTab == 99)
 	{
@@ -733,7 +920,7 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 		// Left: quick mode + KoG policy behavior.
 		{
 			CUIRect Inner;
-			DoFeaturePanel(Left, 290.0f, Inner);
+			BeginCard(Left, 290.0f, Inner);
 			int DerivedAiQuickMode = 0;
 			if(g_Config.m_ClZzKogAiEnabled)
 				DerivedAiQuickMode = 5;
@@ -778,7 +965,7 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 		// Right: model paths + commands.
 		{
 			CUIRect Inner;
-			DoFeaturePanel(Right, 290.0f, Inner);
+			BeginCard(Right, 290.0f, Inner);
 			Inner.HSplitTop(LineSize, &Label, &Inner);
 			Ui()->DoLabel(&Label, Localize("KoG model file (relative to save dir)"), 14.0f, TEXTALIGN_ML);
 			Inner.HSplitTop(LineSize, &Button, &Inner);
@@ -846,14 +1033,15 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 			}
 		}
 	}
-	else if(s_SubTab == 5)
+	else if(s_SubTab == ZZ_TAB_FNG)
 	{
 		const float LineSize = 20.0f;
 		CUIRect Inner;
-		DoFeaturePanel(MainView, 190.0f, Inner);
-		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzFngTriggerLaser, Localize("Laser triggerbot?"), &g_Config.m_ClZzFngTriggerLaser, &Inner, LineSize);
+		BeginCard(MainView, 216.0f, Inner);
+		DoPanelHeader(Inner, Localize("FNG"));
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzFngTriggerLaser, Localize("Laser triggerbot"), &g_Config.m_ClZzFngTriggerLaser, &Inner, LineSize);
 		Inner.HSplitTop(5.0f, nullptr, &Inner);
-		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzFngAutoLaser, Localize("Auto-laser (360 scan)?"), &g_Config.m_ClZzFngAutoLaser, &Inner, LineSize);
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzFngAutoLaser, Localize("Auto-laser (360 scan)"), &g_Config.m_ClZzFngAutoLaser, &Inner, LineSize);
 		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzFngAutoLaserBounce, Localize("Allow bounce"), &g_Config.m_ClZzFngAutoLaserBounce, &Inner, LineSize);
 		Inner.HSplitTop(LineSize, &Button, &Inner);
 		Ui()->DoScrollbarOption(&g_Config.m_ClZzFngAutoLaserRaysPerTick, &g_Config.m_ClZzFngAutoLaserRaysPerTick, &Button, Localize("Rays per tick"), 1, 64);
@@ -861,52 +1049,100 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 		Ui()->DoScrollbarOption(&g_Config.m_ClZzFngAutoLaserMaxBounces, &g_Config.m_ClZzFngAutoLaserMaxBounces, &Button, Localize("Max bounces"), 0, 8);
 		Inner.HSplitTop(5.0f, nullptr, &Inner);
 		Inner.HSplitTop(LineSize, &Label, &Inner);
-		Ui()->DoLabel(&Label, Localize("Auto-laser сканит вокруг и стреляет, если может попасть во врага."), 14.0f, TEXTALIGN_ML);
+		Ui()->DoLabel(&Label, Localize("Scans around and fires if it can hit enemy."), 14.0f, TEXTALIGN_ML);
 	}
-	else if(s_SubTab == 6)
+	else if(s_SubTab == ZZ_TAB_VISUALS)
 	{
 		const float LineSize = 20.0f;
-		CUIRect Inner;
-		DoFeaturePanel(MainView, 320.0f, Inner);
+		static CScrollRegion s_VisualsScrollRegion;
+		static vec2 s_VisualsScrollOffset(0.0f, 0.0f);
+		CScrollRegionParams VisualsScrollParams;
+		VisualsScrollParams.m_ScrollUnit = 28.0f;
+		s_VisualsScrollRegion.Begin(&MainView, &s_VisualsScrollOffset, &VisualsScrollParams);
+		CUIRect ScrollView = MainView;
+		ScrollView.y += s_VisualsScrollOffset.y;
+		pFeatureScrollRegion = &s_VisualsScrollRegion;
+
+		CUIRect Left, Right;
+		ScrollView.VSplitMid(&Left, &Right, 20.0f);
 		static CButtonContainer s_IslandColorResetId;
 		static CButtonContainer s_WatermarkColorResetId;
+		CUIRect Inner;
+		BeginCard(Left, 350.0f, Inner);
+		DoPanelHeader(Inner, Localize("Visuals"));
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_BcAnimations, Localize("UI reveal animations"), &g_Config.m_BcAnimations, &Inner, LineSize);
 		DoButton_CheckBoxAutoVMarginAndSet(
 			&g_Config.m_ClZzWatermarkEnabled,
-			Localize("Показывать ватермарку ZZClient Free"),
+			Localize("Show ZZClient watermark"),
 			&g_Config.m_ClZzWatermarkEnabled,
 			&Inner,
 			LineSize);
 		DoButton_CheckBoxAutoVMarginAndSet(
 			&g_Config.m_ClZzIslandRainbowEnabled,
-			Localize("Радужная обводка островка"),
+			Localize("Rainbow island border"),
 			&g_Config.m_ClZzIslandRainbowEnabled,
 			&Inner,
 			LineSize);
 		DoButton_CheckBoxAutoVMarginAndSet(
 			&g_Config.m_ClZzWatermarkRainbowEnabled,
-			Localize("Радужная обводка ватермарки"),
+			Localize("Rainbow watermark border"),
 			&g_Config.m_ClZzWatermarkRainbowEnabled,
 			&Inner,
 			LineSize);
 		DoButton_CheckBoxAutoVMarginAndSet(
 			&g_Config.m_ClZzIslandColorApplyWhenPlayerActive,
-			Localize("Островок: применять цвет даже когда плеер активен"),
+			Localize("Force island color with player"),
 			&g_Config.m_ClZzIslandColorApplyWhenPlayerActive,
 			&Inner,
 			LineSize);
 		DoButton_CheckBoxAutoVMarginAndSet(
 			&g_Config.m_ClZzWatermarkColorApplyWhenPlayerActive,
-			Localize("Ватермарка: применять цвет даже когда плеер активен"),
+			Localize("Force watermark color with player"),
 			&g_Config.m_ClZzWatermarkColorApplyWhenPlayerActive,
 			&Inner,
 			LineSize);
+		Inner.HSplitTop(LineSize, &Button, &Inner);
+		static CButtonContainer s_HudEditModeButton;
+		if(DoButton_Menu(
+			   &s_HudEditModeButton,
+			   g_Config.m_ClZzHudEditMode ? Localize("Exit HUD edit mode (save)") : Localize("Enter HUD edit mode"),
+			   0,
+			   &Button,
+			   BUTTONFLAG_LEFT,
+			   nullptr,
+			   IGraphics::CORNER_ALL,
+			   5.0f,
+			   0.0f,
+			   g_Config.m_ClZzHudEditMode ? ColorRGBA(0.43f, 0.24f, 0.23f, 0.93f) : ColorRGBA(0.15f, 0.31f, 0.46f, 0.93f)))
+		{
+			g_Config.m_ClZzHudEditMode ^= 1;
+			if(!g_Config.m_ClZzHudEditMode)
+				(void)ConfigManager()->Save();
+		}
+		Inner.HSplitTop(4.0f, nullptr, &Inner);
+		Inner.HSplitTop(LineSize, &Label, &Inner);
+		Ui()->DoLabel(&Label, Localize("In edit mode: drag widgets, ESC exits and saves."), 13.0f, TEXTALIGN_ML);
+		Inner.HSplitTop(4.0f, nullptr, &Inner);
+		Inner.HSplitTop(LineSize, &Button, &Inner);
+		static CButtonContainer s_ResetHudLayoutButton;
+		if(DoButton_Menu(&s_ResetHudLayoutButton, Localize("Reset HUD layout"), 0, &Button))
+		{
+			g_Config.m_ClZzHudArraylistX = 980;
+			g_Config.m_ClZzHudArraylistY = 500;
+			g_Config.m_ClZzHudNotifyX = 980;
+			g_Config.m_ClZzHudNotifyY = 80;
+			g_Config.m_ClZzHudIslandX = 500;
+			g_Config.m_ClZzHudIslandY = 20;
+			g_Config.m_ClZzHudWatermarkX = 980;
+			g_Config.m_ClZzHudWatermarkY = 20;
+		}
 		DoLine_ColorPicker(
 			&s_IslandColorResetId,
 			25.0f,
 			13.0f,
 			4.0f,
 			&Inner,
-			Localize("Цвет островка"),
+			Localize("Island color"),
 			&g_Config.m_ClZzIslandColor,
 			ColorRGBA(0.32f, 0.72f, 1.0f, 1.0f),
 			false);
@@ -916,30 +1152,252 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 			13.0f,
 			4.0f,
 			&Inner,
-			Localize("Цвет ватермарки"),
+			Localize("Watermark color"),
 			&g_Config.m_ClZzWatermarkColor,
 			ColorRGBA(0.32f, 0.72f, 1.0f, 1.0f),
 			false);
-		Inner.HSplitTop(6.0f, nullptr, &Inner);
-		Inner.HSplitTop(LineSize * 2.4f, &Label, &Inner);
-		Ui()->DoLabel(&Label, Localize("Если rainbow выключен, используется выбранный цвет. При включенном флаге цвет форсится даже при активном плеере."), 14.0f, TEXTALIGN_ML);
+
+		static float s_JellyPhase = 0.0f;
+		static float s_3dPhase = 0.0f;
+		static float s_MagicPhase = 0.0f;
+		static float s_OrbitPhase = 0.0f;
+		static float s_HammerHitParticlesPhase = 0.0f;
+		static float s_CameraDriftPhase = 0.0f;
+		static float s_DynamicFovPhase = 0.0f;
+
+		const bool JellyEnabled = g_Config.m_ClZzJellyTee != 0;
+		const bool Particles3dEnabled = g_Config.m_ClZz3dParticles != 0;
+		const bool MagicEnabled = g_Config.m_ClZzMagicParticles != 0;
+		const bool OrbitEnabled = g_Config.m_ClZzOrbitAura != 0;
+		const bool HammerHitParticlesEnabled = g_Config.m_ClZzHammerHitParticles != 0;
+		const bool CameraDriftEnabled = g_Config.m_ClZzCameraDrift != 0;
+		const bool DynamicFovEnabled = g_Config.m_ClZzDynamicFov != 0;
+		UpdateRevealPhase(s_JellyPhase, JellyEnabled);
+		UpdateRevealPhase(s_3dPhase, Particles3dEnabled);
+		UpdateRevealPhase(s_MagicPhase, MagicEnabled);
+		UpdateRevealPhase(s_OrbitPhase, OrbitEnabled);
+		UpdateRevealPhase(s_HammerHitParticlesPhase, HammerHitParticlesEnabled);
+		UpdateRevealPhase(s_CameraDriftPhase, CameraDriftEnabled);
+		UpdateRevealPhase(s_DynamicFovPhase, DynamicFovEnabled);
+
+		{
+			CUIRect Expand;
+			BeginCard(Right, 88.0f + 102.0f * s_CameraDriftPhase, Inner);
+			DoPanelHeader(Inner, Localize("Camera Drift"));
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzCameraDrift, Localize("Enable camera drift"), &g_Config.m_ClZzCameraDrift, &Inner, LineSize);
+			const float Extra = 102.0f * s_CameraDriftPhase;
+			if(Extra > 0.0f)
+			{
+				Inner.HSplitTop(Extra, &Expand, &Inner);
+				Expand.HSplitTop(LineSize, &Button, &Expand);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzCameraDriftAmount, &g_Config.m_ClZzCameraDriftAmount, &Button, Localize("Camera drift amount"), 1, 200);
+				Expand.HSplitTop(LineSize, &Button, &Expand);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzCameraDriftSmoothness, &g_Config.m_ClZzCameraDriftSmoothness, &Button, Localize("Camera drift smoothness"), 1, 20);
+
+				CUIRect DirectionRow;
+				Expand.HSplitTop(LineSize, &DirectionRow, &Expand);
+				CUIRect DirectionForward;
+				CUIRect DirectionBackward;
+				DirectionRow.VSplitMid(&DirectionForward, &DirectionBackward, 5.0f);
+				static CButtonContainer s_CameraDriftForwardButton;
+				static CButtonContainer s_CameraDriftBackwardButton;
+				if(DoButton_CheckBox(&s_CameraDriftForwardButton, Localize("Forward"), !g_Config.m_ClZzCameraDriftReverse, &DirectionForward))
+					g_Config.m_ClZzCameraDriftReverse = 0;
+				if(DoButton_CheckBox(&s_CameraDriftBackwardButton, Localize("Backward"), g_Config.m_ClZzCameraDriftReverse, &DirectionBackward))
+					g_Config.m_ClZzCameraDriftReverse = 1;
+			}
+		}
+
+		{
+			CUIRect Expand;
+			BeginCard(Right, 88.0f + 64.0f * s_DynamicFovPhase, Inner);
+			DoPanelHeader(Inner, Localize("Dynamic FOV"));
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzDynamicFov, Localize("Enable dynamic FOV"), &g_Config.m_ClZzDynamicFov, &Inner, LineSize);
+			const float Extra = 64.0f * s_DynamicFovPhase;
+			if(Extra > 0.0f)
+			{
+				Inner.HSplitTop(Extra, &Expand, &Inner);
+				Expand.HSplitTop(LineSize, &Button, &Expand);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzDynamicFovAmount, &g_Config.m_ClZzDynamicFovAmount, &Button, Localize("Dynamic FOV amount"), 1, 200);
+				Expand.HSplitTop(LineSize, &Button, &Expand);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzDynamicFovSmoothness, &g_Config.m_ClZzDynamicFovSmoothness, &Button, Localize("Dynamic FOV smoothness"), 1, 20);
+			}
+		}
+
+		{
+			CUIRect Expand;
+			BeginCard(Right, 88.0f + 112.0f * s_JellyPhase, Inner);
+			DoPanelHeader(Inner, Localize("Jelly Tee"));
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzJellyTee, Localize("Enable jelly tee"), &g_Config.m_ClZzJellyTee, &Inner, LineSize);
+			const float Extra = 112.0f * s_JellyPhase;
+			if(Extra > 0.0f)
+			{
+				Inner.HSplitTop(Extra, &Expand, &Inner);
+				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzJellyTeeOthers, Localize("Apply to others"), &g_Config.m_ClZzJellyTeeOthers, &Expand, LineSize);
+				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzJellyTeeSuper, Localize("Super jelly tee"), &g_Config.m_ClZzJellyTeeSuper, &Expand, LineSize);
+				if(g_Config.m_ClZzJellyTeeSuper)
+				{
+					static CUi::SDropDownState s_JellySuperModeState;
+					static CScrollRegion s_JellySuperModeScroll;
+					s_JellySuperModeState.m_SelectionPopupContext.m_pScrollRegion = &s_JellySuperModeScroll;
+					const char *apJellySuperModes[] = {Localize("Normal"), Localize("Medium"), Localize("Crazy")};
+					Expand.HSplitTop(LineSize, &Button, &Expand);
+					g_Config.m_ClZzJellyTeeSuperMode = Ui()->DoDropDown(&Button, std::clamp(g_Config.m_ClZzJellyTeeSuperMode, 0, 2), apJellySuperModes, 3, s_JellySuperModeState);
+				}
+				Expand.HSplitTop(LineSize, &Button, &Expand);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzJellyTeeStrength, &g_Config.m_ClZzJellyTeeStrength, &Button, Localize("Strength"), 0, 1000);
+				Expand.HSplitTop(LineSize, &Button, &Expand);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzJellyTeeDuration, &g_Config.m_ClZzJellyTeeDuration, &Button, Localize("Duration"), 1, 500);
+			}
+		}
+
+		{
+			CUIRect Expand;
+			BeginCard(Right, 88.0f + 140.0f * s_3dPhase, Inner);
+			DoPanelHeader(Inner, Localize("3D Particles"));
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZz3dParticles, Localize("Enable 3D particles"), &g_Config.m_ClZz3dParticles, &Inner, LineSize);
+			const float Extra = 140.0f * s_3dPhase;
+			if(Extra > 0.0f)
+			{
+				static CUi::SDropDownState s_3dTypeState;
+				static CScrollRegion s_3dTypeScroll;
+				s_3dTypeState.m_SelectionPopupContext.m_pScrollRegion = &s_3dTypeScroll;
+				const char *ap3dTypes[] = {Localize("Cube"), Localize("Heart"), Localize("Mixed")};
+				Inner.HSplitTop(Extra, &Expand, &Inner);
+				Expand.HSplitTop(LineSize, &Button, &Expand);
+				g_Config.m_ClZz3dParticlesType = Ui()->DoDropDown(&Button, g_Config.m_ClZz3dParticlesType - 1, ap3dTypes, 3, s_3dTypeState) + 1;
+				Expand.HSplitTop(LineSize, &Button, &Expand);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZz3dParticlesCount, &g_Config.m_ClZz3dParticlesCount, &Button, Localize("Count"), 1, 200);
+				Expand.HSplitTop(LineSize, &Button, &Expand);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZz3dParticlesSpeed, &g_Config.m_ClZz3dParticlesSpeed, &Button, Localize("Speed"), 1, 500);
+				Expand.HSplitTop(LineSize, &Button, &Expand);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZz3dParticlesDepth, &g_Config.m_ClZz3dParticlesDepth, &Button, Localize("Depth"), 10, 1000);
+				Expand.HSplitTop(LineSize, &Button, &Expand);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZz3dParticlesAlpha, &g_Config.m_ClZz3dParticlesAlpha, &Button, Localize("Alpha"), 1, 100);
+				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZz3dParticlesGlow, Localize("Glow"), &g_Config.m_ClZz3dParticlesGlow, &Expand, LineSize);
+			}
+		}
+
+		{
+			CUIRect Expand;
+			BeginCard(Right, 88.0f + 120.0f * s_MagicPhase, Inner);
+			DoPanelHeader(Inner, Localize("Magic Particles"));
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzMagicParticles, Localize("Enable magic particles"), &g_Config.m_ClZzMagicParticles, &Inner, LineSize);
+			const float Extra = 120.0f * s_MagicPhase;
+			if(Extra > 0.0f)
+			{
+				static CUi::SDropDownState s_MagicTypeState;
+				static CScrollRegion s_MagicTypeScroll;
+				s_MagicTypeState.m_SelectionPopupContext.m_pScrollRegion = &s_MagicTypeScroll;
+				const char *apMagicTypes[] = {Localize("Slice"), Localize("Ball"), Localize("Smoke"), Localize("Shell")};
+				Inner.HSplitTop(Extra, &Expand, &Inner);
+				Expand.HSplitTop(LineSize, &Button, &Expand);
+				g_Config.m_ClZzMagicParticlesType = Ui()->DoDropDown(&Button, g_Config.m_ClZzMagicParticlesType - 1, apMagicTypes, 4, s_MagicTypeState) + 1;
+				Expand.HSplitTop(LineSize, &Button, &Expand);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzMagicParticlesCount, &g_Config.m_ClZzMagicParticlesCount, &Button, Localize("Count"), 1, 100);
+				Expand.HSplitTop(LineSize, &Button, &Expand);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzMagicParticlesRadius, &g_Config.m_ClZzMagicParticlesRadius, &Button, Localize("Radius"), 1, 1000);
+				Expand.HSplitTop(LineSize, &Button, &Expand);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzMagicParticlesSize, &g_Config.m_ClZzMagicParticlesSize, &Button, Localize("Size"), 1, 50);
+				Expand.HSplitTop(LineSize, &Button, &Expand);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzMagicParticlesAlphaDelay, &g_Config.m_ClZzMagicParticlesAlphaDelay, &Button, Localize("Alpha delay"), 1, 100);
+			}
+		}
+
+		{
+			CUIRect Expand;
+			BeginCard(Right, 88.0f + 120.0f * s_OrbitPhase, Inner);
+			DoPanelHeader(Inner, Localize("Orbit Aura"));
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzOrbitAura, Localize("Enable orbit aura"), &g_Config.m_ClZzOrbitAura, &Inner, LineSize);
+			const float Extra = 120.0f * s_OrbitPhase;
+			if(Extra > 0.0f)
+			{
+				Inner.HSplitTop(Extra, &Expand, &Inner);
+				Expand.HSplitTop(LineSize, &Button, &Expand);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzOrbitAuraRadius, &g_Config.m_ClZzOrbitAuraRadius, &Button, Localize("Radius"), 8, 200);
+				Expand.HSplitTop(LineSize, &Button, &Expand);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzOrbitAuraParticles, &g_Config.m_ClZzOrbitAuraParticles, &Button, Localize("Particles"), 2, 120);
+				Expand.HSplitTop(LineSize, &Button, &Expand);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzOrbitAuraAlpha, &g_Config.m_ClZzOrbitAuraAlpha, &Button, Localize("Alpha"), 0, 100);
+				Expand.HSplitTop(LineSize, &Button, &Expand);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzOrbitAuraSpeed, &g_Config.m_ClZzOrbitAuraSpeed, &Button, Localize("Speed"), 10, 200);
+				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzOrbitAuraIdle, Localize("Only when idle"), &g_Config.m_ClZzOrbitAuraIdle, &Expand, LineSize);
+				if(g_Config.m_ClZzOrbitAuraIdle)
+				{
+					Expand.HSplitTop(LineSize, &Button, &Expand);
+					Ui()->DoScrollbarOption(&g_Config.m_ClZzOrbitAuraIdleTimer, &g_Config.m_ClZzOrbitAuraIdleTimer, &Button, Localize("Idle timer"), 1, 30);
+				}
+			}
+		}
+
+		{
+			CUIRect Expand;
+			BeginCard(Right, 88.0f + 182.0f * s_HammerHitParticlesPhase, Inner);
+			DoPanelHeader(Inner, Localize("Hammer Hit Particles"));
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzHammerHitParticles, Localize("Enable hammer hit particles"), &g_Config.m_ClZzHammerHitParticles, &Inner, LineSize);
+			const float Extra = 182.0f * s_HammerHitParticlesPhase;
+			if(Extra > 0.0f)
+			{
+				static CUi::SDropDownState s_HammerHitTypeState;
+				static CScrollRegion s_HammerHitTypeScroll;
+				s_HammerHitTypeState.m_SelectionPopupContext.m_pScrollRegion = &s_HammerHitTypeScroll;
+				const char *apHammerHitTypes[] = {Localize("Cubes"), Localize("Stars"), Localize("Mixed")};
+				Inner.HSplitTop(Extra, &Expand, &Inner);
+				DoButton_CheckBoxAutoVMarginAndSet(
+					&g_Config.m_ClZzHammerHitParticlesHideDefaultHitEffect,
+					Localize("Hide default hit effect"),
+					&g_Config.m_ClZzHammerHitParticlesHideDefaultHitEffect,
+					&Expand,
+					LineSize);
+				Expand.HSplitTop(LineSize, &Button, &Expand);
+				const int HammerTypeSel = std::clamp(g_Config.m_ClZzHammerHitParticlesType - 1, 0, 2);
+				g_Config.m_ClZzHammerHitParticlesType = Ui()->DoDropDown(&Button, HammerTypeSel, apHammerHitTypes, 3, s_HammerHitTypeState) + 1;
+				Expand.HSplitTop(LineSize, &Button, &Expand);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzHammerHitParticlesCount, &g_Config.m_ClZzHammerHitParticlesCount, &Button, Localize("Count"), 1, 80);
+				Expand.HSplitTop(LineSize, &Button, &Expand);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzHammerHitParticlesSize, &g_Config.m_ClZzHammerHitParticlesSize, &Button, Localize("Size"), 2, 36);
+				Expand.HSplitTop(LineSize, &Button, &Expand);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzHammerHitParticlesSpeed, &g_Config.m_ClZzHammerHitParticlesSpeed, &Button, Localize("Speed"), 20, 1200);
+				Expand.HSplitTop(LineSize, &Button, &Expand);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzHammerHitParticlesLifetime, &g_Config.m_ClZzHammerHitParticlesLifetime, &Button, Localize("Lifetime ms"), 100, 2500);
+				Expand.HSplitTop(LineSize, &Button, &Expand);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzHammerHitParticlesAlpha, &g_Config.m_ClZzHammerHitParticlesAlpha, &Button, Localize("Alpha"), 1, 100);
+				static CUi::SDropDownState s_HammerHitColorModeState;
+				static CScrollRegion s_HammerHitColorModeScroll;
+				s_HammerHitColorModeState.m_SelectionPopupContext.m_pScrollRegion = &s_HammerHitColorModeScroll;
+				const char *apHammerColorModes[] = {Localize("Custom"), Localize("Rainbow")};
+				Expand.HSplitTop(LineSize, &Button, &Expand);
+				const int HammerColorModeSel = std::clamp(g_Config.m_ClZzHammerHitParticlesColorMode - 1, 0, 1);
+				g_Config.m_ClZzHammerHitParticlesColorMode = Ui()->DoDropDown(&Button, HammerColorModeSel, apHammerColorModes, 2, s_HammerHitColorModeState) + 1;
+				if(g_Config.m_ClZzHammerHitParticlesColorMode == 1)
+				{
+					static CButtonContainer s_HammerHitParticlesColorResetId;
+					DoLine_ColorPicker(&s_HammerHitParticlesColorResetId, 25.0f, 13.0f, 4.0f, &Expand, Localize("Particle color"), &g_Config.m_ClZzHammerHitParticlesColor, ColorRGBA(1.0f, 1.0f, 1.0f, 1.0f), false);
+				}
+			}
+		}
+		EndCard();
+		s_VisualsScrollRegion.End();
+		pFeatureScrollRegion = nullptr;
 	}
-	else if(s_SubTab == 7)
+	else if(s_SubTab == ZZ_TAB_BESTCLIENT)
 	{
 		const float LineSize = 20.0f;
 		static int s_BestClientSubTab = 0;
-		static CButtonContainer s_aBestClientSubTabs[2] = {};
+		static CButtonContainer s_aBestClientSubTabs[4] = {};
 
 		CUIRect InnerTabBar, InnerTabButton;
 		MainView.HSplitTop(22.0f, &InnerTabBar, &MainView);
-		const float InnerTabWidth = InnerTabBar.w / 2.0f;
+		const float InnerTabWidth = InnerTabBar.w / 4.0f;
 		const char *apInnerTabNames[] = {
 			Localize("BestClient"),
-			Localize("Voice Chat")};
-		for(int i = 0; i < 2; i++)
+			Localize("Voice Chat"),
+			Localize("Network"),
+			Localize("Bots")};
+		for(int i = 0; i < 4; i++)
 		{
 			InnerTabBar.VSplitLeft(InnerTabWidth, &InnerTabButton, &InnerTabBar);
-			const int Corners = i == 0 ? IGraphics::CORNER_L : IGraphics::CORNER_R;
+			const int Corners = i == 0 ? IGraphics::CORNER_L : i == 3 ? IGraphics::CORNER_R : IGraphics::CORNER_NONE;
 			if(DoButton_MenuTab(&s_aBestClientSubTabs[i], apInnerTabNames[i], s_BestClientSubTab == i, &InnerTabButton, Corners, nullptr, nullptr, nullptr, nullptr, 4.0f))
 				s_BestClientSubTab = i;
 		}
@@ -948,7 +1406,8 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 		if(s_BestClientSubTab == 0)
 		{
 			CUIRect Inner;
-			DoFeaturePanel(MainView, 350.0f, Inner);
+			BeginCard(MainView, 350.0f, Inner);
+			DoPanelHeader(Inner, Localize("BestClient"));
 			DoButton_CheckBoxAutoVMarginAndSet(
 				&g_Config.m_ClZzBestclientRegister,
 				"Регистрировать игрока как пользователь бестклиента",
@@ -958,14 +1417,14 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 
 			DoButton_CheckBoxAutoVMarginAndSet(
 				&g_Config.m_ClZzBestclientRegisterNicksEnabled,
-				Localize("Отдельно: регистрировать игроков по никам"),
+				Localize("Регистрировать игроков по никам"),
 				&g_Config.m_ClZzBestclientRegisterNicksEnabled,
 				&Inner,
 				LineSize);
 
 			Inner.HSplitTop(8.0f, nullptr, &Inner);
 			Inner.HSplitTop(LineSize, &Label, &Inner);
-			Ui()->DoLabel(&Label, Localize("Ники для регистрации (через запятую)"), 14.0f, TEXTALIGN_ML);
+			Ui()->DoLabel(&Label, Localize("Ники для регистрации метки BestClient (через запятую)"), 14.0f, TEXTALIGN_ML);
 			Inner.HSplitTop(LineSize, &Button, &Inner);
 			static CLineInput s_BestClientRegisterNicks;
 			s_BestClientRegisterNicks.SetBuffer(g_Config.m_ClZzBestclientRegisterNicks, sizeof(g_Config.m_ClZzBestclientRegisterNicks));
@@ -975,8 +1434,22 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 			Inner.HSplitTop(8.0f, nullptr, &Inner);
 			DoButton_CheckBoxAutoVMarginAndSet(
 				&g_Config.m_ClZzBestclientRegisterAll,
-				Localize("Отдельно: регистрировать всех игроков сервера"),
+				Localize("Регистрировать всех игроков сервера для метки BestClient"),
 				&g_Config.m_ClZzBestclientRegisterAll,
+				&Inner,
+				LineSize);
+
+			Inner.HSplitTop(8.0f, nullptr, &Inner);
+			DoButton_CheckBoxAutoVMarginAndSet(
+				&g_Config.m_ClZzBestclientShowInTab,
+				Localize("Показывать метки BestClient в TAB"),
+				&g_Config.m_ClZzBestclientShowInTab,
+				&Inner,
+				LineSize);
+			DoButton_CheckBoxAutoVMarginAndSet(
+				&g_Config.m_ClZzBestclientShowInBrowser,
+				Localize("Показывать метки BestClient в браузере"),
+				&g_Config.m_ClZzBestclientShowInBrowser,
 				&Inner,
 				LineSize);
 
@@ -990,10 +1463,11 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 			Inner.HSplitTop(LineSize, &Label, &Inner);
 			Ui()->DoLabel(&Label, g_Config.m_ClZzBestclientTokenUrl, 14.0f, TEXTALIGN_ML);
 		}
-		else
+		else if(s_BestClientSubTab == 1)
 		{
 			CUIRect Inner;
-			DoFeaturePanel(MainView, maximum(140.0f, MainView.h - 4.0f), Inner);
+			BeginCard(MainView, maximum(140.0f, MainView.h - 4.0f), Inner);
+			DoPanelHeader(Inner, Localize("Voice Chat"));
 
 			CUIRect Row;
 			Inner.HSplitTop(20.0f, &Row, &Inner);
@@ -1007,7 +1481,1034 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 			Inner.HSplitTop(120.0f, &Row, &Inner);
 			GameClient()->m_VoiceChat.RenderMenuControlBinds(Row);
 		}
+		else if(s_BestClientSubTab == 2)
+		{
+			CUIRect Inner;
+			BeginCard(MainView, 520.0f, Inner);
+			DoPanelHeader(Inner, Localize("Network"));
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzProxyEnabled, Localize("Enable proxy"), &g_Config.m_ClZzProxyEnabled, &Inner, LineSize);
+
+			Inner.HSplitTop(4.0f, nullptr, &Inner);
+			Inner.HSplitTop(LineSize, &Label, &Inner);
+			Ui()->DoLabel(&Label, Localize("Proxy address (ip:port)"), 14.0f, TEXTALIGN_ML);
+			Inner.HSplitTop(LineSize, &Button, &Inner);
+			static CLineInput s_ProxyAddressInput;
+			s_ProxyAddressInput.SetBuffer(g_Config.m_ClZzProxyAddress, sizeof(g_Config.m_ClZzProxyAddress));
+			s_ProxyAddressInput.SetEmptyText("127.0.0.1:1080");
+			Ui()->DoEditBox(&s_ProxyAddressInput, &Button, 12.0f);
+
+			Inner.HSplitTop(4.0f, nullptr, &Inner);
+			Inner.HSplitTop(LineSize, &Label, &Inner);
+			Ui()->DoLabel(&Label, Localize("Proxy login (optional)"), 14.0f, TEXTALIGN_ML);
+			Inner.HSplitTop(LineSize, &Button, &Inner);
+			static CLineInput s_ProxyUsernameInput;
+			s_ProxyUsernameInput.SetBuffer(g_Config.m_ClZzProxyUsername, sizeof(g_Config.m_ClZzProxyUsername));
+			s_ProxyUsernameInput.SetEmptyText("username");
+			Ui()->DoEditBox(&s_ProxyUsernameInput, &Button, 12.0f);
+
+			Inner.HSplitTop(4.0f, nullptr, &Inner);
+			Inner.HSplitTop(LineSize, &Label, &Inner);
+			Ui()->DoLabel(&Label, Localize("Proxy password (optional)"), 14.0f, TEXTALIGN_ML);
+			Inner.HSplitTop(LineSize, &Button, &Inner);
+			static CLineInput s_ProxyPasswordInput;
+			s_ProxyPasswordInput.SetBuffer(g_Config.m_ClZzProxyPassword, sizeof(g_Config.m_ClZzProxyPassword));
+			s_ProxyPasswordInput.SetEmptyText("password");
+			Ui()->DoEditBox(&s_ProxyPasswordInput, &Button, 12.0f);
+
+			Inner.HSplitTop(8.0f, nullptr, &Inner);
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzFakePing, Localize("Fake ping"), &g_Config.m_ClZzFakePing, &Inner, LineSize);
+			Inner.HSplitTop(LineSize, &Button, &Inner);
+			Ui()->DoScrollbarOption(&g_Config.m_ClZzFakePingValue, &g_Config.m_ClZzFakePingValue, &Button, Localize("Fake ping ms"), 0, 3000);
+
+			Inner.HSplitTop(6.0f, nullptr, &Inner);
+			Inner.HSplitTop(LineSize * 2.0f, &Label, &Inner);
+			Ui()->DoLabel(&Label, Localize("SOCKS5 proxy auto-restores after short drops. Fake ping delays outgoing traffic."), 14.0f, TEXTALIGN_ML);
+
+			Inner.HSplitTop(10.0f, nullptr, &Inner);
+			DoPanelHeader(Inner, Localize("Client spoofing"));
+			Inner.HSplitTop(LineSize, &Button, &Inner);
+			Button.VSplitMid(&Label, &Button);
+			Ui()->DoLabel(&Label, Localize("Version Number:"), 14.0f, TEXTALIGN_ML);
+			static char s_aVerBuf[32];
+			static bool s_VerInitialized = false;
+			if(!s_VerInitialized)
+			{
+				str_format(s_aVerBuf, sizeof(s_aVerBuf), "%d", g_Config.m_ClZzNetVersionNum);
+				s_VerInitialized = true;
+			}
+			static CLineInput s_Ver(s_aVerBuf, sizeof(s_aVerBuf));
+			Ui()->DoEditBox(&s_Ver, &Button, 12.0f);
+			g_Config.m_ClZzNetVersionNum = str_toint(s_aVerBuf);
+
+			Inner.HSplitTop(4.0f, nullptr, &Inner);
+			Inner.HSplitTop(LineSize, &Button, &Inner);
+			Button.VSplitMid(&Label, &Button);
+			Ui()->DoLabel(&Label, Localize("Version String:"), 14.0f, TEXTALIGN_ML);
+			static CLineInput s_VerStr(g_Config.m_ClZzNetVersionName, sizeof(g_Config.m_ClZzNetVersionName));
+			Ui()->DoEditBox(&s_VerStr, &Button, 12.0f);
+
+			Inner.HSplitTop(4.0f, nullptr, &Inner);
+			{
+				static std::vector<const char *> s_ClientDropDownNames = {
+					"DDNet", "TClient", "EClient", "Cactus", "ChillerBot", "Pulse Client", "FeX Client", "S-Client", "StA Client",
+					"Koshka Client", "Best Client", "Aiodob Client", "Nofis Client", "Rushie", "Duck Client", "Axis Client",
+					"Kaizo Client", "JS Client", "Nofis Client"};
+				static CUi::SDropDownState s_ClientDropDownState;
+				static CScrollRegion s_ClientDropDownScrollRegion;
+				s_ClientDropDownState.m_SelectionPopupContext.m_pScrollRegion = &s_ClientDropDownScrollRegion;
+				CUIRect ClientDropDownRect;
+				Inner.HSplitTop(LineSize, &ClientDropDownRect, &Inner);
+				ClientDropDownRect.VSplitLeft(130.0f, &Label, &ClientDropDownRect);
+				Ui()->DoLabel(&Label, Localize("Spoof Client:"), 14.0f, TEXTALIGN_ML);
+				const int ClientSelectedNew = Ui()->DoDropDown(&ClientDropDownRect, g_Config.m_ClZzNetIdentity, s_ClientDropDownNames.data(), s_ClientDropDownNames.size(), s_ClientDropDownState);
+				if(g_Config.m_ClZzNetIdentity != ClientSelectedNew)
+					g_Config.m_ClZzNetIdentity = ClientSelectedNew;
+			}
+
+			Inner.HSplitTop(4.0f, nullptr, &Inner);
+			Inner.HSplitTop(LineSize, &Button, &Inner);
+			Button.VSplitMid(&Label, &Button);
+			Ui()->DoLabel(&Label, Localize("Git Revision:"), 14.0f, TEXTALIGN_ML);
+			static CLineInput s_GitRev(g_Config.m_ClZzNetGitRev, sizeof(g_Config.m_ClZzNetGitRev));
+			Ui()->DoEditBox(&s_GitRev, &Button, 12.0f);
+
+			Inner.HSplitTop(4.0f, nullptr, &Inner);
+			Inner.HSplitTop(LineSize, &Button, &Inner);
+			CUIRect BtnL, BtnR;
+			Button.VSplitMid(&BtnL, &BtnR, 4.0f);
+			static CButtonContainer s_DoVerStrBtn;
+			if(DoButton_Menu(&s_DoVerStrBtn, Localize("Auto complete Verstr"), 0, &BtnL))
+			{
+				const int Vernum = g_Config.m_ClZzNetVersionNum;
+				const int Major = Vernum / 1000;
+				const int Remainder = Vernum % 1000;
+				const int Patch = Remainder % 10;
+				const int Minor = Remainder / 10;
+				char aNewVerStr[32];
+				if(Patch != 0)
+					str_format(aNewVerStr, sizeof(aNewVerStr), "%d.%d.%d", Major, Minor, Patch);
+				else
+					str_format(aNewVerStr, sizeof(aNewVerStr), "%d.%d", Major, Minor);
+				str_copy(g_Config.m_ClZzNetVersionName, aNewVerStr, sizeof(g_Config.m_ClZzNetVersionName));
+				s_VerStr.SetBuffer(g_Config.m_ClZzNetVersionName, sizeof(g_Config.m_ClZzNetVersionName));
+			}
+			static CButtonContainer s_DoVerNumBtn;
+			if(DoButton_Menu(&s_DoVerNumBtn, Localize("Auto complete Vernum"), 0, &BtnR))
+			{
+				const char *pSrc = g_Config.m_ClZzNetVersionName;
+				int Major = 0, Minor = 0, Patch = 0;
+				if(sscanf(pSrc, "%d.%d.%d", &Major, &Minor, &Patch) >= 2)
+				{
+					const int NewVernum = Major * 1000 + Minor * 10 + Patch;
+					g_Config.m_ClZzNetVersionNum = NewVernum;
+					str_format(s_aVerBuf, sizeof(s_aVerBuf), "%d", NewVernum);
+				}
+			}
+		}
+		else
+		{
+			static CScrollRegion s_BotsScrollRegion;
+			static vec2 s_BotsScrollOffset(0.0f, 0.0f);
+			CScrollRegionParams ScrollParams;
+			ScrollParams.m_ScrollUnit = 28.0f;
+			s_BotsScrollRegion.Begin(&MainView, &s_BotsScrollOffset, &ScrollParams);
+			CUIRect ScrollView = MainView;
+			ScrollView.y += s_BotsScrollOffset.y;
+			pFeatureScrollRegion = &s_BotsScrollRegion;
+
+			static float s_BotsMirrorPhase = 0.0f;
+			static float s_BotsSkinCopyPhase = 0.0f;
+			static float s_BotsNameBasePhase = 0.0f;
+			static float s_BotsCustomColorPhase = 0.0f;
+			static float s_BotsIdentityCustomPhase = 0.0f;
+			static int s_BotsSubTab = 0; // 0 Main, 1 Control, 2 Others
+			static CButtonContainer s_aBotsSubTabs[3];
+			UpdateRevealPhase(s_BotsMirrorPhase, g_Config.m_ClZzAsyncBotsMirrorEnable != 0);
+			UpdateRevealPhase(s_BotsSkinCopyPhase, g_Config.m_ClZzAsyncBotsSkinMode == 1);
+			UpdateRevealPhase(s_BotsNameBasePhase, g_Config.m_ClZzAsyncBotsNameMode == 0);
+			UpdateRevealPhase(s_BotsCustomColorPhase, g_Config.m_ClZzAsyncBotsSkinUseCustomColor != 0);
+			UpdateRevealPhase(s_BotsIdentityCustomPhase, g_Config.m_ClZzAsyncBotsIdentityCustom != 0);
+			const auto FormatAsyncBotSummary = [&](char *pBuf, int BufSize) {
+				const auto &Stats = GameClient()->AsyncProxyBots().Stats();
+				str_format(pBuf, BufSize, "Bots: %d / Online: %d / Error: %d", Stats.m_Total, Stats.m_Ingame, Stats.m_Error);
+			};
+			CUIRect BotsTabs;
+			ScrollView.HSplitTop(24.0f, &BotsTabs, &ScrollView);
+			const float BotsTabW = BotsTabs.w / 3.0f;
+			const char *apBotsTabNames[] = {Localize("Main"), Localize("Control"), Localize("Others")};
+			for(int i = 0; i < 3; i++)
+			{
+				CUIRect TabBtn;
+				BotsTabs.VSplitLeft(BotsTabW, &TabBtn, &BotsTabs);
+				const int Corners = i == 0 ? IGraphics::CORNER_L : (i == 2 ? IGraphics::CORNER_R : IGraphics::CORNER_NONE);
+				if(DoButton_MenuTab(&s_aBotsSubTabs[i], apBotsTabNames[i], s_BotsSubTab == i, &TabBtn, Corners, nullptr, nullptr, nullptr, nullptr, 4.0f))
+					s_BotsSubTab = i;
+			}
+			ScrollView.HSplitTop(8.0f, nullptr, &ScrollView);
+			CUIRect ScrollLeft, ScrollRight;
+			ScrollView.VSplitMid(&ScrollLeft, &ScrollRight, 8.0f);
+
+			{
+
+			if(s_BotsSubTab == 0)
+			{
+				CUIRect Inner;
+				char aBotSummary[96];
+				FormatAsyncBotSummary(aBotSummary, sizeof(aBotSummary));
+				const float Extra = 308.0f;
+				BeginCard(ScrollLeft, 152.0f + Extra, Inner);
+				DoPanelHeader(Inner, Localize("Connection"));
+				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAsyncBotsAutoConnect, Localize("Auto-start after connect"), &g_Config.m_ClZzAsyncBotsAutoConnect, &Inner, LineSize);
+				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAsyncBotsFastReconnect, Localize("Fast reconnect"), &g_Config.m_ClZzAsyncBotsFastReconnect, &Inner, LineSize);
+				Inner.HSplitTop(LineSize, &Button, &Inner);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzAsyncBotsFastReconnectDelayMs, &g_Config.m_ClZzAsyncBotsFastReconnectDelayMs, &Button, Localize("Fast reconnect delay (ms)"), 0, 3000);
+				Inner.HSplitTop(8.0f, nullptr, &Inner);
+				CUIRect Row;
+				Inner.HSplitTop(LineSize, &Row, &Inner);
+				CUIRect BtnConnect, BtnDisconnect;
+				Row.VSplitMid(&BtnConnect, &BtnDisconnect, 5.0f);
+				static CButtonContainer s_AsyncBotsConnectMain;
+				static CButtonContainer s_AsyncBotsDisconnectMain;
+				if(DoButton_Menu(&s_AsyncBotsConnectMain, Localize("Connect"), 0, &BtnConnect))
+					GameClient()->AsyncProxyBots().StartFromConfig(GameClient());
+				if(DoButton_Menu(&s_AsyncBotsDisconnectMain, Localize("Disconnect"), 0, &BtnDisconnect))
+					GameClient()->AsyncProxyBots().StopAll();
+				Inner.HSplitTop(6.0f, nullptr, &Inner);
+				Inner.HSplitTop(LineSize, &Label, &Inner);
+				Ui()->DoLabel(&Label, aBotSummary, 14.0f, TEXTALIGN_ML);
+				Inner.HSplitTop(4.0f, nullptr, &Inner);
+				Inner.HSplitTop(LineSize, &Label, &Inner);
+				Ui()->DoLabel(&Label, GameClient()->AsyncProxyBots().StatusText(), 14.0f, TEXTALIGN_ML);
+				CUIRect Expand;
+				Inner.HSplitTop(Extra, &Expand, &Inner);
+				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAsyncBotsSkipMapDownload, Localize("Skip map download"), &g_Config.m_ClZzAsyncBotsSkipMapDownload, &Expand, LineSize);
+				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAsyncBotsUseSavedMaps, Localize("Use saved maps first"), &g_Config.m_ClZzAsyncBotsUseSavedMaps, &Expand, LineSize);
+				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAsyncBotsVerbose, Localize("Verbose diagnostics"), &g_Config.m_ClZzAsyncBotsVerbose, &Expand, LineSize);
+				Expand.HSplitTop(LineSize, &Button, &Expand);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzAsyncBotsPerProxy, &g_Config.m_ClZzAsyncBotsPerProxy, &Button, Localize("Bots per proxy"), 1, 64);
+				Expand.HSplitTop(LineSize, &Button, &Expand);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzAsyncBotsMaxTotal, &g_Config.m_ClZzAsyncBotsMaxTotal, &Button, Localize("Max total bots"), 1, 2048);
+				Expand.HSplitTop(LineSize, &Button, &Expand);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzAsyncBotsInputRate, &g_Config.m_ClZzAsyncBotsInputRate, &Button, Localize("Input rate (pps)"), 1, 100);
+				Expand.HSplitTop(LineSize, &Button, &Expand);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzAsyncBotsConnectTimeoutMs, &g_Config.m_ClZzAsyncBotsConnectTimeoutMs, &Button, Localize("Connect timeout (ms)"), 1000, 15000);
+			}
+
+			if(s_BotsSubTab == 0 || s_BotsSubTab == 1)
+			{
+				CUIRect Inner;
+				BeginCard(ScrollRight, 96.0f, Inner);
+				DoPanelHeader(Inner, Localize("Proxy Pool"));
+				Inner.HSplitTop(LineSize, &Label, &Inner);
+				Ui()->DoLabel(&Label, Localize("SOCKS5 proxies (comma/newline/semicolon)"), 14.0f, TEXTALIGN_ML);
+				Inner.HSplitTop(LineSize, &Button, &Inner);
+				static CLineInput s_AsyncBotsProxies2;
+				s_AsyncBotsProxies2.SetBuffer(g_Config.m_ClZzAsyncBotsProxies, sizeof(g_Config.m_ClZzAsyncBotsProxies));
+				s_AsyncBotsProxies2.SetEmptyText("socks5://user:pass@1.2.3.4:1080, 5.6.7.8:1080");
+				Ui()->DoEditBox(&s_AsyncBotsProxies2, &Button, 12.0f);
+			}
+
+			if(s_BotsSubTab == 0 || s_BotsSubTab == 1)
+			{
+				CUIRect Inner;
+				const float CustomIdentityPhase = s_BotsIdentityCustomPhase;
+				const float CopyIdentityPhase = 1.0f - CustomIdentityPhase;
+				const float NameExtra = 52.0f * s_BotsNameBasePhase * CustomIdentityPhase;
+				const float SkinExtra = 52.0f * CustomIdentityPhase;
+				const float ColorExtra = 58.0f * s_BotsCustomColorPhase * CustomIdentityPhase;
+				const float CopyExtra = 170.0f * CopyIdentityPhase;
+				BeginCard(ScrollLeft, 280.0f + NameExtra + SkinExtra + ColorExtra + CopyExtra, Inner);
+				DoPanelHeader(Inner, Localize("Identity"));
+
+				auto IsSignedNumber = [](const char *pText) -> bool {
+					if(!pText || pText[0] == '\0')
+						return false;
+					const char *p = pText;
+					if(*p == '-')
+						++p;
+					if(*p == '\0')
+						return false;
+					for(; *p; ++p)
+					{
+						if(*p < '0' || *p > '9')
+							return false;
+					}
+					return true;
+				};
+
+				auto IsClientPresent = [&](int ClientId) -> bool {
+					return ClientId >= 0 && ClientId < MAX_CLIENTS && GameClient()->m_Snap.m_apPlayerInfos[ClientId] != nullptr;
+				};
+
+				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAsyncBotsIdentityCustom, Localize("Custom identity"), &g_Config.m_ClZzAsyncBotsIdentityCustom, &Inner, LineSize);
+
+				static CLineInput s_IdentityCopyIdInput;
+				static char s_aIdentityCopyIdBuf[16] = "-1";
+				static bool s_IdentityCopyIdInit = false;
+				if(!s_IdentityCopyIdInit)
+				{
+					str_format(s_aIdentityCopyIdBuf, sizeof(s_aIdentityCopyIdBuf), "%d", g_Config.m_ClZzAsyncBotsIdentityCopyClientId);
+					s_IdentityCopyIdInit = true;
+				}
+				s_IdentityCopyIdInput.SetBuffer(s_aIdentityCopyIdBuf, sizeof(s_aIdentityCopyIdBuf));
+				Inner.HSplitTop(LineSize, &Label, &Inner);
+				Ui()->DoLabel(&Label, Localize("Identity source client id"), 14.0f, TEXTALIGN_ML);
+				Inner.HSplitTop(LineSize, &Button, &Inner);
+				Ui()->DoEditBox(&s_IdentityCopyIdInput, &Button, 12.0f);
+
+				bool IdentityCopyIdValid = IsSignedNumber(s_aIdentityCopyIdBuf);
+				if(IdentityCopyIdValid)
+				{
+					const int Value = str_toint(s_aIdentityCopyIdBuf);
+					if(Value >= -1 && Value <= 200)
+						g_Config.m_ClZzAsyncBotsIdentityCopyClientId = Value;
+					else
+						IdentityCopyIdValid = false;
+				}
+				if(!IdentityCopyIdValid)
+				{
+					Inner.HSplitTop(LineSize, &Label, &Inner);
+					Ui()->DoLabel(&Label, Localize("Client id must be a number in range -1..200"), 14.0f, TEXTALIGN_ML);
+				}
+				else
+				{
+					const int SourceId = g_Config.m_ClZzAsyncBotsIdentityCopyClientId;
+					if(SourceId >= MAX_CLIENTS)
+					{
+						Inner.HSplitTop(LineSize, &Label, &Inner);
+						Ui()->DoLabel(&Label, Localize("Client id is above current protocol limit, cannot copy now"), 14.0f, TEXTALIGN_ML);
+					}
+					else if(SourceId >= 0 && !IsClientPresent(SourceId))
+					{
+						Inner.HSplitTop(LineSize, &Label, &Inner);
+						Ui()->DoLabel(&Label, Localize("Client id is not currently present on this server"), 14.0f, TEXTALIGN_ML);
+					}
+				}
+
+				static CUi::SDropDownState s_AsyncBotsNameModeState;
+				static CScrollRegion s_AsyncBotsNameModeScroll;
+				s_AsyncBotsNameModeState.m_SelectionPopupContext.m_pScrollRegion = &s_AsyncBotsNameModeScroll;
+				const char *apNameModes[] = {Localize("Base + index"), Localize("Pseudo-random letters")};
+				if(CustomIdentityPhase > 0.0f)
+				{
+					Inner.HSplitTop(LineSize, &Button, &Inner);
+					g_Config.m_ClZzAsyncBotsNameMode = Ui()->DoDropDown(&Button, g_Config.m_ClZzAsyncBotsNameMode, apNameModes, 2, s_AsyncBotsNameModeState);
+					if(NameExtra > 0.0f)
+					{
+						CUIRect Expand;
+						Inner.HSplitTop(NameExtra, &Expand, &Inner);
+						Expand.HSplitTop(LineSize, &Label, &Expand);
+						Ui()->DoLabel(&Label, Localize("Bot base name"), 14.0f, TEXTALIGN_ML);
+						Expand.HSplitTop(LineSize, &Button, &Expand);
+						static CLineInput s_AsyncBotsBaseName2;
+						s_AsyncBotsBaseName2.SetBuffer(g_Config.m_ClZzAsyncBotsBaseName, sizeof(g_Config.m_ClZzAsyncBotsBaseName));
+						s_AsyncBotsBaseName2.SetEmptyText("ZZBot");
+						Ui()->DoEditBox(&s_AsyncBotsBaseName2, &Button, 12.0f);
+					}
+
+					static CUi::SDropDownState s_AsyncBotsSkinModeState;
+					static CScrollRegion s_AsyncBotsSkinModeScroll;
+					s_AsyncBotsSkinModeState.m_SelectionPopupContext.m_pScrollRegion = &s_AsyncBotsSkinModeScroll;
+					const char *apSkinModes[] = {Localize("Fixed skin"), Localize("Copy client skin")};
+					Inner.HSplitTop(LineSize, &Button, &Inner);
+					g_Config.m_ClZzAsyncBotsSkinMode = Ui()->DoDropDown(&Button, g_Config.m_ClZzAsyncBotsSkinMode, apSkinModes, 2, s_AsyncBotsSkinModeState);
+
+					CUIRect SkinExpand;
+					Inner.HSplitTop(SkinExtra, &SkinExpand, &Inner);
+					if(g_Config.m_ClZzAsyncBotsSkinMode == 0)
+					{
+						SkinExpand.HSplitTop(LineSize, &Label, &SkinExpand);
+						Ui()->DoLabel(&Label, Localize("Bot fixed skin"), 14.0f, TEXTALIGN_ML);
+						SkinExpand.HSplitTop(LineSize, &Button, &SkinExpand);
+						static CLineInput s_AsyncBotsSkinName;
+						s_AsyncBotsSkinName.SetBuffer(g_Config.m_ClZzAsyncBotsSkinName, sizeof(g_Config.m_ClZzAsyncBotsSkinName));
+						s_AsyncBotsSkinName.SetEmptyText("default");
+						Ui()->DoEditBox(&s_AsyncBotsSkinName, &Button, 12.0f);
+					}
+					else
+					{
+						static CLineInput s_SkinCopyIdInput;
+						static char s_aSkinCopyIdBuf[16] = "-1";
+						static bool s_SkinCopyIdInit = false;
+						if(!s_SkinCopyIdInit)
+						{
+							str_format(s_aSkinCopyIdBuf, sizeof(s_aSkinCopyIdBuf), "%d", g_Config.m_ClZzAsyncBotsSkinCopyClientId);
+							s_SkinCopyIdInit = true;
+						}
+						s_SkinCopyIdInput.SetBuffer(s_aSkinCopyIdBuf, sizeof(s_aSkinCopyIdBuf));
+						SkinExpand.HSplitTop(LineSize, &Label, &SkinExpand);
+						Ui()->DoLabel(&Label, Localize("Copy skin+colors+clan from client id"), 14.0f, TEXTALIGN_ML);
+						SkinExpand.HSplitTop(LineSize, &Button, &SkinExpand);
+						Ui()->DoEditBox(&s_SkinCopyIdInput, &Button, 12.0f);
+						bool SkinCopyIdValid = IsSignedNumber(s_aSkinCopyIdBuf);
+						if(SkinCopyIdValid)
+						{
+							const int Value = str_toint(s_aSkinCopyIdBuf);
+							if(Value >= -1 && Value <= 200)
+								g_Config.m_ClZzAsyncBotsSkinCopyClientId = Value;
+							else
+								SkinCopyIdValid = false;
+						}
+						if(!SkinCopyIdValid)
+						{
+							SkinExpand.HSplitTop(LineSize, &Label, &SkinExpand);
+							Ui()->DoLabel(&Label, Localize("Client id must be a number in range -1..200"), 14.0f, TEXTALIGN_ML);
+						}
+					}
+
+					Inner.HSplitTop(LineSize, &Label, &Inner);
+					Ui()->DoLabel(&Label, Localize("Bot clan"), 14.0f, TEXTALIGN_ML);
+					Inner.HSplitTop(LineSize, &Button, &Inner);
+					static CLineInput s_AsyncBotsClan;
+					s_AsyncBotsClan.SetBuffer(g_Config.m_ClZzAsyncBotsClan, sizeof(g_Config.m_ClZzAsyncBotsClan));
+					Ui()->DoEditBox(&s_AsyncBotsClan, &Button, 12.0f);
+
+					Inner.HSplitTop(LineSize, &Label, &Inner);
+					Ui()->DoLabel(&Label, Localize("Bot country code"), 14.0f, TEXTALIGN_ML);
+					Inner.HSplitTop(LineSize, &Button, &Inner);
+					static CLineInput s_AsyncBotsCountryInput;
+					static char s_aAsyncBotsCountryBuf[16] = "-1";
+					static bool s_AsyncBotsCountryInit = false;
+					if(!s_AsyncBotsCountryInit)
+					{
+						str_format(s_aAsyncBotsCountryBuf, sizeof(s_aAsyncBotsCountryBuf), "%d", g_Config.m_ClZzAsyncBotsCountry);
+						s_AsyncBotsCountryInit = true;
+					}
+					s_AsyncBotsCountryInput.SetBuffer(s_aAsyncBotsCountryBuf, sizeof(s_aAsyncBotsCountryBuf));
+					Ui()->DoEditBox(&s_AsyncBotsCountryInput, &Button, 12.0f);
+					if(IsSignedNumber(s_aAsyncBotsCountryBuf))
+					{
+						const int Value = str_toint(s_aAsyncBotsCountryBuf);
+						if(Value >= -999 && Value <= 1000)
+							g_Config.m_ClZzAsyncBotsCountry = Value;
+					}
+
+					DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAsyncBotsSkinUseCustomColor, Localize("Use custom skin colors"), &g_Config.m_ClZzAsyncBotsSkinUseCustomColor, &Inner, LineSize);
+					if(ColorExtra > 0.0f)
+					{
+						static CButtonContainer s_AsyncBotsBodyColorResetId;
+						static CButtonContainer s_AsyncBotsFeetColorResetId;
+						DoLine_ColorPicker(&s_AsyncBotsBodyColorResetId, 25.0f, 13.0f, 4.0f, &Inner, Localize("Skin body color"), &g_Config.m_ClZzAsyncBotsSkinColorBody, color_cast<ColorRGBA>(ColorHSLA(65408, true)), false);
+						DoLine_ColorPicker(&s_AsyncBotsFeetColorResetId, 25.0f, 13.0f, 4.0f, &Inner, Localize("Skin feet color"), &g_Config.m_ClZzAsyncBotsSkinColorFeet, color_cast<ColorRGBA>(ColorHSLA(65408, true)), false);
+					}
+				}
+				else
+				{
+					DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAsyncBotsIdentityCopyName, Localize("Copy name"), &g_Config.m_ClZzAsyncBotsIdentityCopyName, &Inner, LineSize);
+					DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAsyncBotsIdentityCopySkin, Localize("Copy skin"), &g_Config.m_ClZzAsyncBotsIdentityCopySkin, &Inner, LineSize);
+					DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAsyncBotsIdentityCopyClan, Localize("Copy clan"), &g_Config.m_ClZzAsyncBotsIdentityCopyClan, &Inner, LineSize);
+					DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAsyncBotsIdentityCopyCountry, Localize("Copy country"), &g_Config.m_ClZzAsyncBotsIdentityCopyCountry, &Inner, LineSize);
+					DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAsyncBotsIdentityCopyColors, Localize("Copy colors"), &g_Config.m_ClZzAsyncBotsIdentityCopyColors, &Inner, LineSize);
+				}
+			}
+
+			if(s_BotsSubTab == 0 || s_BotsSubTab == 1)
+			{
+				CUIRect Inner;
+				const float Extra = 78.0f * s_BotsMirrorPhase;
+				BeginCard(ScrollRight, 78.0f + Extra, Inner);
+				DoPanelHeader(Inner, Localize("Mirror"));
+				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAsyncBotsMirrorEnable, Localize("Mirror source client (input/chat/emote)"), &g_Config.m_ClZzAsyncBotsMirrorEnable, &Inner, LineSize);
+				if(Extra > 0.0f)
+				{
+					CUIRect Expand;
+					static CLineInput s_MirrorIdInput;
+					static char s_aMirrorIdBuf[16] = "-1";
+					static bool s_MirrorIdInit = false;
+					if(!s_MirrorIdInit)
+					{
+						str_format(s_aMirrorIdBuf, sizeof(s_aMirrorIdBuf), "%d", g_Config.m_ClZzAsyncBotsMirrorClientId);
+						s_MirrorIdInit = true;
+					}
+					s_MirrorIdInput.SetBuffer(s_aMirrorIdBuf, sizeof(s_aMirrorIdBuf));
+					Inner.HSplitTop(Extra, &Expand, &Inner);
+					Expand.HSplitTop(LineSize, &Label, &Expand);
+					Ui()->DoLabel(&Label, Localize("Mirror source client id"), 14.0f, TEXTALIGN_ML);
+					Expand.HSplitTop(LineSize, &Button, &Expand);
+					Ui()->DoEditBox(&s_MirrorIdInput, &Button, 12.0f);
+					DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAsyncBotsMirrorAimOurCursor, Localize("Aim our cursor"), &g_Config.m_ClZzAsyncBotsMirrorAimOurCursor, &Expand, LineSize);
+					bool MirrorIdValid = true;
+					const char *p = s_aMirrorIdBuf;
+					if(!p || p[0] == '\0')
+						MirrorIdValid = false;
+					if(MirrorIdValid && *p == '-')
+						++p;
+					if(MirrorIdValid && *p == '\0')
+						MirrorIdValid = false;
+					for(; MirrorIdValid && *p; ++p)
+					{
+						if(*p < '0' || *p > '9')
+							MirrorIdValid = false;
+					}
+					if(MirrorIdValid)
+					{
+						const int Value = str_toint(s_aMirrorIdBuf);
+						if(Value >= -1 && Value <= 200)
+							g_Config.m_ClZzAsyncBotsMirrorClientId = Value;
+						else
+							MirrorIdValid = false;
+					}
+					if(!MirrorIdValid)
+					{
+						Expand.HSplitTop(LineSize, &Label, &Expand);
+						Ui()->DoLabel(&Label, Localize("Client id must be a number in range -1..200"), 14.0f, TEXTALIGN_ML);
+					}
+					else
+					{
+						const int MirrorId = g_Config.m_ClZzAsyncBotsMirrorClientId;
+						if(MirrorId >= MAX_CLIENTS)
+						{
+							Expand.HSplitTop(LineSize, &Label, &Expand);
+							Ui()->DoLabel(&Label, Localize("Client id is above current protocol limit, cannot mirror now"), 14.0f, TEXTALIGN_ML);
+						}
+						else if(MirrorId >= 0 && !GameClient()->m_Snap.m_apPlayerInfos[MirrorId])
+						{
+							Expand.HSplitTop(LineSize, &Label, &Expand);
+							Ui()->DoLabel(&Label, Localize("Client id is not currently present on this server"), 14.0f, TEXTALIGN_ML);
+						}
+						else if(g_Config.m_ClZzAsyncBotsMirrorAimOurCursor && GameClient()->m_aLocalIds[0] < 0 && GameClient()->m_aLocalIds[1] < 0)
+						{
+							Expand.HSplitTop(LineSize, &Label, &Expand);
+							Ui()->DoLabel(&Label, Localize("Aim our cursor needs a local main or dummy tee in-game"), 14.0f, TEXTALIGN_ML);
+						}
+					}
+				}
+			}
+
+			if(s_BotsSubTab == 2)
+			{
+				CUIRect Inner;
+				BeginCard(ScrollLeft, 230.0f, Inner);
+				DoPanelHeader(Inner, Localize("Dummy Companion"));
+				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAsyncBotsCompanionMode, Localize("Enable companion swarm AI"), &g_Config.m_ClZzAsyncBotsCompanionMode, &Inner, LineSize);
+				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAsyncBotsCompanionComeMode, Localize("Come mode (fast risky paths)"), &g_Config.m_ClZzAsyncBotsCompanionComeMode, &Inner, LineSize);
+				CUIRect Row;
+				Inner.HSplitTop(LineSize, &Row, &Inner);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzAsyncBotsCompanionRescueTiles, &g_Config.m_ClZzAsyncBotsCompanionRescueTiles, &Row, Localize("Rescue radius (tiles)"), 4, 40);
+				Inner.HSplitTop(LineSize, &Row, &Inner);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzAsyncBotsCompanionChaseTiles, &g_Config.m_ClZzAsyncBotsCompanionChaseTiles, &Row, Localize("Max chase distance (tiles)"), 8, 100);
+				Inner.HSplitTop(LineSize, &Row, &Inner);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzAsyncBotsCompanionFollowTiles, &g_Config.m_ClZzAsyncBotsCompanionFollowTiles, &Row, Localize("Follow main if farther than (tiles)"), 5, 200);
+				Inner.HSplitTop(LineSize, &Row, &Inner);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzAsyncBotsCompanionSpacingTiles, &g_Config.m_ClZzAsyncBotsCompanionSpacingTiles, &Row, Localize("Preferred spacing to main (tiles)"), 1, 20);
+				Inner.HSplitTop(LineSize, &Row, &Inner);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzAsyncBotsCompanionAggro, &g_Config.m_ClZzAsyncBotsCompanionAggro, &Row, Localize("Aggression (%)"), 0, 100);
+				Inner.HSplitTop(LineSize, &Row, &Inner);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzAsyncBotsCompanionPlanMs, &g_Config.m_ClZzAsyncBotsCompanionPlanMs, &Row, Localize("Planner interval (ms)"), 15, 500);
+				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAsyncBotsCompanionDebug, Localize("Companion debug"), &g_Config.m_ClZzAsyncBotsCompanionDebug, &Inner, LineSize);
+			}
+
+			if(s_BotsSubTab == 2)
+			{
+				CUIRect Inner;
+				BeginCard(ScrollRight, 680.0f, Inner);
+				DoPanelHeader(Inner, Localize("Tower Planner"));
+				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAsyncBotsTowerEnable, Localize("Enable tower planner"), &g_Config.m_ClZzAsyncBotsTowerEnable, &Inner, LineSize);
+				CUIRect Row;
+				g_Config.m_ClZzAsyncBotsTowerMode = 0;
+				Inner.HSplitTop(LineSize, &Row, &Inner);
+				Ui()->DoLabel(&Row, Localize("Mode: Classic tower (16x16 removed)"), 13.0f, TEXTALIGN_ML);
+				Inner.HSplitTop(LineSize, &Row, &Inner);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzAsyncBotsTowerMaxBots, &g_Config.m_ClZzAsyncBotsTowerMaxBots, &Row, Localize("Max bots in structure"), 1, 128);
+				Inner.HSplitTop(LineSize, &Row, &Inner);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzAsyncBotsTowerCellSize, &g_Config.m_ClZzAsyncBotsTowerCellSize, &Row, Localize("Grid cell size"), 16, 64);
+				Inner.HSplitTop(LineSize, &Row, &Inner);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzAsyncBotsTowerSettleDist, &g_Config.m_ClZzAsyncBotsTowerSettleDist, &Row, Localize("Settle radius"), 4, 64);
+				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAsyncBotsTowerBoost, Localize("Allow boost approach"), &g_Config.m_ClZzAsyncBotsTowerBoost, &Inner, LineSize);
+				Inner.HSplitTop(LineSize, &Row, &Inner);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzAsyncBotsTowerMpcHorizonTicks, &g_Config.m_ClZzAsyncBotsTowerMpcHorizonTicks, &Row, Localize("MPC horizon ticks"), 6, 60);
+				Inner.HSplitTop(LineSize, &Row, &Inner);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzAsyncBotsTowerMpcCandidates, &g_Config.m_ClZzAsyncBotsTowerMpcCandidates, &Row, Localize("MPC candidates"), 8, 128);
+				Inner.HSplitTop(LineSize, &Row, &Inner);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzAsyncBotsTowerMpcWPosX, &g_Config.m_ClZzAsyncBotsTowerMpcWPosX, &Row, Localize("MPC W pos X"), 1, 100000);
+				Inner.HSplitTop(LineSize, &Row, &Inner);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzAsyncBotsTowerMpcWPosY, &g_Config.m_ClZzAsyncBotsTowerMpcWPosY, &Row, Localize("MPC W pos Y"), 1, 100000);
+				Inner.HSplitTop(LineSize, &Row, &Inner);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzAsyncBotsTowerMpcWVelX, &g_Config.m_ClZzAsyncBotsTowerMpcWVelX, &Row, Localize("MPC W vel X"), 1, 100000);
+				Inner.HSplitTop(LineSize, &Row, &Inner);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzAsyncBotsTowerMpcWVelY, &g_Config.m_ClZzAsyncBotsTowerMpcWVelY, &Row, Localize("MPC W vel Y"), 1, 100000);
+				Inner.HSplitTop(LineSize, &Row, &Inner);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzAsyncBotsTowerMpcPenaltyFallRisk, &g_Config.m_ClZzAsyncBotsTowerMpcPenaltyFallRisk, &Row, Localize("MPC fall risk penalty"), 0, 200000);
+				Inner.HSplitTop(LineSize, &Row, &Inner);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzAsyncBotsTowerMpcHookPlayerPenaltyTower, &g_Config.m_ClZzAsyncBotsTowerMpcHookPlayerPenaltyTower, &Row, Localize("Hook player penalty (tower)"), 0, 500000);
+				Inner.HSplitTop(LineSize, &Row, &Inner);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzAsyncBotsTowerMpcHookPlayerPenaltyGrid, &g_Config.m_ClZzAsyncBotsTowerMpcHookPlayerPenaltyGrid, &Row, Localize("Hook player penalty (16x16)"), 0, 500000);
+				Inner.HSplitTop(LineSize, &Row, &Inner);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzAsyncBotsTowerMpcBonusHookBlock, &g_Config.m_ClZzAsyncBotsTowerMpcBonusHookBlock, &Row, Localize("Hook block bonus"), 0, 20000);
+				Inner.HSplitTop(LineSize, &Row, &Inner);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzAsyncBotsTowerFinalSimTicks, &g_Config.m_ClZzAsyncBotsTowerFinalSimTicks, &Row, Localize("Final hold sim ticks"), 6, 20);
+				Inner.HSplitTop(LineSize, &Row, &Inner);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzAsyncBotsTowerHoldKpX, &g_Config.m_ClZzAsyncBotsTowerHoldKpX, &Row, Localize("Hold Kp X (x100)"), 1, 80);
+				Inner.HSplitTop(LineSize, &Row, &Inner);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzAsyncBotsTowerHoldKdX, &g_Config.m_ClZzAsyncBotsTowerHoldKdX, &Row, Localize("Hold Kd X (x100)"), 1, 200);
+				Inner.HSplitTop(LineSize, &Row, &Inner);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzAsyncBotsTowerHoldDeadzoneX, &g_Config.m_ClZzAsyncBotsTowerHoldDeadzoneX, &Row, Localize("Hold deadzone X"), 0, 10);
+
+				// 16x16 grid editor removed by request.
+			}
+
+			if(s_BotsSubTab == 2)
+			{
+				static bool s_BotFlyExpanded = true;
+				static float s_BotFlyPhase = 1.0f;
+				static CButtonContainer s_BotFlyExpandButton;
+				UpdateRevealPhase(s_BotFlyPhase, s_BotFlyExpanded);
+				CUIRect Inner;
+				CUIRect Row;
+				const float CollapsedHeight = 30.0f;
+				const float ExpandedExtra = 138.0f;
+				const float PanelHeight = CollapsedHeight + ExpandedExtra * s_BotFlyPhase;
+				BeginCard(ScrollLeft, PanelHeight, Inner);
+
+				CUIRect Header;
+				Inner.HSplitTop(18.0f, &Header, &Inner);
+				CUIRect HeaderLabel, HeaderButton;
+				Header.VSplitRight(92.0f, &HeaderLabel, &HeaderButton);
+				Ui()->DoLabel(&HeaderLabel, Localize("Bot Fly (Triplefly)"), 16.0f, TEXTALIGN_ML);
+				if(DoButton_Menu(&s_BotFlyExpandButton, s_BotFlyExpanded ? Localize("Collapse") : Localize("Expand"), 0, &HeaderButton))
+					s_BotFlyExpanded = !s_BotFlyExpanded;
+				Inner.HSplitTop(4.0f, nullptr, &Inner);
+
+				if(s_BotFlyPhase > 0.001f)
+				{
+					CUIRect Expand;
+					Inner.HSplitTop(ExpandedExtra * s_BotFlyPhase, &Expand, &Inner);
+					DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzAsyncBotsTripleFly, Localize("Enable bot fly (triplefly)"), &g_Config.m_ClZzAsyncBotsTripleFly, &Expand, LineSize);
+					Expand.HSplitTop(LineSize, &Row, &Expand);
+					Ui()->DoScrollbarOption(&g_Config.m_ClZzAsyncBotsTripleFlyFov, &g_Config.m_ClZzAsyncBotsTripleFlyFov, &Row, Localize("Hook FOV"), 5, 360);
+					Expand.HSplitTop(LineSize, &Row, &Expand);
+					Ui()->DoScrollbarOption(&g_Config.m_ClZzAsyncBotsTripleFlyKeepHookDist, &g_Config.m_ClZzAsyncBotsTripleFlyKeepHookDist, &Row, Localize("Keep hook distance"), 1, 200);
+					Expand.HSplitTop(LineSize, &Row, &Expand);
+					Ui()->DoScrollbarOption(&g_Config.m_ClZzAsyncBotsTripleFlyVelYThreshold, &g_Config.m_ClZzAsyncBotsTripleFlyVelYThreshold, &Row, Localize("Sharp velY threshold x100"), 10, 2000);
+					Expand.HSplitTop(8.0f, nullptr, &Expand);
+					Expand.HSplitTop(LineSize * 2.0f, &Label, &Expand);
+					Ui()->DoLabel(&Label, Localize("Bots hook nearest target not above them, hold hook, and auto rehook by 0->1 pulse."), 14.0f, TEXTALIGN_ML);
+				}
+			}
+
+			if(s_BotsSubTab == 1)
+			{
+				CUIRect Inner;
+				char aBotSummary[96];
+				FormatAsyncBotSummary(aBotSummary, sizeof(aBotSummary));
+				const auto CountRealLines = [](const char *pText) {
+					int Lines = 1;
+					if(!pText || pText[0] == '\0')
+						return Lines;
+					for(const char *p = pText; *p; ++p)
+					{
+						if(*p == '\n')
+							++Lines;
+					}
+					return Lines;
+				};
+
+				const int RealAsciiLines = CountRealLines(g_Config.m_ClZzAsyncBotsAsciiCard);
+				const int VisibleAsciiLines = std::clamp(RealAsciiLines, 2, 10);
+				const float AsciiInputH = LineSize * VisibleAsciiLines + 4.0f;
+				BeginCard(ScrollLeft, 262.0f + AsciiInputH, Inner);
+				DoPanelHeader(Inner, Localize("Control"));
+				Inner.HSplitTop(LineSize, &Label, &Inner);
+				Ui()->DoLabel(&Label, Localize("Bots chat broadcast"), 14.0f, TEXTALIGN_ML);
+				Inner.HSplitTop(LineSize, &Button, &Inner);
+				static CLineInput s_AsyncBotsChat2;
+				s_AsyncBotsChat2.SetBuffer(g_Config.m_ClZzAsyncBotsChat, sizeof(g_Config.m_ClZzAsyncBotsChat));
+				s_AsyncBotsChat2.SetEmptyText("hello");
+				Ui()->DoEditBox(&s_AsyncBotsChat2, &Button, 12.0f);
+				Inner.HSplitTop(8.0f, nullptr, &Inner);
+				CUIRect Row;
+				Inner.HSplitTop(LineSize, &Row, &Inner);
+				CUIRect BtnChat, Unused;
+				Row.VSplitLeft(Row.w * 0.5f, &BtnChat, &Unused);
+				static CButtonContainer s_AsyncBotsChatSend2;
+				if(DoButton_Menu(&s_AsyncBotsChatSend2, Localize("Send chat"), 0, &BtnChat))
+					GameClient()->AsyncProxyBots().QueueChatAll(g_Config.m_ClZzAsyncBotsChat);
+				Inner.HSplitTop(8.0f, nullptr, &Inner);
+				Inner.HSplitTop(LineSize, &Label, &Inner);
+				Ui()->DoLabel(&Label, Localize("ASCII card"), 14.0f, TEXTALIGN_ML);
+				Inner.HSplitTop(AsciiInputH, &Button, &Inner);
+				static CLineInput s_AsyncBotsAsciiCard;
+				s_AsyncBotsAsciiCard.SetBuffer(g_Config.m_ClZzAsyncBotsAsciiCard, sizeof(g_Config.m_ClZzAsyncBotsAsciiCard));
+				s_AsyncBotsAsciiCard.SetEmptyText("line 1\nline 2\nline 3");
+				Ui()->DoEditBoxMultiline(&s_AsyncBotsAsciiCard, &Button, 12.0f);
+				Inner.HSplitTop(8.0f, nullptr, &Inner);
+				Inner.HSplitTop(LineSize, &Label, &Inner);
+				Ui()->DoLabel(&Label, Localize("Put each message on a new line and bots send them one by one."), 12.0f, TEXTALIGN_ML);
+				Inner.HSplitTop(LineSize, &Row, &Inner);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzAsyncBotsAsciiCycles, &g_Config.m_ClZzAsyncBotsAsciiCycles, &Row, Localize("ASCII cycles (0 = infinite)"), 0, 100);
+				Inner.HSplitTop(LineSize, &Row, &Inner);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzAsyncBotsAsciiCooldown, &g_Config.m_ClZzAsyncBotsAsciiCooldown, &Row, Localize("ASCII cooldown (s)"), 1, 60);
+				Inner.HSplitTop(LineSize, &Row, &Inner);
+				CUIRect BtnAsciiStart, BtnAsciiStop;
+				Row.VSplitMid(&BtnAsciiStart, &BtnAsciiStop, 5.0f);
+				static CButtonContainer s_AsyncBotsAsciiStart, s_AsyncBotsAsciiStop;
+				if(DoButton_Menu(&s_AsyncBotsAsciiStart, Localize("Start ASCII"), 0, &BtnAsciiStart))
+					GameClient()->AsyncProxyBots().StartAsciiBroadcast(g_Config.m_ClZzAsyncBotsAsciiCard, g_Config.m_ClZzAsyncBotsAsciiCycles, g_Config.m_ClZzAsyncBotsAsciiCooldown);
+				if(DoButton_Menu(&s_AsyncBotsAsciiStop, Localize("Stop ASCII"), 0, &BtnAsciiStop))
+					GameClient()->AsyncProxyBots().StopAsciiBroadcast();
+				Inner.HSplitTop(12.0f, nullptr, &Inner);
+				Inner.HSplitTop(LineSize, &Label, &Inner);
+				Ui()->DoLabel(&Label, aBotSummary, 14.0f, TEXTALIGN_ML);
+				Inner.HSplitTop(4.0f, nullptr, &Inner);
+				Inner.HSplitTop(LineSize, &Label, &Inner);
+				Ui()->DoLabel(&Label, GameClient()->AsyncProxyBots().StatusText(), 14.0f, TEXTALIGN_ML);
+				Inner.HSplitTop(8.0f, nullptr, &Inner);
+			}
+
+			if(s_BotsSubTab == 1)
+			{
+				CUIRect Inner;
+				char aBotSummary[96];
+				FormatAsyncBotSummary(aBotSummary, sizeof(aBotSummary));
+				BeginCard(ScrollRight, 126.0f, Inner);
+				DoPanelHeader(Inner, Localize("Bots"));
+				CUIRect Row;
+				Inner.HSplitTop(LineSize, &Row, &Inner);
+				CUIRect BtnConnect, BtnDisconnect;
+				Row.VSplitMid(&BtnConnect, &BtnDisconnect, 5.0f);
+				static CButtonContainer s_AsyncBotsConnectControl;
+				static CButtonContainer s_AsyncBotsDisconnectControl;
+				if(DoButton_Menu(&s_AsyncBotsConnectControl, Localize("Connect"), 0, &BtnConnect))
+					GameClient()->AsyncProxyBots().StartFromConfig(GameClient());
+				if(DoButton_Menu(&s_AsyncBotsDisconnectControl, Localize("Disconnect"), 0, &BtnDisconnect))
+					GameClient()->AsyncProxyBots().StopAll();
+				Inner.HSplitTop(8.0f, nullptr, &Inner);
+				Inner.HSplitTop(LineSize, &Row, &Inner);
+				CUIRect BtnApply, BtnStop;
+				Row.VSplitMid(&BtnApply, &BtnStop, 5.0f);
+				static CButtonContainer s_AsyncBotsApply3;
+				static CButtonContainer s_AsyncBotsStop3;
+				if(DoButton_Menu(&s_AsyncBotsApply3, Localize("Apply live"), 0, &BtnApply))
+					GameClient()->AsyncProxyBots().ApplyLiveSettings(GameClient());
+				if(DoButton_Menu(&s_AsyncBotsStop3, Localize("Stop bots"), 0, &BtnStop))
+					GameClient()->AsyncProxyBots().StopAll();
+				Inner.HSplitTop(8.0f, nullptr, &Inner);
+				Inner.HSplitTop(LineSize, &Label, &Inner);
+				Ui()->DoLabel(&Label, aBotSummary, 14.0f, TEXTALIGN_ML);
+				Inner.HSplitTop(4.0f, nullptr, &Inner);
+				Inner.HSplitTop(LineSize, &Label, &Inner);
+				Ui()->DoLabel(&Label, GameClient()->AsyncProxyBots().StatusText(), 14.0f, TEXTALIGN_ML);
+			}
+
+			if(s_BotsSubTab == 1)
+			{
+				CUIRect Inner;
+				BeginCard(ScrollRight, 64.0f, Inner);
+				DoPanelHeader(Inner, Localize("Controls"));
+				CUIRect Row;
+				Inner.HSplitTop(LineSize, &Row, &Inner);
+				CUIRect BtnKill, BtnVoteYes, BtnVoteNo;
+				Row.VSplitLeft(Row.w / 3.0f, &BtnKill, &Row);
+				Row.VSplitLeft(Row.w / 2.0f, &BtnVoteYes, &BtnVoteNo);
+				static CButtonContainer s_AsyncBotsKillAll2;
+				static CButtonContainer s_AsyncBotsVoteYes2;
+				static CButtonContainer s_AsyncBotsVoteNo2;
+				if(DoButton_Menu(&s_AsyncBotsKillAll2, Localize("Kill bots"), 0, &BtnKill))
+					GameClient()->AsyncProxyBots().KillAllIngame();
+				if(DoButton_Menu(&s_AsyncBotsVoteYes2, Localize("Vote yes"), 0, &BtnVoteYes))
+					GameClient()->AsyncProxyBots().VoteAll(1);
+				if(DoButton_Menu(&s_AsyncBotsVoteNo2, Localize("Vote no"), 0, &BtnVoteNo))
+					GameClient()->AsyncProxyBots().VoteAll(-1);
+			}
+
+			}
+
+			EndCard();
+			s_BotsScrollRegion.End();
+			pFeatureScrollRegion = nullptr;
+		}
 	}
+	else if(s_SubTab == ZZ_TAB_TAS)
+	{
+		const float LineSize = 20.0f;
+		const float SectionGap = 16.0f;
+		static CLineInput s_ReplayNameInput;
+		static CButtonContainer s_PauseButton;
+		static CButtonContainer s_PlaybackButton;
+		static CButtonContainer s_RecordButton;
+		static CButtonContainer s_ClearReplayButton;
+		static CButtonContainer s_SaveReplayInline;
+		static CButtonContainer s_ReloadReplayInline;
+		static CButtonContainer s_ValidateReplay;
+		static CButtonContainer s_ReplayTime;
+		static CButtonContainer s_RemoveUseless;
+		static CButtonContainer s_AutoSyncButton;
+		static CButtonContainer s_SyncNowButton;
+		static CButtonContainer s_AddTasFakeAimButton;
+		static CButtonContainer s_TasPathColorReset;
+		static CButtonContainer s_TasPredictionLocalReset;
+		static CButtonContainer s_TasPredictionFrozenReset;
+		static CButtonContainer s_TasPredictionOtherReset;
+		static CUi::SDropDownState s_SavedReplayState;
+		static CUi::SDropDownState s_TasFakeAimState;
+		static CUi::SDropDownState s_TasPathModeState;
+		static CUi::SDropDownState s_TasPredictionPathModeState;
+		static CScrollRegion s_SavedReplayScroll;
+		static CScrollRegion s_TasFakeAimScroll;
+		static CScrollRegion s_TasPathModeScroll;
+		static CScrollRegion s_TasPredictionPathModeScroll;
+		static int s_SelectedReplay = 0;
+		static CScrollRegion s_TasScrollRegion;
+		static vec2 s_TasScrollOffset(0.0f, 0.0f);
+
+		auto DoDoubleButtonRow = [&](CUIRect &View, CButtonContainer &LeftId, const char *pLeftLabel, CButtonContainer &RightId, const char *pRightLabel, bool *pLeftPressed = nullptr, bool *pRightPressed = nullptr, ColorRGBA LeftColor = ColorRGBA(1.0f, 1.0f, 1.0f, 0.25f), ColorRGBA RightColor = ColorRGBA(1.0f, 1.0f, 1.0f, 0.25f)) {
+			(void)LeftColor;
+			(void)RightColor;
+			CUIRect Row, LeftButton, RightButton;
+			View.HSplitTop(LineSize, &Row, &View);
+			Row.VSplitMid(&LeftButton, &RightButton, 5.0f);
+			const bool LeftPressed = DoButton_Menu(&LeftId, pLeftLabel, 0, &LeftButton) != 0;
+			const bool RightPressed = DoButton_Menu(&RightId, pRightLabel, 0, &RightButton) != 0;
+			if(pLeftPressed)
+				*pLeftPressed = LeftPressed;
+			if(pRightPressed)
+				*pRightPressed = RightPressed;
+		};
+
+		CScrollRegionParams TasScrollParams;
+		TasScrollParams.m_ScrollUnit = 28.0f;
+		s_TasScrollRegion.Begin(&MainView, &s_TasScrollOffset, &TasScrollParams);
+		CUIRect ScrollView = MainView;
+		ScrollView.y += s_TasScrollOffset.y;
+		pFeatureScrollRegion = &s_TasScrollRegion;
+
+		CUIRect Left, Right;
+		ScrollView.VSplitMid(&Left, &Right, 20.0f);
+
+		{
+			CUIRect Inner;
+			BeginCard(Left, 230.0f, Inner);
+			DoPanelHeader(Inner, Localize("Main"));
+			Inner.HSplitTop(LineSize, &Button, &Inner);
+			Ui()->DoScrollbarOption(&g_Config.m_ClZzTasTicksPerSecond, &g_Config.m_ClZzTasTicksPerSecond, &Button, "TPS", 1, 50);
+			Inner.HSplitTop(LineSize, nullptr, &Inner);
+			bool PausePressed = false;
+			bool PlaybackPressed = false;
+			DoDoubleButtonRow(Inner, s_PauseButton, g_Config.m_ClZzTasPause ? "Resume" : "Pause", s_PlaybackButton, g_Config.m_ClZzTasLoadReplay ? "Stop Playback" : "Playback Replay", &PausePressed, &PlaybackPressed, ColorRGBA(1.0f, 1.0f, 1.0f, 0.25f), g_Config.m_ClZzTasLoadReplay ? ColorRGBA(0.8f, 0.1f, 0.1f, 0.85f) : ColorRGBA(1.0f, 1.0f, 1.0f, 0.25f));
+			if(PausePressed)
+				g_Config.m_ClZzTasPause ^= 1;
+			if(PlaybackPressed)
+				g_Config.m_ClZzTasLoadReplay ^= 1;
+			Inner.HSplitTop(6.0f, nullptr, &Inner);
+			bool RecordPressed = false;
+			bool ClearPressed = false;
+			DoDoubleButtonRow(Inner, s_RecordButton, g_Config.m_ClZzTasRecordReplay ? "Stop Recording" : "Record Replay", s_ClearReplayButton, "Clear Replay", &RecordPressed, &ClearPressed, g_Config.m_ClZzTasRecordReplay ? ColorRGBA(0.8f, 0.1f, 0.1f, 0.85f) : ColorRGBA(1.0f, 1.0f, 1.0f, 0.25f));
+			if(RecordPressed)
+				g_Config.m_ClZzTasRecordReplay ^= 1;
+			if(ClearPressed)
+				g_Config.m_ClZzTasRespawn ^= 1;
+
+			char aStatus[256];
+			str_format(aStatus, sizeof(aStatus), "State: rec=%s play=%s frames=%d",
+				GameClient()->m_ZzTas.IsRecording() ? "on" : "off",
+				GameClient()->m_ZzTas.IsPlaying() ? "on" : "off",
+				GameClient()->m_ZzTas.NumFrames());
+			Inner.HSplitTop(8.0f, nullptr, &Inner);
+			Inner.HSplitTop(LineSize, &Label, &Inner);
+			Ui()->DoLabel(&Label, aStatus, 14.0f, TEXTALIGN_ML);
+			if(GameClient()->m_ZzTas.HasStartPosition())
+			{
+				const vec2 StartPos = GameClient()->m_ZzTas.GetStartPosition();
+				const float Dist = GameClient()->m_ZzTas.GetDistanceToStartPosition();
+				char aStartInfo[256];
+				str_format(aStartInfo, sizeof(aStartInfo), "Start: %.2f %.2f | dist=%.2f (need <= %.2f)",
+					StartPos.x, StartPos.y, Dist, GameClient()->m_ZzTas.StartPositionTolerance());
+				Inner.HSplitTop(4.0f, nullptr, &Inner);
+				Inner.HSplitTop(LineSize, &Label, &Inner);
+				Ui()->DoLabel(&Label, aStartInfo, 14.0f, TEXTALIGN_ML);
+			}
+		}
+
+		Left.HSplitTop(SectionGap, nullptr, &Left);
+		{
+			CUIRect Inner;
+			BeginCard(Left, 170.0f, Inner);
+			DoPanelHeader(Inner, Localize("Settings"));
+			static const struct
+			{
+				const char *m_pLabel;
+				int *m_pValue;
+			} s_aTasChecks[] = {
+				{Localize("Enable Sound"), &g_Config.m_ClZzTasUseSound},
+				{Localize("Enable Effects"), &g_Config.m_ClZzTasShowEffects},
+				{Localize("Show Real Aim"), &g_Config.m_ClZzTasShowAim},
+				{Localize("Predict Players"), &g_Config.m_ClZzTasPlayerPrediction},
+				{Localize("Auto Replay"), &g_Config.m_ClZzTasAutoReplay},
+				{Localize("Auto Save Replay"), &g_Config.m_ClZzTasAutoSave},
+			};
+			for(const auto &Entry : s_aTasChecks)
+				DoButton_CheckBoxAutoVMarginAndSet(Entry.m_pValue, Entry.m_pLabel, Entry.m_pValue, &Inner, LineSize);
+			if(g_Config.m_ClZzTasAutoSave)
+			{
+				Inner.HSplitTop(LineSize, &Button, &Inner);
+				Ui()->DoScrollbarOption(&g_Config.m_ClZzTasAutoSaveInterval, &g_Config.m_ClZzTasAutoSaveInterval, &Button, Localize("Interval"), 1, 300, &CUi::ms_LinearScrollbarScale, 0, "s");
+			}
+		}
+
+		Left.HSplitTop(SectionGap, nullptr, &Left);
+		{
+			CUIRect Inner;
+			BeginCard(Left, 170.0f, Inner);
+			DoPanelHeader(Inner, Localize("Hotkeys"));
+			static CButtonContainer s_RecordReader;
+			static CButtonContainer s_RecordClear;
+			static CButtonContainer s_LoadReader;
+			static CButtonContainer s_LoadClear;
+			static CButtonContainer s_ClearReader;
+			static CButtonContainer s_ClearClear;
+			static CButtonContainer s_PauseReader;
+			static CButtonContainer s_PauseClear;
+			static CButtonContainer s_RewindReader;
+			static CButtonContainer s_RewindClear;
+			static CButtonContainer s_ForwardReader;
+			static CButtonContainer s_ForwardClear;
+			DoLine_KeyReader(Inner, s_RecordReader, s_RecordClear, "Record", "toggle zz_tas_record_replay 1 0");
+			DoLine_KeyReader(Inner, s_LoadReader, s_LoadClear, "Load", "toggle zz_tas_load_replay 1 0");
+			DoLine_KeyReader(Inner, s_ClearReader, s_ClearClear, "Clear", "+toggle zz_tas_respawn 1 0");
+			DoLine_KeyReader(Inner, s_PauseReader, s_PauseClear, "Pause", "toggle zz_tas_pause 0 1");
+			DoLine_KeyReader(Inner, s_RewindReader, s_RewindClear, "Rewind", "+toggle zz_tas_rewind 1 0");
+			DoLine_KeyReader(Inner, s_ForwardReader, s_ForwardClear, "Forward", "+toggle zz_tas_forward 1 0");
+		}
+
+		{
+			CUIRect Inner;
+			BeginCard(Right, 210.0f, Inner);
+			DoPanelHeader(Inner, Localize("Replay"));
+
+			s_ReplayNameInput.SetBuffer(g_Config.m_ClZzTasReplayName, sizeof(g_Config.m_ClZzTasReplayName));
+			s_ReplayNameInput.SetEmptyText("my_tas");
+
+			CUIRect ReplayNameRow, ReplayNameBox, ReplaySaveButton, ReplayReloadButton;
+			Inner.HSplitTop(LineSize, &ReplayNameRow, &Inner);
+			ReplayNameRow.VSplitRight(70.0f, &ReplayNameRow, &ReplayReloadButton);
+			ReplayNameRow.VSplitRight(5.0f, &ReplayNameRow, nullptr);
+			ReplayNameRow.VSplitRight(90.0f, &ReplayNameRow, &ReplaySaveButton);
+			ReplayNameBox = ReplayNameRow;
+			Ui()->DoEditBox(&s_ReplayNameInput, &ReplayNameBox, 12.0f);
+			if(DoButton_Menu(&s_SaveReplayInline, "Save", 0, &ReplaySaveButton))
+				GameClient()->m_ZzTas.Save(g_Config.m_ClZzTasReplayName);
+			if(DoButton_Menu(&s_ReloadReplayInline, "Reload", 0, &ReplayReloadButton))
+				GameClient()->m_ZzTas.RefreshFileList();
+
+			Inner.HSplitTop(6.0f, nullptr, &Inner);
+			const auto &vFiles = GameClient()->m_ZzTas.Files();
+			std::vector<const char *> vReplayNames;
+			vReplayNames.reserve(vFiles.size());
+			for(const auto &File : vFiles)
+				vReplayNames.push_back(File.m_aFilename);
+			if(vReplayNames.empty())
+				vReplayNames.push_back("No replays found");
+			s_SelectedReplay = std::clamp(s_SelectedReplay, 0, (int)vReplayNames.size() - 1);
+			s_SavedReplayState.m_SelectionPopupContext.m_pScrollRegion = &s_SavedReplayScroll;
+			CUIRect ReplayDropDownRow;
+			Inner.HSplitTop(LineSize, &ReplayDropDownRow, &Inner);
+			const int NewSelectedReplay = Ui()->DoDropDown(&ReplayDropDownRow, s_SelectedReplay, vReplayNames.data(), vReplayNames.size(), s_SavedReplayState);
+			if(NewSelectedReplay != s_SelectedReplay)
+			{
+				s_SelectedReplay = NewSelectedReplay;
+				if(!vFiles.empty())
+				{
+					str_copy(g_Config.m_ClZzTasLastFile, vFiles[s_SelectedReplay].m_aFilename, sizeof(g_Config.m_ClZzTasLastFile));
+					str_copy(g_Config.m_ClZzTasReplayName, vFiles[s_SelectedReplay].m_aFilename, sizeof(g_Config.m_ClZzTasReplayName));
+					GameClient()->m_ZzTas.Load(g_Config.m_ClZzTasReplayName);
+				}
+			}
+
+			Inner.HSplitTop(6.0f, nullptr, &Inner);
+			bool ValidatePressed = false;
+			bool ReplayTimePressed = false;
+			DoDoubleButtonRow(Inner, s_ValidateReplay, "Validate Replay", s_ReplayTime, "Get Replay Time", &ValidatePressed, &ReplayTimePressed);
+			if(ValidatePressed)
+				GameClient()->m_ZzTas.ValidateReplay();
+			if(ReplayTimePressed)
+				GameClient()->m_ZzTas.ReportReplayTime();
+			Inner.HSplitTop(6.0f, nullptr, &Inner);
+			CUIRect RemoveRow;
+			Inner.HSplitTop(LineSize, &RemoveRow, &Inner);
+			if(DoButton_Menu(&s_RemoveUseless, "Remove Useless", 0, &RemoveRow))
+				GameClient()->m_ZzTas.RemoveUseless();
+		}
+
+		Right.HSplitTop(SectionGap, nullptr, &Right);
+		{
+			CUIRect Inner;
+			BeginCard(Right, 68.0f, Inner);
+			DoPanelHeader(Inner, Localize("Replay Vault"));
+			bool AutoSyncPressed = false;
+			bool SyncNowPressed = false;
+			DoDoubleButtonRow(Inner, s_AutoSyncButton, g_Config.m_ClZzTasReplayVaultAutoSync ? "Auto Sync" : "Enable Auto Sync", s_SyncNowButton, "Sync Now", &AutoSyncPressed, &SyncNowPressed, ColorRGBA(0.2f, 0.65f, 0.2f, 0.85f), ColorRGBA(1.0f, 1.0f, 1.0f, 0.25f));
+			if(AutoSyncPressed)
+				g_Config.m_ClZzTasReplayVaultAutoSync ^= 1;
+			if(SyncNowPressed)
+				GameClient()->m_ZzTas.SyncNow();
+		}
+
+		Right.HSplitTop(SectionGap, nullptr, &Right);
+		{
+			CUIRect Inner;
+			BeginCard(Right, 114.0f, Inner);
+			DoPanelHeader(Inner, Localize("Tools"));
+			Inner.HSplitTop(LineSize, &Button, &Inner);
+			Ui()->DoScrollbarOption(&g_Config.m_ClZzTasTickControlTicks, &g_Config.m_ClZzTasTickControlTicks, &Button, Localize("Ticks"), 1, 128);
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzTasAutoRewind, Localize("Auto Rewind"), &g_Config.m_ClZzTasAutoRewind, &Inner, LineSize);
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzTasAutoForward, Localize("Auto Forward"), &g_Config.m_ClZzTasAutoForward, &Inner, LineSize);
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzTasTickControlPause, Localize("Auto Pause"), &g_Config.m_ClZzTasTickControlPause, &Inner, LineSize);
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzTasTickControlStep, Localize("Step"), &g_Config.m_ClZzTasTickControlStep, &Inner, LineSize);
+		}
+
+		Right.HSplitTop(SectionGap, nullptr, &Right);
+		{
+			CUIRect Inner;
+			BeginCard(Right, 84.0f, Inner);
+			DoPanelHeader(Inner, Localize("Fake Aim"));
+			static std::array<const char *, 4> s_aTasFakeAimModes = {Localize("Robot Aim"), Localize("Spinbot"), Localize("Random"), Localize("Smooth")};
+			s_TasFakeAimState.m_SelectionPopupContext.m_pScrollRegion = &s_TasFakeAimScroll;
+			Inner.HSplitTop(LineSize, &Button, &Inner);
+			const int NewFakeAimMode = Ui()->DoDropDown(&Button, g_Config.m_ClZzTasFakeAimMode, s_aTasFakeAimModes.data(), s_aTasFakeAimModes.size(), s_TasFakeAimState);
+			if(NewFakeAimMode != g_Config.m_ClZzTasFakeAimMode)
+				g_Config.m_ClZzTasFakeAimMode = NewFakeAimMode;
+			Inner.HSplitTop(6.0f, nullptr, &Inner);
+			CUIRect AddFakeAimRow;
+			Inner.HSplitTop(LineSize, &AddFakeAimRow, &Inner);
+			if(DoButton_Menu(&s_AddTasFakeAimButton, "Add fake aim", 0, &AddFakeAimRow))
+				g_Config.m_ClZzTasFakeAim = 1;
+		}
+
+		Right.HSplitTop(SectionGap, nullptr, &Right);
+		{
+			CUIRect Inner;
+			BeginCard(Right, 170.0f, Inner);
+			DoPanelHeader(Inner, Localize("Visuals"));
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzTasDrawStartEndPos, Localize("Draw start/end pos"), &g_Config.m_ClZzTasDrawStartEndPos, &Inner, LineSize);
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzTasDrawPath, Localize("Draw replay path"), &g_Config.m_ClZzTasDrawPath, &Inner, LineSize);
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzTasDrawPredictionPath, Localize("Draw prediction path"), &g_Config.m_ClZzTasDrawPredictionPath, &Inner, LineSize);
+			static std::array<const char *, 2> s_aTasPathModes = {Localize("Dotted"), Localize("Full Line")};
+			if(g_Config.m_ClZzTasDrawPath)
+			{
+				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClZzTasDrawPathSegmented, Localize("Segmented"), &g_Config.m_ClZzTasDrawPathSegmented, &Inner, LineSize);
+				s_TasPathModeState.m_SelectionPopupContext.m_pScrollRegion = &s_TasPathModeScroll;
+				Inner.HSplitTop(LineSize, &Button, &Inner);
+				const int NewMode = Ui()->DoDropDown(&Button, g_Config.m_ClZzTasDrawPathMode, s_aTasPathModes.data(), s_aTasPathModes.size(), s_TasPathModeState);
+				if(NewMode != g_Config.m_ClZzTasDrawPathMode)
+					g_Config.m_ClZzTasDrawPathMode = NewMode;
+				DoLine_ColorPicker(&s_TasPathColorReset, 25.0f, 13.0f, 5.0f, &Inner, Localize("Color"), &g_Config.m_ClZzTasDrawPathColor, ColorRGBA(0.0f, 1.0f, 0.0f), false);
+			}
+			if(g_Config.m_ClZzTasDrawPredictionPath)
+			{
+				s_TasPredictionPathModeState.m_SelectionPopupContext.m_pScrollRegion = &s_TasPredictionPathModeScroll;
+				Inner.HSplitTop(LineSize, &Button, &Inner);
+				const int NewMode = Ui()->DoDropDown(&Button, g_Config.m_ClZzTasDrawPredictionPathMode, s_aTasPathModes.data(), s_aTasPathModes.size(), s_TasPredictionPathModeState);
+				if(NewMode != g_Config.m_ClZzTasDrawPredictionPathMode)
+					g_Config.m_ClZzTasDrawPredictionPathMode = NewMode;
+				DoLine_ColorPicker(&s_TasPredictionLocalReset, 25.0f, 13.0f, 5.0f, &Inner, Localize("Local Color"), &g_Config.m_ClZzTasDrawPredictionPathColor, ColorRGBA(0.0f, 1.0f, 0.0f), false);
+				DoLine_ColorPicker(&s_TasPredictionFrozenReset, 25.0f, 13.0f, 5.0f, &Inner, Localize("Frozen Color"), &g_Config.m_ClZzTasDrawPredictionPathColorFrozen, ColorRGBA(0.0f, 1.0f, 1.0f), false);
+			}
+		}
+		EndCard();
+		s_TasScrollRegion.End();
+		pFeatureScrollRegion = nullptr;
+	}
+	EndCard();
 	TextRender()->TextColor(OldTextColor);
 }
 
@@ -3962,4 +5463,5 @@ int CMenus::CPopupMapPickerContext::MapListFetchCallback(const CFsFileInfo *pInf
 
 	return 0;
 }
+
 

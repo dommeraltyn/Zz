@@ -152,11 +152,11 @@ bool CCharacter::Spawn(CPlayer *pPlayer, vec2 Pos)
 		SetActiveWeapon(m_pPlayer->m_RestoreActiveWeapon);
 	}
 
-	if(m_pPlayer && m_pPlayer->m_AccountLoggedIn && m_pPlayer->m_AccountRole == 1)
+	if(m_pPlayer && g_Config.m_SvBlockMode != 0 && m_pPlayer->m_AccountLoggedIn && m_pPlayer->m_AccountRole == 1)
 	{
 		GiveAllWeapons();
 	}
-	if(m_pPlayer && m_pPlayer->HasPermanentJetpack())
+	if(m_pPlayer && g_Config.m_SvBlockMode != 0 && m_pPlayer->HasPermanentJetpack())
 	{
 		m_Core.m_Jetpack = true;
 	}
@@ -1086,7 +1086,7 @@ void CCharacter::Die(int Killer, int Weapon, bool SendKillMsg)
 	}
 
 	const bool DiedInFreeze = m_pPlayer && m_pPlayer->m_KillMarkVictimInFreeze;
-	if(!AttributedKill && m_pPlayer && !DiedInFreeze)
+	if(!AttributedKill && m_pPlayer && !DiedInFreeze && g_Config.m_SvBlockMode != 0)
 	{
 		m_pPlayer->m_RestoreWeaponsOnSpawn = true;
 		for(int i = 0; i < NUM_WEAPONS; i++)
@@ -1095,6 +1095,10 @@ void CCharacter::Die(int Killer, int Weapon, bool SendKillMsg)
 			m_pPlayer->m_aRestoreWeaponAmmo[i] = GetWeaponAmmo(i);
 		}
 		m_pPlayer->m_RestoreActiveWeapon = GetActiveWeapon();
+	}
+	else if(m_pPlayer && g_Config.m_SvBlockMode == 0)
+	{
+		m_pPlayer->m_RestoreWeaponsOnSpawn = false;
 	}
 
 	if(AttributedKill && m_pPlayer)
@@ -1105,7 +1109,7 @@ void CCharacter::Die(int Killer, int Weapon, bool SendKillMsg)
 			m_pPlayer->m_PersonalMenuDirty = true;
 	}
 
-	if(AttributedKill && m_pPlayer && m_pPlayer->m_AccountLoggedIn)
+	if(AttributedKill && g_Config.m_SvBlockMode != 0 && m_pPlayer && m_pPlayer->m_AccountLoggedIn)
 	{
 
 		m_pPlayer->m_AccountDeaths++;
@@ -1118,7 +1122,7 @@ void CCharacter::Die(int Killer, int Weapon, bool SendKillMsg)
 		}
 		m_pPlayer->m_PersonalMenuDirty = true;
 	}
-	if(AttributedKill)
+	if(AttributedKill && g_Config.m_SvBlockMode != 0)
 	{
 		// Anti-farm: track victim consecutive deaths from the same killer.
 		if(m_pPlayer && AttribKiller >= 0 && AttribKiller < MAX_CLIENTS)
@@ -1188,7 +1192,11 @@ void CCharacter::Die(int Killer, int Weapon, bool SendKillMsg)
 
 	if(SendKillMsg)
 	{
-		SendDeathMessageIfNotInLockedTeam(AttribKiller, AttribWeapon, ModeSpecial);
+		const bool HideKiller = g_Config.m_SvBlockMode == 0 && AttribKiller >= 0 && AttribKiller != m_pPlayer->GetCid();
+		if(HideKiller)
+			SendDeathMessageIfNotInLockedTeam(m_pPlayer->GetCid(), WEAPON_WORLD, ModeSpecial);
+		else
+			SendDeathMessageIfNotInLockedTeam(AttribKiller, AttribWeapon, ModeSpecial);
 	}
 
 	// a nice sound, and bursting tee death effect
@@ -1956,7 +1964,7 @@ void CCharacter::HandleTiles(int Index)
 		}
 	}
 
-	const bool ForceJetpack = m_pPlayer && m_pPlayer->HasPermanentJetpack();
+	const bool ForceJetpack = m_pPlayer && g_Config.m_SvBlockMode != 0 && m_pPlayer->HasPermanentJetpack();
 	if(ForceJetpack && !m_Core.m_Jetpack)
 		m_Core.m_Jetpack = true;
 
@@ -2335,6 +2343,12 @@ void CCharacter::HandleTuneLayer()
 	{
 		// send zone msgs
 		SendZoneMsgs();
+
+		if(g_Config.m_SvTuneHubZone >= 0 && m_TuneZone == g_Config.m_SvTuneHubZone)
+		{
+			// Defer redirect to gamecontext tick to avoid dropping player mid-character tick.
+			m_pPlayer->m_PendingHubRedirect = true;
+		}
 	}
 }
 

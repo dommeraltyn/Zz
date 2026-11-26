@@ -2660,6 +2660,14 @@ if(CLIENT)
     components/tclient/warlist.h
     components/tclient/zz_bestclient_presence.cpp
     components/tclient/zz_bestclient_presence.h
+    components/bestclient/3d_particles.cpp
+    components/bestclient/3d_particles.h
+    components/bestclient/magic_particles.cpp
+    components/bestclient/magic_particles.h
+    components/bestclient/orbit_aura.cpp
+    components/bestclient/orbit_aura.h
+    components/bestclient/r_jelly.cpp
+    components/bestclient/r_jelly.h
     components/bestclient/voice/voice.cpp
     components/bestclient/voice/voice.h
     components/bestclient/voice/protocol.h
@@ -2670,6 +2678,10 @@ if(CLIENT)
     components/touch_controls.h
     components/voting.cpp
     components/voting.h
+    components/zz_async_proxy_bots.cpp
+    components/zz_async_proxy_bots.h
+    components/zz_tas.cpp
+    components/zz_tas.h
     gameclient.cpp
     gameclient.h
     kog_ai_controller.cpp

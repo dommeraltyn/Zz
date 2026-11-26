@@ -104,6 +104,7 @@ void CScoreboard::OnConsoleInit()
 void CScoreboard::OnInit()
 {
 	m_DeadTeeTexture = Graphics()->LoadTexture("deadtee.png", IStorage::TYPE_ALL);
+	m_BestClientIconTexture = Graphics()->LoadTexture("bestclient.png", IStorage::TYPE_ALL);
 }
 
 void CScoreboard::OnReset()
@@ -768,24 +769,23 @@ void CScoreboard::RenderScoreboard(CUIRect Scoreboard, int Team, int CountStart,
 					TextRender()->TextColor(GameClient()->m_WarList.GetNameplateColor(pInfo->m_ClientId));
 
 				TextRender()->TextEx(&Cursor, ClientData.m_aName);
-				if(GameClient()->m_ZzBestClientPresence.IsBestClientPlayerOnCurrentServer(ClientData.m_aName))
+				if(g_Config.m_ClZzBestclientShowInTab && GameClient()->m_ZzBestClientPresence.IsBestClientPlayerOnCurrentServer(ClientData.m_aName))
 				{
-					const float IconSize = FontSize * 0.9f;
-					const float IconSpacing = 4.0f;
+					const float IconSize = maximum(8.0f, FontSize - 1.0f);
 					CUIRect IconRect;
-					IconRect.x = Cursor.m_X + IconSpacing;
+					IconRect.x = Cursor.m_X + 4.0f;
 					IconRect.y = Row.y + (Row.h - IconSize) / 2.0f;
 					IconRect.w = IconSize;
 					IconRect.h = IconSize;
-
-					Graphics()->TextureSet(g_pData->m_aImages[IMAGE_BCICON].m_Id);
-					Graphics()->QuadsBegin();
-					Graphics()->SetColor(1.0f, 0.82f, 0.25f, TextColor.a);
-					Graphics()->QuadsSetSubset(0.0f, 0.0f, 1.0f, 1.0f);
-					IGraphics::CQuadItem Quad(IconRect.x, IconRect.y, IconRect.w, IconRect.h);
-					Graphics()->QuadsDrawTL(&Quad, 1);
-					Graphics()->QuadsEnd();
-					Graphics()->SetColor(1.0f, 1.0f, 1.0f, 1.0f);
+					if(m_BestClientIconTexture.IsValid())
+					{
+						Graphics()->TextureSet(m_BestClientIconTexture);
+						Graphics()->QuadsBegin();
+						Graphics()->SetColor(1.0f, 1.0f, 1.0f, TextColor.a);
+						IGraphics::CQuadItem Quad(IconRect.x, IconRect.y, IconRect.w, IconRect.h);
+						Graphics()->QuadsDrawTL(&Quad, 1);
+						Graphics()->QuadsEnd();
+					}
 				}
 
 				// ready / watching

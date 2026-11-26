@@ -273,6 +273,8 @@ CServer::CServer()
 	{
 		m_apCurrentMapData[i] = nullptr;
 		m_aCurrentMapSize[i] = 0;
+		m_apCapMapData[i] = nullptr;
+		m_aCapMapSize[i] = 0;
 	}
 
 	m_MapReload = false;
@@ -303,6 +305,10 @@ CServer::~CServer()
 	for(auto &pCurrentMapData : m_apCurrentMapData)
 	{
 		free(pCurrentMapData);
+	}
+	for(auto &pCapMapData : m_apCapMapData)
+	{
+		free(pCapMapData);
 	}
 
 	if(m_RunServer != UNINITIALIZED)
@@ -549,12 +555,6 @@ void CServer::ReconnectClient(int ClientId)
 {
 	dbg_assert(0 <= ClientId && ClientId < MAX_CLIENTS, "Invalid ClientId: %d", ClientId);
 	dbg_assert(m_aClients[ClientId].m_State != CClient::STATE_EMPTY, "Client slot empty: %d", ClientId);
-
-	if(GetClientVersion(ClientId) < VERSION_DDNET_RECONNECT)
-	{
-		RedirectClient(ClientId, m_NetServer.Address().port);
-		return;
-	}
 	log_info("server", "telling client to reconnect, cid=%d", ClientId);
 
 	CMsgPacker Msg(NETMSG_RECONNECT, true);
@@ -580,10 +580,7 @@ void CServer::RedirectClient(int ClientId, int Port)
 
 	if(!SupportsRedirect)
 	{
-		char aBuf[128];
-		bool SamePort = Port == this->Port();
-		str_format(aBuf, sizeof(aBuf), "Redirect unsupported: please connect to port %d", Port);
-		Kick(ClientId, SamePort ? "Redirect unsupported: please reconnect" : aBuf);
+		ReconnectClient(ClientId);
 		return;
 	}
 
@@ -1359,13 +1356,17 @@ void CServer::SendMap(int ClientId)
 {
 	int MapType = IsSixup(ClientId) ? MAP_TYPE_SIXUP : MAP_TYPE_SIX;
 	const char *pMapName = ClientMapNameForSend(ClientId);
+	const bool CapMap = UseCapMapForClient(ClientId);
+	const SHA256_DIGEST &MapSha = CapMap ? m_aCapMapSha256[MapType] : m_aCurrentMapSha256[MapType];
+	const unsigned MapCrc = CapMap ? m_aCapMapCrc[MapType] : m_aCurrentMapCrc[MapType];
+	const unsigned int MapSize = CapMap ? m_aCapMapSize[MapType] : m_aCurrentMapSize[MapType];
 	{
 		CMsgPacker Msg(NETMSG_MAP_DETAILS, true);
 		Msg.AddString(pMapName, 0);
-		Msg.AddRaw(&m_aCurrentMapSha256[MapType].data, sizeof(m_aCurrentMapSha256[MapType].data));
-		Msg.AddInt(m_aCurrentMapCrc[MapType]);
-		Msg.AddInt(m_aCurrentMapSize[MapType]);
-		if(m_aMapDownloadUrl[0])
+		Msg.AddRaw(&MapSha.data, sizeof(MapSha.data));
+		Msg.AddInt(MapCrc);
+		Msg.AddInt(MapSize);
+		if(!CapMap && m_aMapDownloadUrl[0])
 		{
 			Msg.AddString(m_aMapDownloadUrl, 0);
 		}
@@ -1378,13 +1379,13 @@ void CServer::SendMap(int ClientId)
 	{
 		CMsgPacker Msg(NETMSG_MAP_CHANGE, true);
 		Msg.AddString(pMapName, 0);
-		Msg.AddInt(m_aCurrentMapCrc[MapType]);
-		Msg.AddInt(m_aCurrentMapSize[MapType]);
+		Msg.AddInt(MapCrc);
+		Msg.AddInt(MapSize);
 		if(MapType == MAP_TYPE_SIXUP)
 		{
 			Msg.AddInt(Config()->m_SvMapWindow);
 			Msg.AddInt(NET_MAX_CHUNK_SIZE - 128);
-			Msg.AddRaw(m_aCurrentMapSha256[MapType].data, sizeof(m_aCurrentMapSha256[MapType].data));
+			Msg.AddRaw(MapSha.data, sizeof(MapSha.data));
 		}
 		SendMsg(&Msg, MSGFLAG_VITAL | MSGFLAG_FLUSH, ClientId);
 	}
@@ -1398,6 +1399,15 @@ const char *CServer::ClientMapNameForSend(int ClientId)
 	if(Client.m_CapRequired && Client.m_aCapMapName[0] != '\0')
 		return Client.m_aCapMapName;
 	return GameServer()->Map()->BaseName();
+}
+
+bool CServer::UseCapMapForClient(int ClientId) const
+{
+	const CClient &Client = m_aClients[ClientId];
+	if(!Client.m_CapRequired || Client.m_aCapMapName[0] == '\0')
+		return false;
+	const int MapType = IsSixup(ClientId) ? MAP_TYPE_SIXUP : MAP_TYPE_SIX;
+	return m_apCapMapData[MapType] != nullptr && m_aCapMapSize[MapType] > 0;
 }
 
 void CServer::PrepareClientCapChallenge(int ClientId)
@@ -1417,6 +1427,28 @@ void CServer::PrepareClientCapChallenge(int ClientId)
 	aSuffix[CAP_SUFFIX_LEN] = '\0';
 
 	str_format(Client.m_aCapMapName, sizeof(Client.m_aCapMapName), "%s_%s_cap", GameServer()->Map()->BaseName(), aSuffix);
+}
+
+bool CServer::LoadCapMapData(int MapType, const char *pPath, const char *pLogScope)
+{
+	free(m_apCapMapData[MapType]);
+	m_apCapMapData[MapType] = nullptr;
+	m_aCapMapSize[MapType] = 0;
+
+	void *pData = nullptr;
+	if(!Storage()->ReadFile(pPath, IStorage::TYPE_ALL, &pData, &m_aCapMapSize[MapType]))
+		return false;
+
+	m_apCapMapData[MapType] = (unsigned char *)pData;
+	m_aCapMapSha256[MapType] = sha256(m_apCapMapData[MapType], m_aCapMapSize[MapType]);
+	m_aCapMapCrc[MapType] = crc32(0, m_apCapMapData[MapType], m_aCapMapSize[MapType]);
+
+	char aSha256[SHA256_MAXSTRSIZE];
+	char aBuf[256];
+	sha256_str(m_aCapMapSha256[MapType], aSha256, sizeof(aSha256));
+	str_format(aBuf, sizeof(aBuf), "loaded CAP map '%s' (%u bytes), sha256=%s", pPath, m_aCapMapSize[MapType], aSha256);
+	Console()->Print(IConsole::OUTPUT_LEVEL_ADDINFO, pLogScope, aBuf);
+	return true;
 }
 
 void CServer::CleanupCapTrustedIps(int64_t Now)
@@ -1542,20 +1574,24 @@ void CServer::AddCapTrustedIp(const NETADDR *pAddr, int64_t ExpiresAt)
 	SaveCapTrustedIp(aIp, ExpiresAt);
 }
 
-void CServer::SendMapData(int ClientId, int Chunk)
+void CServer::SendMapData(int ClientId, int Chunk, bool Flush)
 {
 	int MapType = IsSixup(ClientId) ? MAP_TYPE_SIXUP : MAP_TYPE_SIX;
+	const bool CapMap = UseCapMapForClient(ClientId);
+	const unsigned int MapSize = CapMap ? m_aCapMapSize[MapType] : m_aCurrentMapSize[MapType];
+	const unsigned MapCrc = CapMap ? m_aCapMapCrc[MapType] : m_aCurrentMapCrc[MapType];
+	const unsigned char *pMapData = CapMap ? m_apCapMapData[MapType] : m_apCurrentMapData[MapType];
 	unsigned int ChunkSize = NET_MAX_CHUNK_SIZE - 128;
 	unsigned int Offset = Chunk * ChunkSize;
 	int Last = 0;
 
 	// drop faulty map data requests
-	if(Chunk < 0 || Offset > m_aCurrentMapSize[MapType])
+	if(Chunk < 0 || Offset > MapSize)
 		return;
 
-	if(Offset + ChunkSize >= m_aCurrentMapSize[MapType])
+	if(Offset + ChunkSize >= MapSize)
 	{
-		ChunkSize = m_aCurrentMapSize[MapType] - Offset;
+		ChunkSize = MapSize - Offset;
 		Last = 1;
 	}
 
@@ -1563,12 +1599,13 @@ void CServer::SendMapData(int ClientId, int Chunk)
 	if(MapType == MAP_TYPE_SIX)
 	{
 		Msg.AddInt(Last);
-		Msg.AddInt(m_aCurrentMapCrc[MAP_TYPE_SIX]);
+		Msg.AddInt(MapCrc);
 		Msg.AddInt(Chunk);
 		Msg.AddInt(ChunkSize);
 	}
-	Msg.AddRaw(&m_apCurrentMapData[MapType][Offset], ChunkSize);
-	SendMsg(&Msg, MSGFLAG_VITAL | MSGFLAG_FLUSH, ClientId);
+	Msg.AddRaw(&pMapData[Offset], ChunkSize);
+	const int Flags = Flush ? (MSGFLAG_VITAL | MSGFLAG_FLUSH) : MSGFLAG_VITAL;
+	SendMsg(&Msg, Flags, ClientId);
 
 	if(Config()->m_Debug)
 	{
@@ -1953,7 +1990,8 @@ void CServer::ProcessClientPacket(CNetChunk *pPacket)
 			{
 				for(int i = 0; i < Config()->m_SvMapWindow; i++)
 				{
-					SendMapData(ClientId, m_aClients[ClientId].m_NextMapChunk++);
+					const bool Flush = i == Config()->m_SvMapWindow - 1;
+					SendMapData(ClientId, m_aClients[ClientId].m_NextMapChunk++, Flush);
 				}
 				return;
 			}
@@ -1973,7 +2011,8 @@ void CServer::ProcessClientPacket(CNetChunk *pPacket)
 			{
 				for(int i = 0; i < Config()->m_SvMapWindow; i++)
 				{
-					SendMapData(ClientId, i);
+					const bool Flush = i == Config()->m_SvMapWindow - 1;
+					SendMapData(ClientId, i, Flush);
 				}
 			}
 			SendMapData(ClientId, Config()->m_SvMapWindow + m_aClients[ClientId].m_NextMapChunk);
@@ -3262,9 +3301,18 @@ int CServer::LoadMap(const char *pMapName)
 	if(Config()->m_SvMapsBaseUrl[0])
 	{
 		char aEscaped[256];
+		char aBaseUrl[sizeof(Config()->m_SvMapsBaseUrl) + 2];
 		str_format(aBuf, sizeof(aBuf), "%s_%s.map", pMapName, aSha256);
 		EscapeUrl(aEscaped, aBuf);
-		str_format(m_aMapDownloadUrl, sizeof(m_aMapDownloadUrl), "%s%s", Config()->m_SvMapsBaseUrl, aEscaped);
+		if(str_endswith(Config()->m_SvMapsBaseUrl, "/") || str_endswith(Config()->m_SvMapsBaseUrl, "\\"))
+		{
+			str_copy(aBaseUrl, Config()->m_SvMapsBaseUrl);
+		}
+		else
+		{
+			str_format(aBaseUrl, sizeof(aBaseUrl), "%s/", Config()->m_SvMapsBaseUrl);
+		}
+		str_format(m_aMapDownloadUrl, sizeof(m_aMapDownloadUrl), "%s%s", aBaseUrl, aEscaped);
 	}
 	else
 	{
@@ -3302,6 +3350,35 @@ int CServer::LoadMap(const char *pMapName)
 	{
 		free(m_apCurrentMapData[MAP_TYPE_SIXUP]);
 		m_apCurrentMapData[MAP_TYPE_SIXUP] = nullptr;
+	}
+
+	{
+		char aCapPath[IO_MAX_PATH_LENGTH];
+		str_format(aCapPath, sizeof(aCapPath), "maps/%s.map", Config()->m_SvCapMap);
+		if(!LoadCapMapData(MAP_TYPE_SIX, aCapPath, "cap"))
+		{
+			free(m_apCapMapData[MAP_TYPE_SIX]);
+			m_apCapMapData[MAP_TYPE_SIX] = nullptr;
+			m_aCapMapSize[MAP_TYPE_SIX] = 0;
+			log_warn("cap", "couldn't load CAP map '%s', falling back to full map transfer", aCapPath);
+		}
+	}
+	{
+		char aCapMap7Name[64];
+		if(Config()->m_SvCapMap7[0] != '\0')
+			str_copy(aCapMap7Name, Config()->m_SvCapMap7, sizeof(aCapMap7Name));
+		else
+			str_copy(aCapMap7Name, Config()->m_SvCapMap, sizeof(aCapMap7Name));
+
+		char aCap7Path[IO_MAX_PATH_LENGTH];
+		str_format(aCap7Path, sizeof(aCap7Path), "maps7/%s.map", aCapMap7Name);
+		if(!LoadCapMapData(MAP_TYPE_SIXUP, aCap7Path, "cap7"))
+		{
+			free(m_apCapMapData[MAP_TYPE_SIXUP]);
+			m_apCapMapData[MAP_TYPE_SIXUP] = nullptr;
+			m_aCapMapSize[MAP_TYPE_SIXUP] = 0;
+			log_warn("cap7", "couldn't load CAP sixup map '%s', sixup CAP will use the normal map", aCap7Path);
+		}
 	}
 
 	for(int i = 0; i < MAX_CLIENTS; i++)
@@ -3398,7 +3475,24 @@ int CServer::Run()
 		return -1;
 	}
 
-	if(Config()->m_SvSqliteFile[0] != '\0')
+	if(Config()->m_SvSqliteSyncEnable)
+	{
+		log_info("sql", "SQLite sync API enabled: host=%s port=%d mode=%s timeout=%dms",
+			Config()->m_SvSqliteSyncHost,
+			Config()->m_SvSqliteSyncPort,
+			Config()->m_SvSqliteSyncMode == 0 ? "read-write" : "read-only",
+			Config()->m_SvSqliteSyncTimeoutMs);
+		DbPool()->RegisterSqliteDatabase(CDbConnectionPool::READ, "sqlite-sync-remote");
+		DbPool()->RegisterSqliteDatabase(CDbConnectionPool::WRITE, "sqlite-sync-remote");
+
+		if(Config()->m_SvUseSql && Config()->m_SvSqliteFile[0] != '\0')
+		{
+			char aFullPath[IO_MAX_PATH_LENGTH];
+			Storage()->GetCompletePath(IStorage::TYPE_SAVE_OR_ABSOLUTE, Config()->m_SvSqliteFile, aFullPath, sizeof(aFullPath));
+			DbPool()->RegisterSqliteDatabase(CDbConnectionPool::WRITE_BACKUP, aFullPath);
+		}
+	}
+	else if(Config()->m_SvSqliteFile[0] != '\0')
 	{
 		char aFullPath[IO_MAX_PATH_LENGTH];
 		Storage()->GetCompletePath(IStorage::TYPE_SAVE_OR_ABSOLUTE, Config()->m_SvSqliteFile, aFullPath, sizeof(aFullPath));

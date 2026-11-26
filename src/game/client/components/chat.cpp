@@ -1480,6 +1480,9 @@ void CChat::EnsureCoherentWidth() const
 
 void CChat::SendChat(int Team, const char *pLine)
 {
+	if(GameClient()->HandleCompanionChatCommand(pLine))
+		return;
+
 	// don't send empty messages
 	if(*str_utf8_skip_whitespaces(pLine) == '\0')
 		return;
@@ -1493,6 +1496,7 @@ void CChat::SendChat(int Team, const char *pLine)
 		Msg7.m_Target = -1;
 		Msg7.m_pMessage = pLine;
 		Client()->SendPackMsgActive(&Msg7, MSGFLAG_VITAL, true);
+		GameClient()->AsyncProxyBots().NotifyLocalChatCommand(GameClient(), pLine);
 		return;
 	}
 
@@ -1501,11 +1505,22 @@ void CChat::SendChat(int Team, const char *pLine)
 	Msg.m_Team = Team;
 	Msg.m_pMessage = pLine;
 	Client()->SendPackMsgActive(&Msg, MSGFLAG_VITAL);
+	GameClient()->AsyncProxyBots().NotifyLocalChatCommand(GameClient(), pLine);
+
+	// Mirror local source chat directly to async bots without waiting for server echo.
+	if(g_Config.m_ClZzAsyncBotsMirrorEnable)
+	{
+		const int SourceId = g_Config.m_ClZzAsyncBotsMirrorClientId;
+		if(SourceId == GameClient()->m_aLocalIds[0] || SourceId == GameClient()->m_aLocalIds[1])
+			GameClient()->AsyncProxyBots().QueueChatAll(pLine);
+	}
 }
 
 void CChat::SendChatQueued(const char *pLine)
 {
 	if(!pLine || str_length(pLine) < 1)
+		return;
+	if(GameClient()->HandleCompanionChatCommand(pLine))
 		return;
 
 	bool AddEntry = false;

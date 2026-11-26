@@ -7,8 +7,10 @@
 #include "log.h"
 #include "mem.h"
 #include "str.h"
+#include "time.h"
 #include "windows.h"
 
+#include <algorithm>
 #include <chrono>
 #include <iterator> // std::size
 #include <string_view>
@@ -109,8 +111,97 @@ struct NETSOCKET_INTERNAL
 	int web_ipv6sock;
 
 	NETSOCKET_BUFFER buffer;
+	bool socks5_proxy_enabled;
+	NETADDR socks5_proxy_addr;
+	NETADDR socks5_udp_relay_addr;
+	NETSOCKET socks5_tcp_socket;
+	char socks5_proxy_username[128];
+	char socks5_proxy_password[128];
+	int64_t socks5_last_reconnect_attempt;
+	int64_t socks5_next_reconnect_after;
+	int socks5_reconnect_fail_count;
+	unsigned char socks5_udp_packet_buffer[PACKETSIZE + 64];
 };
 static NETSOCKET_INTERNAL invalid_socket = {NETTYPE_INVALID, -1, -1, -1, -1};
+
+static bool IsZeroAddress(const NETADDR *pAddr)
+{
+	for(unsigned char Byte : pAddr->ip)
+	{
+		if(Byte != 0)
+			return false;
+	}
+	return true;
+}
+
+static bool IsLoopbackAddress(const NETADDR *pAddr)
+{
+	if(pAddr->type & NETTYPE_IPV4)
+		return pAddr->ip[0] == 127;
+	if(pAddr->type & NETTYPE_IPV6)
+	{
+		for(int i = 0; i < 15; i++)
+		{
+			if(pAddr->ip[i] != 0)
+				return false;
+		}
+		return pAddr->ip[15] == 1;
+	}
+	return false;
+}
+
+static void NetUdpDisableProxy(NETSOCKET pSock, bool ClearProxyConfig)
+{
+	if(pSock->socks5_tcp_socket)
+	{
+		net_tcp_close(pSock->socks5_tcp_socket);
+		pSock->socks5_tcp_socket = nullptr;
+	}
+	pSock->socks5_proxy_enabled = false;
+	pSock->socks5_last_reconnect_attempt = 0;
+	pSock->socks5_next_reconnect_after = 0;
+	pSock->socks5_reconnect_fail_count = 0;
+	if(ClearProxyConfig)
+	{
+		mem_zero(&pSock->socks5_proxy_addr, sizeof(pSock->socks5_proxy_addr));
+		pSock->socks5_proxy_addr.type = NETTYPE_INVALID;
+		pSock->socks5_proxy_username[0] = '\0';
+		pSock->socks5_proxy_password[0] = '\0';
+	}
+	pSock->socks5_udp_relay_addr.type = NETTYPE_INVALID;
+}
+
+static bool NetUdpTryRestoreProxy(NETSOCKET pSock);
+
+static bool NetTcpSendAll(NETSOCKET pSock, const void *pData, int DataSize)
+{
+	const unsigned char *pBytes = (const unsigned char *)pData;
+	int Sent = 0;
+	while(Sent < DataSize)
+	{
+		const int Result = net_tcp_send(pSock, pBytes + Sent, DataSize - Sent);
+		if(Result <= 0)
+			return false;
+		Sent += Result;
+	}
+	return true;
+}
+
+static bool NetTcpRecvAll(NETSOCKET pSock, void *pData, int DataSize)
+{
+	unsigned char *pBytes = (unsigned char *)pData;
+	int Received = 0;
+	while(Received < DataSize)
+	{
+		if(!net_socket_read_wait(pSock, std::chrono::milliseconds(120)))
+			return false;
+		const int Result = net_tcp_recv(pSock, pBytes + Received, DataSize - Received);
+		if(Result <= 0)
+			return false;
+		Received += Result;
+	}
+	return true;
+}
 
 const NETADDR NETADDR_ZEROED = {NETTYPE_INVALID, {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 0};
 
@@ -1004,6 +1095,90 @@ NETSOCKET net_udp_create(NETADDR bindaddr)
 
 int net_udp_send(NETSOCKET sock, const NETADDR *addr, const void *data, int size)
 {
+	if(sock->socks5_proxy_enabled)
+	{
+		unsigned char *pPacket = sock->socks5_udp_packet_buffer;
+		int PacketSize = 0;
+		pPacket[PacketSize++] = 0x00; // RSV
+		pPacket[PacketSize++] = 0x00; // RSV
+		pPacket[PacketSize++] = 0x00; // FRAG (must be 0, no fragmentation)
+
+		NETADDR TargetAddr = *addr;
+		if(TargetAddr.type & NETTYPE_WEBSOCKET_IPV4)
+			TargetAddr.type = NETTYPE_IPV4;
+		else if(TargetAddr.type & NETTYPE_WEBSOCKET_IPV6)
+			TargetAddr.type = NETTYPE_IPV6;
+
+		if(TargetAddr.type & NETTYPE_IPV4)
+		{
+			pPacket[PacketSize++] = 0x01; // ATYP IPv4
+			mem_copy(pPacket + PacketSize, TargetAddr.ip, 4);
+			PacketSize += 4;
+		}
+		else if(TargetAddr.type & NETTYPE_IPV6)
+		{
+			pPacket[PacketSize++] = 0x04; // ATYP IPv6
+			mem_copy(pPacket + PacketSize, TargetAddr.ip, 16);
+			PacketSize += 16;
+		}
+		else
+		{
+			log_error("net", "SOCKS5: unsupported target address type");
+			return -1;
+		}
+		pPacket[PacketSize++] = (unsigned char)((TargetAddr.port >> 8) & 0xff);
+		pPacket[PacketSize++] = (unsigned char)(TargetAddr.port & 0xff);
+
+		const int MaxPayload = (int)sizeof(sock->socks5_udp_packet_buffer) - PacketSize;
+		if(size > MaxPayload)
+		{
+			log_error("net", "SOCKS5: payload too large (%d > %d)", size, MaxPayload);
+			return -1;
+		}
+		mem_copy(pPacket + PacketSize, data, size);
+		PacketSize += size;
+
+		int Result = -1;
+		const NETADDR &RelayAddr = sock->socks5_udp_relay_addr;
+		if((RelayAddr.type & NETTYPE_IPV4) != 0 && sock->ipv4sock >= 0)
+		{
+			sockaddr_in sa;
+			netaddr_to_sockaddr_in(&RelayAddr, &sa);
+			Result = sendto(sock->ipv4sock, (const char *)pPacket, PacketSize, 0, (sockaddr *)&sa, sizeof(sa));
+		}
+		else if((RelayAddr.type & NETTYPE_IPV6) != 0 && sock->ipv6sock >= 0)
+		{
+			sockaddr_in6 sa;
+			netaddr_to_sockaddr_in6(&RelayAddr, &sa);
+			Result = sendto(sock->ipv6sock, (const char *)pPacket, PacketSize, 0, (sockaddr *)&sa, sizeof(sa));
+		}
+		else
+		{
+			log_error("net", "SOCKS5: UDP relay type is not available on this socket");
+			return -1;
+		}
+		if(Result < 0 && !net_would_block() && NetUdpTryRestoreProxy(sock))
+		{
+			const NETADDR &RetryRelayAddr = sock->socks5_udp_relay_addr;
+			if((RetryRelayAddr.type & NETTYPE_IPV4) != 0 && sock->ipv4sock >= 0)
+			{
+				sockaddr_in sa;
+				netaddr_to_sockaddr_in(&RetryRelayAddr, &sa);
+				Result = sendto(sock->ipv4sock, (const char *)pPacket, PacketSize, 0, (sockaddr *)&sa, sizeof(sa));
+			}
+			else if((RetryRelayAddr.type & NETTYPE_IPV6) != 0 && sock->ipv6sock >= 0)
+			{
+				sockaddr_in6 sa;
+				netaddr_to_sockaddr_in6(&RetryRelayAddr, &sa);
+				Result = sendto(sock->ipv6sock, (const char *)pPacket, PacketSize, 0, (sockaddr *)&sa, sizeof(sa));
+			}
+		}
+
+		network_stats.sent_bytes += size;
+		network_stats.sent_packets++;
+		return Result;
+	}
+
 	int d = -1;
 
 	if(addr->type & NETTYPE_IPV4)
@@ -1107,6 +1282,87 @@ int net_udp_send(NETSOCKET sock, const NETADDR *addr, const void *data, int size
 
 int net_udp_recv(NETSOCKET sock, NETADDR *addr, unsigned char **data)
 {
+	if(sock->socks5_proxy_enabled)
+	{
+		while(true)
+		{
+			int Bytes = 0;
+			sockaddr_storage RecvAddr;
+			socklen_t FromLen = sizeof(RecvAddr);
+			if(sock->ipv4sock >= 0)
+			{
+				Bytes = recvfrom(sock->ipv4sock, (char *)sock->socks5_udp_packet_buffer, sizeof(sock->socks5_udp_packet_buffer), 0, (sockaddr *)&RecvAddr, &FromLen);
+			}
+			else if(sock->ipv6sock >= 0)
+			{
+				Bytes = recvfrom(sock->ipv6sock, (char *)sock->socks5_udp_packet_buffer, sizeof(sock->socks5_udp_packet_buffer), 0, (sockaddr *)&RecvAddr, &FromLen);
+			}
+			else
+			{
+				return -1;
+			}
+
+			if(Bytes <= 0)
+			{
+				if(Bytes < 0 && !net_would_block())
+				{
+					NetUdpTryRestoreProxy(sock);
+				}
+				return 0;
+			}
+
+			const unsigned char *pRaw = sock->socks5_udp_packet_buffer;
+			if(Bytes < 4 || pRaw[0] != 0x00 || pRaw[1] != 0x00 || pRaw[2] != 0x00)
+				continue;
+
+			int Offset = 3;
+			unsigned char Atyp = pRaw[Offset++];
+			NETADDR ParsedAddr = NETADDR_ZEROED;
+			if(Atyp == 0x01)
+			{
+				if(Bytes < Offset + 4 + 2)
+					continue;
+				ParsedAddr.type = NETTYPE_IPV4;
+				mem_copy(ParsedAddr.ip, pRaw + Offset, 4);
+				Offset += 4;
+			}
+			else if(Atyp == 0x04)
+			{
+				if(Bytes < Offset + 16 + 2)
+					continue;
+				ParsedAddr.type = NETTYPE_IPV6;
+				mem_copy(ParsedAddr.ip, pRaw + Offset, 16);
+				Offset += 16;
+			}
+			else if(Atyp == 0x03)
+			{
+				if(Bytes < Offset + 1)
+					continue;
+				const int DomainLen = (int)pRaw[Offset++];
+				if(Bytes < Offset + DomainLen + 2)
+					continue;
+				Offset += DomainLen;
+				// Domain ATYP is uncommon for UDP reply; skip address and keep only payload.
+				ParsedAddr.type = NETTYPE_INVALID;
+			}
+			else
+				continue;
+
+			ParsedAddr.port = (((unsigned short)pRaw[Offset]) << 8) | (unsigned short)pRaw[Offset + 1];
+			Offset += 2;
+			const int PayloadSize = Bytes - Offset;
+			if(PayloadSize <= 0)
+				continue;
+
+			mem_move(sock->socks5_udp_packet_buffer, sock->socks5_udp_packet_buffer + Offset, PayloadSize);
+			*addr = ParsedAddr;
+			*data = sock->socks5_udp_packet_buffer;
+			network_stats.recv_bytes += PayloadSize;
+			network_stats.recv_packets++;
+			return PayloadSize;
+		}
+	}
+
 	static const auto &&update_stats = [](int bytes) {
 		network_stats.recv_bytes += bytes;
 		network_stats.recv_packets++;
@@ -1206,8 +1462,262 @@ int net_udp_recv(NETSOCKET sock, NETADDR *addr, unsigned char **data)
 	return bytes < 0 ? -1 : 0;
 }
 
+int net_udp_set_proxy(NETSOCKET sock, const NETADDR *proxy_addr, const char *proxy_username, const char *proxy_password)
+{
+	if(!sock)
+		return -1;
+
+	NetUdpDisableProxy(sock, proxy_addr == nullptr);
+	if(proxy_addr == nullptr)
+		return 0;
+
+	if((proxy_addr->type & (NETTYPE_IPV4 | NETTYPE_IPV6)) == 0)
+	{
+		log_error("net", "SOCKS5 proxy requires IPv4 or IPv6 address");
+		return -1;
+	}
+
+	NETADDR BindAddr = NETADDR_ZEROED;
+	BindAddr.type = (proxy_addr->type & NETTYPE_IPV6) ? NETTYPE_IPV6 : NETTYPE_IPV4;
+	NETSOCKET pTcpSock = net_tcp_create(BindAddr);
+	if(!pTcpSock)
+	{
+		log_error("net", "SOCKS5: failed to create TCP control socket");
+		return -1;
+	}
+
+	if(net_tcp_connect(pTcpSock, proxy_addr) != 0)
+	{
+		log_error("net", "SOCKS5: connect failed (%s)", net_error_message().c_str());
+		net_tcp_close(pTcpSock);
+		return -1;
+	}
+
+	const bool HasAuth = proxy_username && proxy_username[0] != '\0';
+	const unsigned char aHelloNoAuth[] = {0x05, 0x01, 0x00};
+	const unsigned char aHelloWithAuth[] = {0x05, 0x02, 0x00, 0x02};
+	unsigned char aHelloReply[2];
+	const unsigned char *pHello = HasAuth ? aHelloWithAuth : aHelloNoAuth;
+	const int HelloSize = HasAuth ? (int)sizeof(aHelloWithAuth) : (int)sizeof(aHelloNoAuth);
+	if(!NetTcpSendAll(pTcpSock, pHello, HelloSize) || !NetTcpRecvAll(pTcpSock, aHelloReply, sizeof(aHelloReply)))
+	{
+		log_error("net", "SOCKS5: hello handshake failed");
+		net_tcp_close(pTcpSock);
+		return -1;
+	}
+	if(aHelloReply[0] != 0x05)
+	{
+		log_error("net", "SOCKS5: invalid hello response");
+		net_tcp_close(pTcpSock);
+		return -1;
+	}
+	if(aHelloReply[1] == 0x02)
+	{
+		const int UserLen = str_length(proxy_username);
+		const int PassLen = proxy_password ? str_length(proxy_password) : 0;
+		if(UserLen <= 0 || UserLen > 255 || PassLen > 255)
+		{
+			log_error("net", "SOCKS5: invalid username/password length");
+			net_tcp_close(pTcpSock);
+			return -1;
+		}
+		unsigned char aAuthReq[3 + 255 + 255];
+		int AuthReqSize = 0;
+		aAuthReq[AuthReqSize++] = 0x01; // auth version
+		aAuthReq[AuthReqSize++] = (unsigned char)UserLen;
+		mem_copy(aAuthReq + AuthReqSize, proxy_username, UserLen);
+		AuthReqSize += UserLen;
+		aAuthReq[AuthReqSize++] = (unsigned char)PassLen;
+		if(PassLen > 0)
+		{
+			mem_copy(aAuthReq + AuthReqSize, proxy_password, PassLen);
+			AuthReqSize += PassLen;
+		}
+		unsigned char aAuthReply[2];
+		if(!NetTcpSendAll(pTcpSock, aAuthReq, AuthReqSize) || !NetTcpRecvAll(pTcpSock, aAuthReply, sizeof(aAuthReply)))
+		{
+			log_error("net", "SOCKS5: auth exchange failed");
+			net_tcp_close(pTcpSock);
+			return -1;
+		}
+		if(aAuthReply[0] != 0x01 || aAuthReply[1] != 0x00)
+		{
+			log_error("net", "SOCKS5: auth rejected");
+			net_tcp_close(pTcpSock);
+			return -1;
+		}
+	}
+	else if(aHelloReply[1] != 0x00)
+	{
+		log_error("net", "SOCKS5: unsupported auth method");
+		net_tcp_close(pTcpSock);
+		return -1;
+	}
+
+	unsigned char aAssocReq[4 + 16 + 2];
+	int AssocReqSize = 0;
+	aAssocReq[AssocReqSize++] = 0x05; // VER
+	aAssocReq[AssocReqSize++] = 0x03; // CMD UDP ASSOCIATE
+	aAssocReq[AssocReqSize++] = 0x00; // RSV
+	if(proxy_addr->type & NETTYPE_IPV6)
+	{
+		aAssocReq[AssocReqSize++] = 0x04; // ATYP IPv6
+		mem_zero(aAssocReq + AssocReqSize, 16);
+		AssocReqSize += 16;
+	}
+	else
+	{
+		aAssocReq[AssocReqSize++] = 0x01; // ATYP IPv4
+		mem_zero(aAssocReq + AssocReqSize, 4);
+		AssocReqSize += 4;
+	}
+	aAssocReq[AssocReqSize++] = 0x00; // PORT hi
+	aAssocReq[AssocReqSize++] = 0x00; // PORT lo
+
+	if(!NetTcpSendAll(pTcpSock, aAssocReq, AssocReqSize))
+	{
+		log_error("net", "SOCKS5: UDP ASSOCIATE send failed");
+		net_tcp_close(pTcpSock);
+		return -1;
+	}
+
+	unsigned char aAssocReplyHead[4];
+	if(!NetTcpRecvAll(pTcpSock, aAssocReplyHead, sizeof(aAssocReplyHead)))
+	{
+		log_error("net", "SOCKS5: UDP ASSOCIATE reply failed");
+		net_tcp_close(pTcpSock);
+		return -1;
+	}
+	if(aAssocReplyHead[0] != 0x05 || aAssocReplyHead[1] != 0x00)
+	{
+		log_error("net", "SOCKS5: UDP ASSOCIATE rejected (code=%d)", (int)aAssocReplyHead[1]);
+		net_tcp_close(pTcpSock);
+		return -1;
+	}
+
+	NETADDR UdpRelay = NETADDR_ZEROED;
+	const unsigned char Atyp = aAssocReplyHead[3];
+	if(Atyp == 0x01)
+	{
+		unsigned char aTmp[6];
+		if(!NetTcpRecvAll(pTcpSock, aTmp, sizeof(aTmp)))
+		{
+			log_error("net", "SOCKS5: failed to read IPv4 UDP relay");
+			net_tcp_close(pTcpSock);
+			return -1;
+		}
+		UdpRelay.type = NETTYPE_IPV4;
+		mem_copy(UdpRelay.ip, aTmp, 4);
+		UdpRelay.port = (((unsigned short)aTmp[4]) << 8) | (unsigned short)aTmp[5];
+	}
+	else if(Atyp == 0x04)
+	{
+		unsigned char aTmp[18];
+		if(!NetTcpRecvAll(pTcpSock, aTmp, sizeof(aTmp)))
+		{
+			log_error("net", "SOCKS5: failed to read IPv6 UDP relay");
+			net_tcp_close(pTcpSock);
+			return -1;
+		}
+		UdpRelay.type = NETTYPE_IPV6;
+		mem_copy(UdpRelay.ip, aTmp, 16);
+		UdpRelay.port = (((unsigned short)aTmp[16]) << 8) | (unsigned short)aTmp[17];
+	}
+	else if(Atyp == 0x03)
+	{
+		unsigned char DomainLen = 0;
+		if(!NetTcpRecvAll(pTcpSock, &DomainLen, 1))
+		{
+			log_error("net", "SOCKS5: failed to read domain length");
+			net_tcp_close(pTcpSock);
+			return -1;
+		}
+		unsigned char aDomainBuf[256 + 2];
+		if(DomainLen > 0 && !NetTcpRecvAll(pTcpSock, aDomainBuf, DomainLen + 2))
+		{
+			log_error("net", "SOCKS5: failed to read domain reply body");
+			net_tcp_close(pTcpSock);
+			return -1;
+		}
+		// For domain replies, use proxy address with returned port.
+		UdpRelay = *proxy_addr;
+		UdpRelay.type = (proxy_addr->type & NETTYPE_IPV6) ? NETTYPE_IPV6 : NETTYPE_IPV4;
+		UdpRelay.port = (((unsigned short)aDomainBuf[DomainLen]) << 8) | (unsigned short)aDomainBuf[DomainLen + 1];
+	}
+	else
+	{
+		log_error("net", "SOCKS5: unsupported UDP relay ATYP=%d", (int)Atyp);
+		net_tcp_close(pTcpSock);
+		return -1;
+	}
+
+	if(UdpRelay.port == 0)
+	{
+		log_error("net", "SOCKS5: invalid UDP relay port");
+		net_tcp_close(pTcpSock);
+		return -1;
+	}
+	if(IsZeroAddress(&UdpRelay))
+	{
+		UdpRelay = *proxy_addr;
+		UdpRelay.type = (proxy_addr->type & NETTYPE_IPV6) ? NETTYPE_IPV6 : NETTYPE_IPV4;
+	}
+	else if(IsLoopbackAddress(&UdpRelay) && !IsLoopbackAddress(proxy_addr))
+	{
+		// Some remote SOCKS5 servers incorrectly return a loopback relay.
+		// Keep the announced UDP relay port, but route to the configured proxy host.
+		const unsigned short RelayPort = UdpRelay.port;
+		UdpRelay = *proxy_addr;
+		UdpRelay.type = (proxy_addr->type & NETTYPE_IPV6) ? NETTYPE_IPV6 : NETTYPE_IPV4;
+		UdpRelay.port = RelayPort;
+	}
+
+	sock->socks5_tcp_socket = pTcpSock;
+	sock->socks5_proxy_enabled = true;
+	sock->socks5_proxy_addr = *proxy_addr;
+	sock->socks5_udp_relay_addr = UdpRelay;
+	str_copy(sock->socks5_proxy_username, proxy_username ? proxy_username : "", sizeof(sock->socks5_proxy_username));
+	str_copy(sock->socks5_proxy_password, proxy_password ? proxy_password : "", sizeof(sock->socks5_proxy_password));
+
+	char aProxyAddr[NETADDR_MAXSTRSIZE];
+	char aRelayAddr[NETADDR_MAXSTRSIZE];
+	net_addr_str(proxy_addr, aProxyAddr, sizeof(aProxyAddr), true);
+	net_addr_str(&UdpRelay, aRelayAddr, sizeof(aRelayAddr), true);
+	log_debug("net", "SOCKS5 proxy enabled: control=%s udp_relay=%s", aProxyAddr, aRelayAddr);
+	return 0;
+}
+
+static bool NetUdpTryRestoreProxy(NETSOCKET pSock)
+{
+	if(pSock->socks5_proxy_addr.type == NETTYPE_INVALID)
+		return false;
+
+	const int64_t Now = time_get();
+	if(pSock->socks5_next_reconnect_after != 0 && Now < pSock->socks5_next_reconnect_after)
+		return false;
+	if(pSock->socks5_last_reconnect_attempt != 0 && Now - pSock->socks5_last_reconnect_attempt < time_freq() / 2)
+		return false;
+	pSock->socks5_last_reconnect_attempt = Now;
+
+	const int Res = net_udp_set_proxy(pSock, &pSock->socks5_proxy_addr, pSock->socks5_proxy_username, pSock->socks5_proxy_password);
+	if(Res == 0)
+	{
+		pSock->socks5_reconnect_fail_count = 0;
+		pSock->socks5_next_reconnect_after = 0;
+		log_info("net", "SOCKS5 proxy auto-restored");
+	}
+	else
+	{
+		pSock->socks5_reconnect_fail_count = std::min(pSock->socks5_reconnect_fail_count + 1, 8);
+		const int BackoffSeconds = std::min(1 << std::min(pSock->socks5_reconnect_fail_count, 4), 12);
+		pSock->socks5_next_reconnect_after = Now + (int64_t)BackoffSeconds * time_freq();
+	}
+	return Res == 0;
+}
+
 void net_udp_close(NETSOCKET sock)
 {
+	NetUdpDisableProxy(sock, true);
 	priv_net_close_all_sockets(sock);
 }
 

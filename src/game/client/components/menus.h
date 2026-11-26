@@ -29,8 +29,12 @@
 
 #include <chrono>
 #include <deque>
+#include <memory>
 #include <optional>
+#include <string>
 #include <vector>
+
+class CHttpRequest;
 
 class CMenus : public CComponent
 {
@@ -49,6 +53,7 @@ public:
 	int DoButton_Toggle(const void *pId, int Checked, const CUIRect *pRect, bool Active, unsigned Flags = BUTTONFLAG_LEFT);
 	int DoButton_Menu(CButtonContainer *pButtonContainer, const char *pText, int Checked, const CUIRect *pRect, unsigned Flags = BUTTONFLAG_LEFT, const char *pImageName = nullptr, int Corners = IGraphics::CORNER_ALL, float Rounding = 5.0f, float FontFactor = 0.0f, ColorRGBA Color = ColorRGBA(1.0f, 1.0f, 1.0f, 0.5f));
 	int DoButton_MenuTab(CButtonContainer *pButtonContainer, const char *pText, int Checked, const CUIRect *pRect, int Corners, SUIAnimator *pAnimator = nullptr, const ColorRGBA *pDefaultColor = nullptr, const ColorRGBA *pActiveColor = nullptr, const ColorRGBA *pHoverColor = nullptr, float EdgeRounding = 10.0f, const CCommunityIcon *pCommunityIcon = nullptr);
+	void RenderClientChatToastOverlay() { RenderClientChatToast(); }
 
 	int DoButton_CheckBox_Common(const void *pId, const char *pText, const char *pBoxText, const CUIRect *pRect, unsigned Flags);
 	int DoButton_CheckBox(const void *pId, const char *pText, int Checked, const CUIRect *pRect);
@@ -148,6 +153,8 @@ protected:
 	int m_Popup;
 	bool m_ShowStart;
 	bool m_MenuActive;
+	bool m_ZzClickGuiActive = false;
+	float m_ZzClickGuiAnim = 0.0f;
 
 	bool m_DummyNamePlatePreview = false;
 
@@ -250,6 +257,126 @@ protected:
 	bool m_NeedSendinfo;
 	bool m_NeedSendDummyinfo;
 	int m_SettingPlayerPage;
+	struct CClientChatMessage
+	{
+		int m_Id = 0;
+		int m_Timestamp = 0;
+		char m_aSenderId[64] = "";
+		char m_aSenderInstanceId[64] = "";
+		char m_aTargetId[64] = "";
+		char m_aName[64] = "";
+		char m_aTargetName[64] = "";
+		char m_aText[192] = "";
+		char m_aSkin[24] = "default";
+		bool m_UseCustomColor = false;
+		int m_ColorBody = 65408;
+		int m_ColorFeet = 65408;
+		bool m_Direct = false;
+		bool m_MentionsLocal = false;
+	};
+	struct CClientChatConversation
+	{
+		char m_aUserId[64] = "";
+		char m_aName[64] = "";
+		char m_aSkin[24] = "default";
+		bool m_UseCustomColor = false;
+		int m_ColorBody = 65408;
+		int m_ColorFeet = 65408;
+		char m_aPreview[96] = "";
+		int m_LastTimestamp = 0;
+		int m_UnreadCount = 0;
+	};
+	struct CClientChatDirectContact
+	{
+		char m_aUserId[64] = "";
+		char m_aName[64] = "";
+		char m_aSkin[24] = "default";
+		bool m_UseCustomColor = false;
+		int m_ColorBody = 65408;
+		int m_ColorFeet = 65408;
+		int m_HiddenBeforeId = 0;
+		bool m_Visible = true;
+	};
+	struct CClientChatToast
+	{
+		bool m_Active = false;
+		bool m_Direct = false;
+		std::chrono::nanoseconds m_ExpiresAt{0};
+		char m_aTitle[96] = "";
+		char m_aText[192] = "";
+		char m_aName[64] = "";
+		char m_aSkin[24] = "default";
+		bool m_UseCustomColor = false;
+		int m_ColorBody = 65408;
+		int m_ColorFeet = 65408;
+	};
+	struct CClientChatFriend
+	{
+		char m_aUserId[64] = "";
+		char m_aName[64] = "";
+		char m_aStatus[16] = "offline";
+		char m_aStatusText[96] = "";
+		char m_aCurrentServer[96] = "";
+		bool m_Online = false;
+		bool m_CanJoin = false;
+	};
+	struct CClientChatFriendRequest
+	{
+		int m_Id = 0;
+		char m_aUserId[64] = "";
+		char m_aName[64] = "";
+	};
+	struct CClientChatBlockedUser
+	{
+		char m_aUserId[64] = "";
+		char m_aName[64] = "";
+	};
+	enum EClientChatAuthAction
+	{
+		CLIENT_CHAT_AUTH_NONE = 0,
+		CLIENT_CHAT_AUTH_LOGIN,
+		CLIENT_CHAT_AUTH_REGISTER,
+		CLIENT_CHAT_AUTH_LOGOUT,
+	};
+	std::vector<CClientChatMessage> m_vClientChatRoomMessages;
+	std::vector<CClientChatMessage> m_vClientChatDirectMessages;
+	std::vector<CClientChatConversation> m_vClientChatConversations;
+	std::vector<CClientChatDirectContact> m_vClientChatDirectContacts;
+	std::vector<CClientChatToast> m_vClientChatToastQueue;
+	std::vector<CClientChatFriend> m_vClientChatFriends;
+	std::vector<CClientChatFriendRequest> m_vClientChatFriendRequestsIn;
+	std::vector<CClientChatBlockedUser> m_vClientChatBlockedUsers;
+	std::shared_ptr<CHttpRequest> m_pClientChatFetchTask;
+	std::shared_ptr<CHttpRequest> m_pClientChatSendTask;
+	std::shared_ptr<CHttpRequest> m_pClientChatAuthTask;
+	std::shared_ptr<CHttpRequest> m_pClientChatActionTask;
+	CLineInputBuffered<192, 160> m_ClientChatInput;
+	CLineInputBuffered<48, 24> m_ClientChatAuthNameInput;
+	CLineInputBuffered<72, 64> m_ClientChatAuthPasswordInput;
+	std::chrono::nanoseconds m_ClientChatLastPollTime{0};
+	char m_aClientChatRuntimeIdentity[64] = "";
+	char m_aClientChatAccountId[64] = "";
+	char m_aClientChatAccountUsername[64] = "";
+	char m_aClientChatStatus[128] = "";
+	bool m_ClientChatStatusError = false;
+	int m_ClientChatTransientAuthFailures = 0;
+	EClientChatAuthAction m_ClientChatAuthAction = CLIENT_CHAT_AUTH_NONE;
+	char m_aClientChatDirectTargetId[64] = "";
+	char m_aClientChatDirectTargetName[64] = "";
+	char m_aClientChatDirectTargetSkin[24] = "default";
+	bool m_ClientChatDirectTargetUseCustomColor = false;
+	int m_ClientChatDirectTargetColorBody = 65408;
+	int m_ClientChatDirectTargetColorFeet = 65408;
+	int m_ClientChatLastRoomId = 0;
+	int m_ClientChatLastDirectId = 0;
+	bool m_ClientChatHasFetched = false;
+	CClientChatToast m_ClientChatToast;
+	char m_aClientChatPresenceStatus[16] = "online";
+	char m_aClientChatPresenceText[96] = "";
+	char m_aClientChatPrivacyWhoCanDm[16] = "everyone";
+	char m_aClientChatPrivacyWhoCanAddFriends[16] = "everyone";
+	char m_aClientChatPresenceServer[96] = "";
+	std::chrono::nanoseconds m_ClientChatPresenceLastSync{0};
 
 	// 0.7 skins
 	bool m_CustomSkinMenu = false;
@@ -476,6 +603,33 @@ protected:
 #endif
 	void RenderMenubar(CUIRect Box, IClient::EClientState ClientState);
 	void RenderNews(CUIRect MainView);
+	void RenderClientChat(CUIRect MainView);
+	void RenderClientChatToast();
+	void UpdateClientChat();
+	void StartClientChatFetch();
+	void HandleClientChatFetchCompletion(const std::shared_ptr<CHttpRequest> &pTask);
+	void StartClientChatAuthRequest(EClientChatAuthAction Action);
+	void HandleClientChatAuthCompletion(const std::shared_ptr<CHttpRequest> &pTask);
+	void ClearClientChatAuthState(bool ClearSavedToken);
+	void SendClientChatMessage();
+	void HandleClientChatSendCompletion(const std::shared_ptr<CHttpRequest> &pTask);
+	void StartClientChatActionRequest(const std::string &JsonBody, const char *pPendingStatus);
+	void HandleClientChatActionCompletion(const std::shared_ptr<CHttpRequest> &pTask);
+	void RefreshClientChatConversations();
+	void LoadClientChatDirectContacts();
+	void SaveClientChatDirectContacts() const;
+	CClientChatDirectContact *FindClientChatDirectContact(const char *pUserId, const char *pName);
+	const CClientChatDirectContact *FindClientChatDirectContact(const char *pUserId, const char *pName) const;
+	void EnsureClientChatDirectContact(const char *pUserId, const char *pName, const char *pSkin, bool UseCustomColor, int ColorBody, int ColorFeet);
+	void DeleteClientChatDirectContact(const char *pUserId, const char *pName);
+	void ActivateClientChatRoom();
+	void ActivateClientChatDirect(const char *pUserId, const char *pName, const char *pSkin, bool UseCustomColor, int ColorBody, int ColorFeet);
+	bool IsClientChatPageActive() const;
+	bool IsClientChatBlocked(const char *pUserId, const char *pName) const;
+	void ToggleClientChatBlock(const char *pUserId, const char *pName, bool Block);
+	void SendClientChatFriendRequest(const char *pUserId, const char *pName);
+	void SetClientChatPresenceStatus(const char *pStatus);
+	static void ConToggleClientChat(IConsole::IResult *pResult, void *pUserData);
 	static void ConchainBackgroundEntities(IConsole::IResult *pResult, void *pUserData, IConsole::FCommandCallback pfnCallback, void *pCallbackUserData);
 	static void ConchainUpdateMusicState(IConsole::IResult *pResult, void *pUserData, IConsole::FCommandCallback pfnCallback, void *pCallbackUserData);
 	void UpdateMusicState();
@@ -630,6 +784,7 @@ protected:
 	void UpdateColors();
 
 	IGraphics::CTextureHandle m_TextureBlob;
+	IGraphics::CTextureHandle m_BestClientIconTexture;
 
 public:
 	void RenderBackground();
@@ -646,6 +801,7 @@ public:
 	void SetActive(bool Active);
 
 	void OnInterfacesInit(CGameClient *pClient) override;
+	void OnConsoleInit() override;
 	void OnInit() override;
 
 	void OnStateChange(int NewState, int OldState) override;
@@ -675,6 +831,7 @@ public:
 		PAGE_SETTINGS,
 		PAGE_NETWORK,
 		PAGE_GHOST,
+		PAGE_CLIENT_CHAT,
 
 		PAGE_LENGTH,
 	};
@@ -710,6 +867,7 @@ public:
 		BIT_TAB_FAVORITE_COMMUNITY_3,
 		BIT_TAB_FAVORITE_COMMUNITY_4,
 		BIT_TAB_FAVORITE_COMMUNITY_5,
+		BIG_TAB_CHAT,
 		BIG_TAB_DEMOS,
 
 		BIG_TAB_LENGTH,
@@ -846,6 +1004,8 @@ private:
 	void RenderSettingsDDNet(CUIRect MainView);
 	void RenderSettingsAppearance(CUIRect MainView);
 	void RenderSettingsZZetClient(CUIRect MainView);
+	void RenderZzClickGuiOverlay();
+	static void ConToggleZzClickGui(IConsole::IResult *pResult, void *pUserData);
 
 	// found in menus_tclient.cpp
 	void RenderSettingsTClient(CUIRect MainView);

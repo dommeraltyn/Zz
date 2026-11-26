@@ -54,6 +54,11 @@ bool CTuningParams::Get(const char *pName, float *pValue) const
 
 float CTuningParams::GetWeaponFireDelay(int Weapon) const
 {
+	// Some custom servers can temporarily expose "no weapon" / invalid ids.
+	// Keep the client alive and fall back to a harmless default instead of asserting.
+	if(Weapon < WEAPON_HAMMER || Weapon > WEAPON_NINJA)
+		return (float)m_HammerFireDelay / 1000.0f;
+
 	switch(Weapon)
 	{
 	case WEAPON_HAMMER: return (float)m_HammerFireDelay / 1000.0f;
@@ -62,7 +67,7 @@ float CTuningParams::GetWeaponFireDelay(int Weapon) const
 	case WEAPON_GRENADE: return (float)m_GrenadeFireDelay / 1000.0f;
 	case WEAPON_LASER: return (float)m_LaserFireDelay / 1000.0f;
 	case WEAPON_NINJA: return (float)m_NinjaFireDelay / 1000.0f;
-	default: dbg_assert_failed("invalid weapon");
+	default: return (float)m_HammerFireDelay / 1000.0f;
 	}
 }
 

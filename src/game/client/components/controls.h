@@ -42,12 +42,14 @@ public:
 	int m_aInputHookSpam[NUM_DUMMIES];
 	int m_aShowHookColl[NUM_DUMMIES];
 	int m_aSaveInBlock[NUM_DUMMIES];
+	int m_aAutoHookPlayers[NUM_DUMMIES];
 	bool m_ZzAutoUnfreezeOverridesInput = false;
 
 	// TClient
 	CNetObj_PlayerInput m_aFastInput[NUM_DUMMIES];
 	bool m_FastInputHookAction = false;
 	bool m_FastInputFireAction = false;
+	bool m_aAutoTripleflyHookAllowed[NUM_DUMMIES] = {true, true};
 
 	CControls();
 	int Sizeof() const override { return sizeof(*this); }

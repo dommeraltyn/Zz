@@ -195,6 +195,11 @@ class CGameContext : public IGameServer
 	static void ConVipList(IConsole::IResult *pResult, void *pUserData);
 	static void ConSetVip(IConsole::IResult *pResult, void *pUserData);
 	static void ConSetJetpack(IConsole::IResult *pResult, void *pUserData);
+	static void ConKillAll(IConsole::IResult *pResult, void *pUserData);
+	static void ConDuels(IConsole::IResult *pResult, void *pUserData);
+	static void ConBlockMode(IConsole::IResult *pResult, void *pUserData);
+	static void ConTuneHub(IConsole::IResult *pResult, void *pUserData);
+	static void ConTuneHubReset(IConsole::IResult *pResult, void *pUserData);
 
 	void AddVote(const char *pDescription, const char *pCommand);
 	void ClearVotes(int ClientId);
@@ -234,6 +239,7 @@ public:
 	CCollision *Collision() { return &m_Collision; }
 	CTuningParams *GlobalTuning() { return &m_aTuningList[0]; }
 	CTuningParams *TuningList() { return m_aTuningList; }
+	bool RedirectToServerHub(int ClientId, bool VerboseErrors = true);
 	IAntibot *Antibot() { return m_pAntibot; }
 	CTeeHistorian *TeeHistorian() { return &m_TeeHistorian; }
 	bool TeeHistorianActive() const { return m_TeeHistorianActive; }
@@ -690,6 +696,7 @@ private:
 	static void ConSetDuelSpawnRight2(IConsole::IResult *pResult, void *pUserData);
 	static void ConDuel(IConsole::IResult *pResult, void *pUserData);
 	static void ConAcceptDuel(IConsole::IResult *pResult, void *pUserData);
+	static void ConHub(IConsole::IResult *pResult, void *pUserData);
 static void ConMutes(IConsole::IResult *pResult, void *pUserData);
 
 	static void ConVoteMute(IConsole::IResult *pResult, void *pUserData);

@@ -97,6 +97,37 @@ void CNetConnection::SignalResend()
 	m_Construct.m_Flags |= NET_PACKETFLAG_RESEND;
 }
 
+void CNetConnection::KeepAliveForTransportStall()
+{
+	if(State() != EState::ONLINE)
+		return;
+
+	const int64_t Now = time_get();
+	m_LastRecvTime = Now;
+
+	// Prevent local timeout escalation while transport (proxy) is being repaired.
+	for(CNetChunkResend *pResend = m_Buffer.First(); pResend; pResend = m_Buffer.Next(pResend))
+	{
+		pResend->m_FirstSendTime = Now;
+		pResend->m_LastSendTime = Now;
+	}
+}
+
+bool CNetConnection::RecoverFromTimeoutError()
+{
+	if(State() != EState::ERROR || !m_TimeoutSituation || m_RemoteClosed != 0)
+		return false;
+
+	const int64_t Now = time_get();
+	m_State = EState::ONLINE;
+	m_TimeoutSituation = false;
+	m_LastRecvTime = Now;
+	m_LastSendTime = Now;
+	m_LastUpdateTime = Now;
+	m_aErrorString[0] = '\0';
+	return true;
+}
+
 int CNetConnection::Flush()
 {
 	// Only flush the connection if there is at least one chunk to flush,

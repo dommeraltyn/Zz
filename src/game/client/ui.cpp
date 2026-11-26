@@ -1008,6 +1008,135 @@ bool CUi::DoEditBox(CLineInput *pLineInput, const CUIRect *pRect, float FontSize
 	return Changed;
 }
 
+bool CUi::DoEditBoxMultiline(CLineInput *pLineInput, const CUIRect *pRect, float FontSize, int Corners, float LineSpacing, const std::vector<STextColorSplit> &vColorSplits)
+{
+	const bool Inside = MouseHovered(pRect);
+	const bool Active = m_pLastActiveItem == pLineInput;
+	const bool Changed = pLineInput->WasChanged();
+	const bool CursorChanged = pLineInput->WasCursorChanged();
+
+	const float VSpacing = 2.0f;
+	const float ScrollbarWidth = 6.0f;
+	const float ScrollbarGap = 4.0f;
+	const float ScrollStep = maximum(FontSize * 1.5f, FontSize + LineSpacing + 2.0f);
+
+	CUIRect Textbox, Scrollbar;
+	pRect->Margin(VSpacing, &Textbox);
+	Textbox.VSplitRight(ScrollbarWidth + ScrollbarGap, &Textbox, &Scrollbar);
+	Scrollbar.VSplitLeft(ScrollbarGap, nullptr, &Scrollbar);
+
+	bool JustGotActive = false;
+	if(CheckActiveItem(pLineInput))
+	{
+		if(MouseButton(0))
+		{
+			if(pLineInput->IsActive() && (Input()->HasComposition() || Input()->GetCandidateCount()))
+			{
+				Input()->StopTextInput();
+				Input()->StartTextInput();
+			}
+		}
+		else
+		{
+			SetActiveItem(nullptr);
+		}
+	}
+	else if(HotItem() == pLineInput)
+	{
+		if(MouseButton(0))
+		{
+			if(!Active)
+				JustGotActive = true;
+			SetActiveItem(pLineInput);
+		}
+	}
+
+	if(Inside && !MouseButton(0))
+		SetHotItem(pLineInput);
+
+	if(Enabled() && Active && !JustGotActive)
+		pLineInput->Activate(EInputPriority::UI);
+	else
+		pLineInput->Deactivate();
+
+	if(Enabled() && Active && !JustGotActive && ConsumeHotkey(HOTKEY_ENTER))
+		pLineInput->SetRange("\n", pLineInput->GetSelectionStart(), pLineInput->GetSelectionEnd());
+
+	float ScrollOffset = pLineInput->GetScrollOffset();
+	float ScrollOffsetChange = pLineInput->GetScrollOffsetChange();
+
+	CLineInput::SMouseSelection *pMouseSelection = pLineInput->GetMouseSelection();
+	if(Inside)
+	{
+		if(!pMouseSelection->m_Selecting && MouseButtonClicked(0))
+		{
+			pMouseSelection->m_Selecting = true;
+			pMouseSelection->m_PressMouse = MousePos();
+			pMouseSelection->m_Offset.y = ScrollOffset;
+		}
+
+		if(ConsumeHotkey(HOTKEY_SCROLL_UP))
+			ScrollOffsetChange -= ScrollStep;
+		if(ConsumeHotkey(HOTKEY_SCROLL_DOWN))
+			ScrollOffsetChange += ScrollStep;
+	}
+
+	if(pMouseSelection->m_Selecting)
+	{
+		pMouseSelection->m_ReleaseMouse = MousePos();
+		if(!MouseButton(0))
+		{
+			pMouseSelection->m_Selecting = false;
+			if(Active)
+				Input()->EnsureScreenKeyboardShown();
+		}
+	}
+	if(ScrollOffset != pMouseSelection->m_Offset.y)
+	{
+		pMouseSelection->m_PressMouse.y -= ScrollOffset - pMouseSelection->m_Offset.y;
+		pMouseSelection->m_Offset.y = ScrollOffset;
+	}
+
+	pRect->Draw(ms_LightButtonColorFunction.GetColor(Active, HotItem() == pLineInput), Corners, 3.0f);
+
+	ClipEnable(&Textbox);
+	Textbox.y -= ScrollOffset;
+	const STextBoundingBox BoundingBox = pLineInput->Render(&Textbox, FontSize, TEXTALIGN_TL, Changed || CursorChanged, Textbox.w, LineSpacing, vColorSplits);
+	ClipDisable();
+
+	if(Active && !JustGotActive && (Changed || CursorChanged || Input()->HasComposition()))
+	{
+		const float CaretTop = pLineInput->GetCaretPosition().y - Textbox.y - ScrollOffset - ScrollOffsetChange;
+		const float CaretBottom = CaretTop + FontSize * ms_FontmodHeight + maximum(LineSpacing, 0.0f);
+		if(CaretBottom > Textbox.h)
+			ScrollOffsetChange += CaretBottom - Textbox.h;
+		else if(CaretTop < 0.0f)
+			ScrollOffsetChange += CaretTop;
+	}
+
+	DoSmoothScrollLogic(&ScrollOffset, &ScrollOffsetChange, Textbox.h, BoundingBox.m_H, true, 6.0f);
+
+	pLineInput->SetScrollOffset(ScrollOffset);
+	pLineInput->SetScrollOffsetChange(ScrollOffsetChange);
+
+	if(BoundingBox.m_H > Textbox.h + 0.5f)
+	{
+		const float TrackHeight = maximum(Scrollbar.h, 1.0f);
+		const float HandleHeight = maximum(12.0f, TrackHeight * (Textbox.h / BoundingBox.m_H));
+		const float MaxHandleOffset = maximum(TrackHeight - HandleHeight, 0.0f);
+		const float MaxScroll = maximum(BoundingBox.m_H - Textbox.h, 1.0f);
+		const float HandleOffset = MaxHandleOffset * std::clamp(ScrollOffset / MaxScroll, 0.0f, 1.0f);
+
+		Scrollbar.Draw(ColorRGBA(0.0f, 0.0f, 0.0f, 0.18f), IGraphics::CORNER_ALL, 3.0f);
+		CUIRect Handle = Scrollbar;
+		Handle.y += HandleOffset;
+		Handle.h = HandleHeight;
+		Handle.Draw(ms_ScrollBarColorFunction.GetColor(Active, HotItem() == pLineInput), IGraphics::CORNER_ALL, 3.0f);
+	}
+
+	return Changed;
+}
+
 bool CUi::DoClearableEditBox(CLineInput *pLineInput, const CUIRect *pRect, float FontSize, int Corners, const std::vector<STextColorSplit> &vColorSplits)
 {
 	CUIRect EditBox, ClearButton;

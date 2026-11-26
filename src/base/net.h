@@ -288,6 +288,21 @@ int net_udp_send(NETSOCKET sock, const NETADDR *addr, const void *data, int size
 int net_udp_recv(NETSOCKET sock, NETADDR *addr, unsigned char **data);
 
 /**
+ * Enables or disables SOCKS5 UDP proxy for this UDP socket.
+ *
+ * When enabled, the function establishes a SOCKS5 control connection and UDP ASSOCIATE.
+ * All following UDP sends/receives on this socket are routed through the proxy.
+ *
+ * @ingroup Network-UDP
+ *
+ * @param sock Socket to configure.
+ * @param proxy_addr Proxy endpoint (IP:port). If nullptr, proxy is disabled.
+ *
+ * @return `0` on success, `< 0` on failure.
+ */
+int net_udp_set_proxy(NETSOCKET sock, const NETADDR *proxy_addr, const char *proxy_username, const char *proxy_password);
+
+/**
  * Closes an UDP socket.
  *
  * @ingroup Network-UDP

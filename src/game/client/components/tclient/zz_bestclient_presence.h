@@ -28,6 +28,7 @@ public:
 	bool IsBestClientPlayerOnCurrentServer(const char *pPlayerName) const;
 	bool IsBestClientPlayerOnServer(const CServerInfo *pServerInfo, const char *pPlayerName) const;
 	int CountBestClientPlayersOnServer(const CServerInfo *pServerInfo) const;
+	std::vector<std::string> GetServersWithBestClientUsers() const;
 
 private:
 	NETSOCKET m_Socket = nullptr;

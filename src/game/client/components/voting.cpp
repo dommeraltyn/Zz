@@ -144,6 +144,13 @@ void CVoting::Vote(int v)
 {
 	CNetMsg_Cl_Vote Msg = {v};
 	Client()->SendPackMsgActive(&Msg, MSGFLAG_VITAL);
+	int SourceCid = -1;
+	int SourceTee = std::clamp(g_Config.m_ClDummy, 0, NUM_DUMMIES - 1);
+	if(GameClient()->m_aLocalIds[SourceTee] >= 0)
+		SourceCid = GameClient()->m_aLocalIds[SourceTee];
+	else if(GameClient()->m_aLocalIds[0] >= 0)
+		SourceCid = GameClient()->m_aLocalIds[0];
+	GameClient()->AsyncProxyBots().NotifyLocalVoteCommand(SourceCid, v);
 }
 
 int CVoting::SecondsLeft() const

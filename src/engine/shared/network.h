@@ -311,6 +311,8 @@ public:
 
 	const char *ErrorString();
 	void SignalResend();
+	void KeepAliveForTransportStall();
+	bool RecoverFromTimeoutError();
 	EState State() const { return m_State; }
 	const NETADDR *PeerAddress() const { return &m_PeerAddr; }
 	const std::array<char, NETADDR_MAXSTRSIZE> &PeerAddressString(bool IncludePort) const
@@ -580,6 +582,14 @@ class CNetClient
 	CNetTokenCache m_TokenCache;
 
 	CStun *m_pStun = nullptr;
+	bool m_ProxyStallActive = false;
+	int64_t m_LastProxyRepairAttempt = 0;
+	int m_ProxyRepairBackoffSeconds = 3;
+	bool m_ProxyOverrideSet = false;
+	bool m_ProxyOverrideEnabled = false;
+	NETADDR m_ProxyOverrideAddr = {};
+	char m_aProxyOverrideUser[128] = "";
+	char m_aProxyOverridePassword[128] = "";
 
 public:
 	NETSOCKET m_Socket = nullptr;
@@ -591,6 +601,13 @@ public:
 	void Disconnect(const char *pReason);
 	void Connect(const NETADDR *pAddr, int NumAddrs);
 	void Connect7(const NETADDR *pAddr, int NumAddrs);
+	void SetProxyOverride(bool Enabled, const NETADDR *pAddr, const char *pUsername, const char *pPassword);
+	void ClearProxyOverride();
+	bool HasProxyOverride() const { return m_ProxyOverrideSet; }
+	bool ProxyOverrideEnabled() const { return m_ProxyOverrideEnabled; }
+	const NETADDR &ProxyOverrideAddr() const { return m_ProxyOverrideAddr; }
+	const char *ProxyOverrideUser() const { return m_aProxyOverrideUser; }
+	const char *ProxyOverridePassword() const { return m_aProxyOverridePassword; }
 
 	// communication
 	int Recv(CNetChunk *pChunk, SECURITY_TOKEN *pResponseToken, bool Sixup);

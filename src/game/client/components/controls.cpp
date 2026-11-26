@@ -61,28 +61,6 @@ bool ZzIsLaserEnemy(CGameClient *pGameClient, int LocalId, int ClientId, int Dum
 	return true;
 }
 
-bool ZzConsumeRelease(CNetObj_PlayerInput &Input, bool &ReleasePending, int &InjectedFire)
-{
-	if(ReleasePending && (Input.m_Fire & 1) != 0 && Input.m_Fire == InjectedFire)
-	{
-		Input.m_Fire = (Input.m_Fire + 1) & INPUT_STATE_MASK;
-		ReleasePending = false;
-		InjectedFire = -1;
-		return true;
-	}
-	return false;
-}
-
-bool ZzInjectTapFire(CNetObj_PlayerInput &Input, bool &ReleasePending, int &InjectedFire)
-{
-	if(ReleasePending || (Input.m_Fire & 1) != 0)
-		return false;
-	Input.m_Fire = (Input.m_Fire + 1) & INPUT_STATE_MASK;
-	ReleasePending = true;
-	InjectedFire = Input.m_Fire;
-	return true;
-}
-
 bool ZzRayHitsEnemyOnCrosshair(CGameClient *pGameClient, int DummyIndex, const vec2 &AimDir, float Reach)
 {
 	int LocalId = pGameClient->m_aLocalIds[DummyIndex];
@@ -125,74 +103,6 @@ bool ZzRayHitsEnemyOnCrosshair(CGameClient *pGameClient, int DummyIndex, const v
 	return BestT <= Reach;
 }
 
-std::optional<vec2> ZzFindDirectLaserAim(CGameClient *pGameClient, CNetObj_PlayerInput *pInputData, int DummyIndex)
-{
-	int LocalId = pGameClient->m_aLocalIds[DummyIndex];
-	if(LocalId < 0)
-		LocalId = pGameClient->m_Snap.m_LocalClientId;
-	if(LocalId < 0)
-		return std::nullopt;
-
-	const vec2 LocalPos = pGameClient->m_aClients[LocalId].m_RegularPredicted.m_Pos;
-	vec2 Aim((float)pInputData[DummyIndex].m_TargetX, (float)pInputData[DummyIndex].m_TargetY);
-	if(length(Aim) <= 0.001f)
-		Aim = vec2(1.0f, 0.0f);
-	const vec2 CurAim = normalize(Aim);
-	const float Reach = std::max((float)pGameClient->m_aClients[LocalId].m_Predicted.m_Tuning.m_LaserReach, 800.0f);
-	const float TargetRadius = CCharacterCore::PhysicalSize() * 0.68f;
-	static const vec2 s_aAimOffsets[] = {
-		vec2(1.0f, 0.0f),
-		vec2(-1.0f, 0.0f),
-		vec2(0.0f, 1.0f),
-		vec2(0.0f, -1.0f),
-		normalize(vec2(1.0f, 1.0f)),
-		normalize(vec2(-1.0f, 1.0f)),
-		normalize(vec2(1.0f, -1.0f)),
-		normalize(vec2(-1.0f, -1.0f)),
-	};
-
-	float BestScore = 1e18f;
-	vec2 BestDir = CurAim;
-	bool Found = false;
-	auto TryAimPos = [&](const vec2 &AimPos) {
-		vec2 To = AimPos - LocalPos;
-		const float Dist = length(To);
-		if(Dist < 0.001f || Dist > Reach)
-			return;
-		To *= 1.0f / Dist;
-		vec2 HitPos;
-		if(pGameClient->Collision()->IntersectLine(LocalPos, AimPos, &HitPos, nullptr) != 0)
-			return;
-		const float Angle = acosf(std::clamp(dot(CurAim, To), -1.0f, 1.0f));
-		const float Score = Angle * 2000.0f + Dist * 0.25f;
-		if(Score < BestScore)
-		{
-			BestScore = Score;
-			BestDir = To;
-			Found = true;
-		}
-	};
-
-	for(int i = 0; i < MAX_CLIENTS; i++)
-	{
-		if(!ZzIsLaserEnemy(pGameClient, LocalId, i, DummyIndex))
-			continue;
-		const vec2 RenderTargetPos = pGameClient->m_aClients[i].m_RenderPos;
-		const vec2 SnapTargetPos = vec2((float)pGameClient->m_Snap.m_aCharacters[i].m_Cur.m_X, (float)pGameClient->m_Snap.m_aCharacters[i].m_Cur.m_Y);
-		TryAimPos(RenderTargetPos);
-		TryAimPos(SnapTargetPos);
-		for(const vec2 &Off : s_aAimOffsets)
-		{
-			TryAimPos(RenderTargetPos + Off * TargetRadius);
-			TryAimPos(SnapTargetPos + Off * TargetRadius);
-		}
-	}
-
-	if(!Found)
-		return std::nullopt;
-	return BestDir;
-}
-
 bool ZzSegmentHitsEnemy(CGameClient *pGameClient, int DummyIndex, int LocalId, const vec2 &From, const vec2 &To)
 {
 	const vec2 Ray = To - From;
@@ -220,6 +130,78 @@ bool ZzSegmentHitsEnemy(CGameClient *pGameClient, int DummyIndex, int LocalId, c
 	}
 
 	return BestT <= RayLen;
+}
+
+bool FindNearestHookTargetInFov(CGameClient *pGameClient, int SourceClientId, int DummyIndex, const vec2 &SourcePos, const vec2 &AimDir, float MaxFovDeg, bool RequireNotAbove, bool RequireFrozenOnly, bool RequireHookReach, float HookLength, vec2 &OutDelta, int *pOutTargetId = nullptr)
+{
+	if(!pGameClient || SourceClientId < 0 || SourceClientId >= MAX_CLIENTS)
+		return false;
+	CCharacter *pSourcePredChar = pGameClient->m_RegularPredictedWorld.GetCharacterById(SourceClientId);
+
+	const vec2 AimNorm = length(AimDir) > 0.001f ? normalize(AimDir) : vec2(0.0f, 1.0f);
+	const float HalfFovRad = std::clamp(MaxFovDeg, 1.0f, 180.0f) * (pi / 180.0f) * 0.5f;
+	const float MinDot = cosf(HalfFovRad);
+	const float HitRadius = CCharacterCore::PhysicalSize() * 0.68f;
+	static const vec2 s_aOffsets[] = {
+		vec2(0.0f, 0.0f),
+		vec2(1.0f, 0.0f), vec2(-1.0f, 0.0f),
+		vec2(0.0f, 1.0f), vec2(0.0f, -1.0f),
+		normalize(vec2(1.0f, 1.0f)), normalize(vec2(-1.0f, 1.0f)),
+		normalize(vec2(1.0f, -1.0f)), normalize(vec2(-1.0f, -1.0f)),
+	};
+
+	bool Found = false;
+	float BestScore = 1e18f;
+	int BestCid = -1;
+	for(int Cid = 0; Cid < MAX_CLIENTS; ++Cid)
+	{
+		if(Cid == SourceClientId || !pGameClient->m_Snap.m_aCharacters[Cid].m_Active)
+			continue;
+		if(pGameClient->m_aClients[Cid].m_Team == TEAM_SPECTATORS)
+			continue;
+		if(pSourcePredChar && !pGameClient->m_RegularPredictedWorld.m_Teams.CanCollide(SourceClientId, Cid))
+			continue;
+
+		const vec2 TargetPos((float)pGameClient->m_Snap.m_aCharacters[Cid].m_Cur.m_X, (float)pGameClient->m_Snap.m_aCharacters[Cid].m_Cur.m_Y);
+		if(RequireNotAbove && TargetPos.y < SourcePos.y - 1.0f)
+			continue;
+		if(RequireFrozenOnly && !ZzIsFrozenClient(pGameClient, Cid, DummyIndex))
+			continue;
+
+		for(const vec2 &OffsetDir : s_aOffsets)
+		{
+			const vec2 AimPos = TargetPos + OffsetDir * HitRadius;
+			const vec2 Delta = AimPos - SourcePos;
+			const float Dist = length(Delta);
+			if(Dist < 1.0f)
+				continue;
+			if(RequireHookReach)
+			{
+				if(Dist > HookLength + CCharacterCore::PhysicalSize() * 0.8f)
+					continue;
+				vec2 HitPos;
+				if(pGameClient->Collision()->IntersectLine(SourcePos, AimPos, &HitPos, nullptr) != 0)
+					continue;
+			}
+			const vec2 Dir = Delta * (1.0f / Dist);
+			const float Dot = dot(AimNorm, Dir);
+			if(Dot < MinDot)
+				continue;
+			const float Angle = acosf(std::clamp(Dot, -1.0f, 1.0f));
+			const float Score = Angle * 850.0f + Dist; // prefer close hook points, then low-angle correction
+			if(Score < BestScore)
+			{
+				BestScore = Score;
+				BestCid = Cid;
+				OutDelta = Delta;
+				Found = true;
+			}
+		}
+	}
+
+	if(pOutTargetId)
+		*pOutTargetId = Found ? BestCid : -1;
+	return Found;
 }
 
 bool ZzRayHitsEnemyWithBounces(CGameClient *pGameClient, int DummyIndex, int LocalId, vec2 Pos, vec2 Dir, float Reach, float BounceCost, int MaxBounces)
@@ -866,9 +848,13 @@ bool TryApplyZzBlatantAvoid(CGameClient *pGameClient, const CNetObj_PlayerInput 
 
 	std::vector<SZzAvoidInputCandidate> vInputCandidates;
 	vInputCandidates.reserve(6);
+	const bool AllowAutoJump = g_Config.m_ClZzAvoidJump != 0;
 
 	auto AddInputCandidate = [&](int Direction, int Jump)
 	{
+		if(Jump != 0 && !AllowAutoJump)
+			return;
+
 		CNetObj_PlayerInput Candidate = WorkingInput;
 		Candidate.m_Direction = Direction;
 		Candidate.m_Jump = Jump;
@@ -896,13 +882,16 @@ bool TryApplyZzBlatantAvoid(CGameClient *pGameClient, const CNetObj_PlayerInput 
 				return;
 		}
 
-		vInputCandidates.push_back({Candidate, ZzAvoidInputScore(Direction, Jump != 0, DangerDir, CursorDir, 1.0f, BaseInput.m_Direction, BaseInput.m_Jump != 0)});
+		float Score = ZzAvoidInputScore(Direction, Jump != 0, DangerDir, CursorDir, 1.0f, BaseInput.m_Direction, BaseInput.m_Jump != 0);
+		if(Jump != 0 && !AllowAutoJump)
+			Score += 100000.0f;
+		vInputCandidates.push_back({Candidate, Score});
 	};
 
 	AddInputCandidate(0, 0);
 	AddInputCandidate(-1, 0);
 	AddInputCandidate(1, 0);
-	const bool ShouldTryJump = BaseInput.m_Jump != 0 || pCharacter->Core()->m_Vel.y > 4.0f || DangerDir.y > 0.25f;
+	const bool ShouldTryJump = AllowAutoJump && (BaseInput.m_Jump != 0 || ((pCharacter->Core()->m_Vel.y > 4.0f || DangerDir.y > 0.25f) && DangerTick <= ZZ_BLATANT_AVOID_JUMP_CHECK_TICKS));
 	if(ShouldTryJump)
 	{
 		AddInputCandidate(0, 1);
@@ -1036,6 +1025,7 @@ CControls::CControls()
 	std::fill(std::begin(m_aMousePosOnAction), std::end(m_aMousePosOnAction), vec2(0.0f, 0.0f));
 	std::fill(std::begin(m_aTargetPos), std::end(m_aTargetPos), vec2(0.0f, 0.0f));
 	std::fill(std::begin(m_aMouseInputType), std::end(m_aMouseInputType), EMouseInputType::ABSOLUTE);
+	std::fill(std::begin(m_aAutoTripleflyHookAllowed), std::end(m_aAutoTripleflyHookAllowed), true);
 }
 
 void CControls::OnReset()
@@ -1051,6 +1041,7 @@ void CControls::OnReset()
 	m_BotFireReleasePending = false;
 	m_ZzAutoUnfreezeOverridesInput = false;
 	m_UnfreezeFound = false;
+	std::fill(std::begin(m_aAutoTripleflyHookAllowed), std::end(m_aAutoTripleflyHookAllowed), true);
 }
 
 void CControls::ResetInput(int Dummy)
@@ -1067,6 +1058,7 @@ void CControls::ResetInput(int Dummy)
 	m_aInputDirectionRight[Dummy] = 0;
 	m_aInputHookSpam[Dummy] = 0;
 	m_aSaveInBlock[Dummy] = 0;
+	m_aAutoHookPlayers[Dummy] = 0;
 }
 
 void CControls::OnPlayerDeath()
@@ -1253,6 +1245,12 @@ void CControls::OnConsoleInit()
 
 	// ZZetClient
 	{
+		static CInputToggleOnce s_Toggle = {&g_Config.m_ClZzHudEditMode, false};
+		static CInputToggle s_ToggleLegacy = {&g_Config.m_ClZzHudEditMode};
+		Console()->Register("+zz_hud_edit_toggle", "", CFGFLAG_CLIENT, ConKeyToggleOnce, &s_Toggle, "ZZetClient: toggle HUD edit mode");
+		Console()->Register("zz_hud_edit_toggle", "", CFGFLAG_CLIENT, ConKeyToggle, &s_ToggleLegacy, "ZZetClient: toggle HUD edit mode (legacy)");
+	}
+	{
 		static CInputToggleOnce s_Toggle = {&g_Config.m_ClZzAimbotEnabled, false};
 		static CInputToggle s_ToggleLegacy = {&g_Config.m_ClZzAimbotEnabled};
 		// Note: for +commands, the console injects the stroke argument before parsing,
@@ -1285,6 +1283,27 @@ void CControls::OnConsoleInit()
 		Console()->Register("zz_fake_lag_toggle", "", CFGFLAG_CLIENT, ConKeyToggle, &s_ToggleLegacy, "ZZetClient: toggle fake lag (legacy)");
 	}
 	{
+		static CInputToggleOnce s_Toggle = {&g_Config.m_ClZzFlyAutoTriplefly, false};
+		static CInputToggle s_ToggleLegacy = {&g_Config.m_ClZzFlyAutoTriplefly};
+		Console()->Register("+zz_fly_auto_triplefly_toggle", "", CFGFLAG_CLIENT, ConKeyToggleOnce, &s_Toggle, "ZZetClient: toggle auto triplefly");
+		Console()->Register("zz_fly_auto_triplefly_toggle", "", CFGFLAG_CLIENT, ConKeyToggle, &s_ToggleLegacy, "ZZetClient: toggle auto triplefly (legacy)");
+	}
+	{
+		// Shalawa TAS bind compatibility layer mapped to ZZ TAS config flags.
+		static CInputToggleOnce s_RecordToggle = {&g_Config.m_ClZzTasRecordReplay, false};
+		static CInputToggleOnce s_PauseToggle = {&g_Config.m_ClZzTasPause, false};
+		static CInputToggleOnce s_LoadToggle = {&g_Config.m_ClZzTasLoadReplay, false};
+		static CInputToggleOnce s_InitToggle = {&g_Config.m_ClZzTasInit, false};
+		static CInputState s_RewindState = {this, {&g_Config.m_ClZzTasRewind, &g_Config.m_ClZzTasRewind}};
+		static CInputState s_ForwardState = {this, {&g_Config.m_ClZzTasForward, &g_Config.m_ClZzTasForward}};
+		Console()->Register("+shalawa_tas_record", "", CFGFLAG_CLIENT, ConKeyToggleOnce, &s_RecordToggle, "Shalawa alias: toggle TAS record");
+		Console()->Register("+shalawa_tas_pause", "", CFGFLAG_CLIENT, ConKeyToggleOnce, &s_PauseToggle, "Shalawa alias: toggle TAS pause");
+		Console()->Register("+shalawa_tas_load", "", CFGFLAG_CLIENT, ConKeyToggleOnce, &s_LoadToggle, "Shalawa alias: toggle TAS playback");
+		Console()->Register("+shalawa_tas_init", "", CFGFLAG_CLIENT, ConKeyToggleOnce, &s_InitToggle, "Shalawa alias: toggle TAS world init");
+		Console()->Register("+shalawa_tas_rewind", "", CFGFLAG_CLIENT, ConKeyInputState, &s_RewindState, "Shalawa alias: hold rewind");
+		Console()->Register("+shalawa_tas_forward", "", CFGFLAG_CLIENT, ConKeyInputState, &s_ForwardState, "Shalawa alias: hold forward");
+	}
+	{
 		static CFentBotWaypointKey s_Key = {this, GameClient(), false};
 		Console()->Register("+zz_fentbot_waypoint", "", CFGFLAG_CLIENT, ConKeyFentBotWaypoint, &s_Key, "ZZetClient: set/clear FentBot waypoint");
 	}
@@ -1292,6 +1311,10 @@ void CControls::OnConsoleInit()
 		static CInputState s_State = {this, {&m_aSaveInBlock[0], &m_aSaveInBlock[1]}};
 		Console()->Register("+zz_tile_aimbot", "", CFGFLAG_CLIENT, ConKeyInputState, &s_State, "ZZetClient: hook a hookable tile in your FOV (hold)");
 		Console()->Register("+zz_save_in_block", "", CFGFLAG_CLIENT, ConKeyInputState, &s_State, "ZZetClient: hook a hookable tile in your FOV (hold) (legacy alias)");
+	}
+	{
+		static CInputState s_State = {this, {&m_aAutoHookPlayers[0], &m_aAutoHookPlayers[1]}};
+		Console()->Register("+zz_auto_hook_players", "", CFGFLAG_CLIENT, ConKeyInputState, &s_State, "ZZetClient: auto-hook players in FOV while key is held");
 	}
 
 	// Re-apply saved keybind (if any).
@@ -1305,8 +1328,12 @@ void CControls::OnConsoleInit()
 		GameClient()->m_Binds.Bind(g_Config.m_ClZzBalanceBotKey, "+zz_balance_bot_toggle", false, g_Config.m_ClZzBalanceBotMod);
 	if(g_Config.m_ClZzFakeLagKey >= KEY_FIRST && g_Config.m_ClZzFakeLagKey < KEY_LAST)
 		GameClient()->m_Binds.Bind(g_Config.m_ClZzFakeLagKey, "+zz_fake_lag_toggle", false, g_Config.m_ClZzFakeLagMod);
+	if(g_Config.m_ClZzFlyAutoTripleflyToggleKey >= KEY_FIRST && g_Config.m_ClZzFlyAutoTripleflyToggleKey < KEY_LAST)
+		GameClient()->m_Binds.Bind(g_Config.m_ClZzFlyAutoTripleflyToggleKey, "+zz_fly_auto_triplefly_toggle", false, g_Config.m_ClZzFlyAutoTripleflyToggleMod);
 	if(g_Config.m_ClZzFentBotWaypointKey >= KEY_FIRST && g_Config.m_ClZzFentBotWaypointKey < KEY_LAST)
 		GameClient()->m_Binds.Bind(g_Config.m_ClZzFentBotWaypointKey, "+zz_fentbot_waypoint", false, g_Config.m_ClZzFentBotWaypointMod);
+	if(g_Config.m_ClZzAimbotAutoHookPlayersKey >= KEY_FIRST && g_Config.m_ClZzAimbotAutoHookPlayersKey < KEY_LAST)
+		GameClient()->m_Binds.Bind(g_Config.m_ClZzAimbotAutoHookPlayersKey, "+zz_auto_hook_players", false, g_Config.m_ClZzAimbotAutoHookPlayersMod);
 }
 
 void CControls::OnMessage(int Msg, void *pRawMsg)
@@ -1369,6 +1396,7 @@ void CControls::Balance()
 int CControls::SnapInput(int *pData)
 {
 	m_ZzAutoUnfreezeOverridesInput = false;
+	std::fill(std::begin(m_aAutoTripleflyHookAllowed), std::end(m_aAutoTripleflyHookAllowed), true);
 
 	// update player state
 	if(GameClient()->m_Chat.IsActive())
@@ -1456,6 +1484,20 @@ int CControls::SnapInput(int *pData)
 		if(!m_aInputData[g_Config.m_ClDummy].m_TargetX && !m_aInputData[g_Config.m_ClDummy].m_TargetY)
 			m_aInputData[g_Config.m_ClDummy].m_TargetX = 1;
 
+		if(g_Config.m_ClZzHudEditMode)
+		{
+			const int Dummy = g_Config.m_ClDummy;
+			m_aInputData[Dummy].m_Direction = 0;
+			m_aInputData[Dummy].m_Jump = 0;
+			m_aInputData[Dummy].m_Hook = 0;
+			m_aInputData[Dummy].m_Fire &= ~1;
+			m_aInputData[Dummy].m_NextWeapon = 0;
+			m_aInputData[Dummy].m_PrevWeapon = 0;
+			m_aInputData[Dummy].m_WantedWeapon = 0;
+			mem_copy(pData, &m_aInputData[Dummy], sizeof(m_aInputData[0]));
+			return true;
+		}
+
 		// set direction
 		m_aInputData[g_Config.m_ClDummy].m_Direction = 0;
 		if(m_aInputDirectionLeft[g_Config.m_ClDummy] && !m_aInputDirectionRight[g_Config.m_ClDummy])
@@ -1510,126 +1552,292 @@ int CControls::SnapInput(int *pData)
 			}
 		}
 
-		static bool s_aTriggerLaserReleasePending[NUM_DUMMIES] = {false, false};
-		static int s_aTriggerLaserInjectedFire[NUM_DUMMIES] = {-1, -1};
-		static bool s_aAutoLaserReleasePending[NUM_DUMMIES] = {false, false};
-		static int s_aAutoLaserInjectedFire[NUM_DUMMIES] = {-1, -1};
-		static int s_aAutoLaserAimTicks[NUM_DUMMIES] = {0, 0};
-		static vec2 s_aAutoLaserPlannedAim[NUM_DUMMIES] = {vec2(1.0f, 0.0f), vec2(1.0f, 0.0f)};
+		struct SLaserFireState
+		{
+			bool m_Active = false;
+			int m_InjectedFire = -1;
+			int m_HoldTicks = 0;
+		};
+		struct SLaserAimScriptState
+		{
+			bool m_Active = false;
+			int m_Mode = 0; // 1 = trigger, 2 = auto-laser
+			vec2 m_SavedAim = vec2(1.0f, 0.0f);
+			vec2 m_ShotAim = vec2(1.0f, 0.0f);
+			vec2 m_MidAim = vec2(1.0f, 0.0f);
+			int m_ShotTicks = 0;
+			int m_MidTicks = 0;
+			int m_ReturnTicks = 0;
+			int m_CooldownTicks = 0;
+		};
+		static SLaserFireState s_aLaserFireState[NUM_DUMMIES];
+		static SLaserAimScriptState s_aLaserAimState[NUM_DUMMIES];
 
 		const bool CanUseLaserLogic = DummyIndex == 0 && GameClient()->m_Snap.m_pLocalCharacter && !GameClient()->m_Snap.m_SpecInfo.m_Active;
 		const bool LaserSelected = CanUseLaserLogic && GameClient()->m_Snap.m_pLocalCharacter->m_Weapon == WEAPON_LASER;
 
-		ZzConsumeRelease(m_aInputData[DummyIndex], s_aTriggerLaserReleasePending[DummyIndex], s_aTriggerLaserInjectedFire[DummyIndex]);
-		ZzConsumeRelease(m_aInputData[DummyIndex], s_aAutoLaserReleasePending[DummyIndex], s_aAutoLaserInjectedFire[DummyIndex]);
-
-		if(g_Config.m_ClZzFngTriggerLaser && LaserSelected)
-		{
-			int LocalId = GameClient()->m_aLocalIds[DummyIndex];
-			if(LocalId < 0)
-				LocalId = GameClient()->m_Snap.m_LocalClientId;
-			if(LocalId >= 0)
+		auto NormalizeOrDefault = [](const vec2 &V) {
+			if(length(V) > 0.001f)
+				return normalize(V);
+			return vec2(1.0f, 0.0f);
+		};
+		auto SetAimInput = [&](const vec2 &Dir) {
+			const vec2 N = NormalizeOrDefault(Dir);
+			m_aInputData[DummyIndex].m_TargetX = (int)round_to_int(N.x * 1000.0f);
+			m_aInputData[DummyIndex].m_TargetY = (int)round_to_int(N.y * 1000.0f);
+			if(!m_aInputData[DummyIndex].m_TargetX && !m_aInputData[DummyIndex].m_TargetY)
+				m_aInputData[DummyIndex].m_TargetX = 1;
+		};
+		auto RandomRange = [&](int MinV, int MaxV, int Salt) {
+			const int Tick = Client()->GameTick(DummyIndex);
+			const int64_t TimeMix = time_get() & 0x7ffff;
+			unsigned X = (unsigned)(Tick * 1103515245u + (Salt + 1) * 12345u + (unsigned)DummyIndex * 97531u + (unsigned)TimeMix);
+			X ^= X << 13;
+			X ^= X >> 17;
+			X ^= X << 5;
+			const int Span = maximum(1, MaxV - MinV + 1);
+			return MinV + (int)(X % (unsigned)Span);
+		};
+		auto StartHoldFire = [&](int HoldTicks) {
+			SLaserFireState &Fire = s_aLaserFireState[DummyIndex];
+			if(HoldTicks <= 0)
+				return false;
+			if((m_aInputData[DummyIndex].m_Fire & 1) != 0)
+				return false;
+			m_aInputData[DummyIndex].m_Fire = (m_aInputData[DummyIndex].m_Fire + 1) & INPUT_STATE_MASK;
+			Fire.m_Active = true;
+			Fire.m_InjectedFire = m_aInputData[DummyIndex].m_Fire;
+			Fire.m_HoldTicks = HoldTicks;
+			return true;
+		};
+		auto StopHoldFire = [&]() {
+			SLaserFireState &Fire = s_aLaserFireState[DummyIndex];
+			if(!Fire.m_Active)
+				return;
+			if((m_aInputData[DummyIndex].m_Fire & 1) != 0 && m_aInputData[DummyIndex].m_Fire == Fire.m_InjectedFire)
+				m_aInputData[DummyIndex].m_Fire = (m_aInputData[DummyIndex].m_Fire + 1) & INPUT_STATE_MASK;
+			Fire.m_Active = false;
+			Fire.m_InjectedFire = -1;
+			Fire.m_HoldTicks = 0;
+		};
+		auto TickHoldFire = [&]() {
+			SLaserFireState &Fire = s_aLaserFireState[DummyIndex];
+			if(!Fire.m_Active)
+				return;
+			if(Fire.m_HoldTicks > 0)
 			{
-				vec2 Aim((float)m_aInputData[DummyIndex].m_TargetX, (float)m_aInputData[DummyIndex].m_TargetY);
-				if(length(Aim) > 0.001f)
-				{
-					const float Reach = std::max((float)GameClient()->m_aClients[LocalId].m_Predicted.m_Tuning.m_LaserReach, 800.0f);
-					if(ZzRayHitsEnemyOnCrosshair(GameClient(), DummyIndex, normalize(Aim), Reach))
-						ZzInjectTapFire(m_aInputData[DummyIndex], s_aTriggerLaserReleasePending[DummyIndex], s_aTriggerLaserInjectedFire[DummyIndex]);
-				}
+				Fire.m_HoldTicks--;
 			}
+			if(Fire.m_HoldTicks <= 0)
+				StopHoldFire();
+		};
+
+		if(!LaserSelected)
+		{
+			StopHoldFire();
+			s_aLaserAimState[DummyIndex] = SLaserAimScriptState{};
 		}
 		else
 		{
-			s_aTriggerLaserReleasePending[DummyIndex] = false;
-			s_aTriggerLaserInjectedFire[DummyIndex] = -1;
-		}
+			const bool TriggerEnabled = g_Config.m_ClZzFngTriggerLaser != 0;
+			const bool AutoEnabled = g_Config.m_ClZzFngAutoLaser != 0;
+			if(!TriggerEnabled && !AutoEnabled)
+			{
+				StopHoldFire();
+				s_aLaserAimState[DummyIndex] = SLaserAimScriptState{};
+			}
 
-		if(g_Config.m_ClZzFngAutoLaser && LaserSelected)
-		{
 			int LocalId = GameClient()->m_aLocalIds[DummyIndex];
 			if(LocalId < 0)
 				LocalId = GameClient()->m_Snap.m_LocalClientId;
+
 			if(LocalId >= 0)
 			{
-				vec2 Aim((float)m_aInputData[DummyIndex].m_TargetX, (float)m_aInputData[DummyIndex].m_TargetY);
-				if(length(Aim) <= 0.001f)
-					Aim = vec2(1.0f, 0.0f);
-				const vec2 CurAim = normalize(Aim);
+				SLaserAimScriptState &AimState = s_aLaserAimState[DummyIndex];
+				vec2 CurAim((float)m_aInputData[DummyIndex].m_TargetX, (float)m_aInputData[DummyIndex].m_TargetY);
+				CurAim = NormalizeOrDefault(CurAim);
 				const vec2 LocalPos = GameClient()->m_aClients[LocalId].m_RegularPredicted.m_Pos;
 				const float Reach = std::max((float)GameClient()->m_aClients[LocalId].m_Predicted.m_Tuning.m_LaserReach, 800.0f);
 				const float BounceCost = (float)GameClient()->m_aClients[LocalId].m_Predicted.m_Tuning.m_LaserBounceCost;
 
-				bool Found = false;
-				vec2 BestDir = CurAim;
-				if(const auto DirectAim = ZzFindDirectLaserAim(GameClient(), m_aInputData, DummyIndex))
-				{
-					BestDir = *DirectAim;
-					Found = true;
-				}
-				else if(g_Config.m_ClZzFngAutoLaserBounce)
-				{
-					const int RaysPerTick = std::clamp(g_Config.m_ClZzFngAutoLaserRaysPerTick, 1, 64);
-					const int MaxBounces = std::clamp(g_Config.m_ClZzFngAutoLaserMaxBounces, 0, 8);
-					static int s_ScanStep = 0;
-					const float Step = 2.0f * pi / 128.0f;
+				auto FindDirectAimInCone = [&](const vec2 &RefDir, float MaxAngleDeg) -> std::optional<vec2> {
+					const float MaxAngle = MaxAngleDeg <= 0.0f ? pi : MaxAngleDeg * pi / 180.0f;
+					const float TargetRadius = CCharacterCore::PhysicalSize() * 0.70f;
+					static const vec2 s_aAimOffsets[] = {
+						vec2(0.0f, 0.0f),
+						vec2(1.0f, 0.0f),
+						vec2(-1.0f, 0.0f),
+						vec2(0.0f, 1.0f),
+						vec2(0.0f, -1.0f),
+						normalize(vec2(1.0f, 1.0f)),
+						normalize(vec2(-1.0f, 1.0f)),
+						normalize(vec2(1.0f, -1.0f)),
+						normalize(vec2(-1.0f, -1.0f)),
+					};
+
 					float BestScore = 1e18f;
-					for(int r = 0; r < RaysPerTick; r++)
+					vec2 BestDir = RefDir;
+					bool Found = false;
+					for(int i = 0; i < MAX_CLIENTS; i++)
 					{
-						const int Idx = (s_ScanStep + r) % 128;
-						const float A = (float)Idx * Step;
-						const vec2 Dir = vec2(cosf(A), sinf(A));
-						if(!ZzRayHitsEnemyWithBounces(GameClient(), DummyIndex, LocalId, LocalPos, Dir, Reach, BounceCost, MaxBounces))
+						if(!ZzIsLaserEnemy(GameClient(), LocalId, i, DummyIndex))
 							continue;
-						const float Angle = acosf(std::clamp(dot(CurAim, Dir), -1.0f, 1.0f));
-						if(Angle < BestScore)
+
+						const vec2 BaseTargets[] = {
+							GameClient()->m_aClients[i].m_RenderPos,
+							vec2((float)GameClient()->m_Snap.m_aCharacters[i].m_Cur.m_X, (float)GameClient()->m_Snap.m_aCharacters[i].m_Cur.m_Y),
+						};
+
+						for(const vec2 &BasePos : BaseTargets)
 						{
-							BestScore = Angle;
-							BestDir = Dir;
-							Found = true;
+							for(const vec2 &Off : s_aAimOffsets)
+							{
+								const vec2 AimPos = BasePos + Off * TargetRadius;
+								vec2 To = AimPos - LocalPos;
+								const float Dist = length(To);
+								if(Dist < 0.001f || Dist > Reach)
+									continue;
+								To *= 1.0f / Dist;
+								const float Angle = acosf(std::clamp(dot(RefDir, To), -1.0f, 1.0f));
+								if(Angle > MaxAngle)
+									continue;
+								vec2 HitPos;
+								if(GameClient()->Collision()->IntersectLine(LocalPos, AimPos, &HitPos, nullptr) != 0)
+									continue;
+								const float Score = Angle * 2600.0f + Dist * 0.15f;
+								if(Score < BestScore)
+								{
+									BestScore = Score;
+									BestDir = To;
+									Found = true;
+								}
+							}
 						}
 					}
-					s_ScanStep = (s_ScanStep + RaysPerTick) % 128;
+
+					if(!Found)
+						return std::nullopt;
+					return BestDir;
+				};
+
+				auto StartAimScript = [&](int Mode, const vec2 &ShotDir, int ShotTicks, int MidTicks, int ReturnTicks, int FireHoldTicks) {
+					AimState = SLaserAimScriptState{};
+					AimState.m_Active = true;
+					AimState.m_Mode = Mode;
+					AimState.m_SavedAim = CurAim;
+					AimState.m_ShotAim = NormalizeOrDefault(ShotDir);
+					const vec2 MidRaw = AimState.m_SavedAim + AimState.m_ShotAim;
+					AimState.m_MidAim = length(MidRaw) > 0.001f ? normalize(MidRaw) : AimState.m_ShotAim;
+					AimState.m_ShotTicks = maximum(1, ShotTicks);
+					AimState.m_MidTicks = maximum(0, MidTicks);
+					AimState.m_ReturnTicks = maximum(1, ReturnTicks);
+					(void)StartHoldFire(FireHoldTicks);
+				};
+
+				if(AimState.m_CooldownTicks > 0)
+					AimState.m_CooldownTicks--;
+
+				if(!AimState.m_Active && AimState.m_CooldownTicks <= 0)
+				{
+					bool Started = false;
+
+					if(g_Config.m_ClZzFngTriggerLaser)
+					{
+						std::optional<vec2> TriggerAim = FindDirectAimInCone(CurAim, 10.0f);
+						if(!TriggerAim && ZzRayHitsEnemyOnCrosshair(GameClient(), DummyIndex, CurAim, Reach))
+							TriggerAim = CurAim;
+						if(TriggerAim)
+						{
+							StartAimScript(
+								1,
+								*TriggerAim,
+								RandomRange(2, 4, 11),
+								1,
+								RandomRange(2, 3, 12),
+								RandomRange(5, 8, 13));
+							Started = true;
+						}
+					}
+
+					if(!Started && g_Config.m_ClZzFngAutoLaser)
+					{
+						std::optional<vec2> AutoAim = FindDirectAimInCone(CurAim, 180.0f);
+						if(!AutoAim && g_Config.m_ClZzFngAutoLaserBounce)
+						{
+							const int BaseRays = std::clamp(g_Config.m_ClZzFngAutoLaserRaysPerTick, 1, 64);
+							const int NumRays = std::max(128, BaseRays * 4); // always full 360 sweep every tick
+							const int MaxBounces = std::clamp(g_Config.m_ClZzFngAutoLaserMaxBounces, 0, 8);
+							float BestScore = 1e18f;
+							for(int r = 0; r < NumRays; r++)
+							{
+								const float A = (2.0f * pi * (float)r) / (float)NumRays;
+								const vec2 Dir = vec2(cosf(A), sinf(A));
+								if(!ZzRayHitsEnemyWithBounces(GameClient(), DummyIndex, LocalId, LocalPos, Dir, Reach, BounceCost, MaxBounces))
+									continue;
+								const float Angle = acosf(std::clamp(dot(CurAim, Dir), -1.0f, 1.0f));
+								if(Angle < BestScore)
+								{
+									BestScore = Angle;
+									AutoAim = Dir;
+								}
+							}
+						}
+
+						if(AutoAim)
+						{
+							StartAimScript(
+								2,
+								*AutoAim,
+								5,
+								2,
+								2,
+								RandomRange(5, 8, 23));
+						}
+					}
 				}
 
-				if(Found)
+				if(AimState.m_Active)
 				{
-					s_aAutoLaserPlannedAim[DummyIndex] = BestDir;
-					s_aAutoLaserAimTicks[DummyIndex] = 1;
-				}
-				else
-				{
-					s_aAutoLaserAimTicks[DummyIndex] = 0;
+					if(AimState.m_ShotTicks > 0)
+					{
+						SetAimInput(AimState.m_ShotAim);
+						AimState.m_ShotTicks--;
+					}
+					else if(AimState.m_MidTicks > 0)
+					{
+						SetAimInput(AimState.m_MidAim);
+						AimState.m_MidTicks--;
+					}
+					else if(AimState.m_ReturnTicks > 0)
+					{
+						SetAimInput(AimState.m_SavedAim);
+						AimState.m_ReturnTicks--;
+					}
+
+					if(AimState.m_ShotTicks <= 0 && AimState.m_MidTicks <= 0 && AimState.m_ReturnTicks <= 0)
+					{
+						AimState.m_Active = false;
+						AimState.m_CooldownTicks = (AimState.m_Mode == 1) ? RandomRange(3, 7, 31) : RandomRange(2, 4, 32);
+					}
 				}
 
-				if(s_aAutoLaserAimTicks[DummyIndex] > 0)
-				{
-					vec2 SmoothAim = CurAim + (normalize(s_aAutoLaserPlannedAim[DummyIndex]) - CurAim) * 0.82f;
-					if(length(SmoothAim) > 0.001f)
-						SmoothAim = normalize(SmoothAim);
-					else
-						SmoothAim = CurAim;
-					m_aInputData[DummyIndex].m_TargetX = (int)round_to_int(SmoothAim.x * 1000.0f);
-					m_aInputData[DummyIndex].m_TargetY = (int)round_to_int(SmoothAim.y * 1000.0f);
-					if(!m_aInputData[DummyIndex].m_TargetX && !m_aInputData[DummyIndex].m_TargetY)
-						m_aInputData[DummyIndex].m_TargetX = 1;
-					s_aAutoLaserAimTicks[DummyIndex]--;
-					if(s_aAutoLaserAimTicks[DummyIndex] <= 0)
-						ZzInjectTapFire(m_aInputData[DummyIndex], s_aAutoLaserReleasePending[DummyIndex], s_aAutoLaserInjectedFire[DummyIndex]);
-				}
+				TickHoldFire();
 			}
-		}
-		else
-		{
-			s_aAutoLaserReleasePending[DummyIndex] = false;
-			s_aAutoLaserInjectedFire[DummyIndex] = -1;
-			s_aAutoLaserAimTicks[DummyIndex] = 0;
+			else
+			{
+				StopHoldFire();
+				s_aLaserAimState[DummyIndex] = SLaserAimScriptState{};
+			}
 		}
 
 		// dummy copy moves
 		if(g_Config.m_ClDummyCopyMoves)
 		{
 			CNetObj_PlayerInput *pDummyInput = &GameClient()->m_DummyInput;
+			const int CopiedDummy = !g_Config.m_ClDummy;
+			static vec2 s_aAutoTripleflyLockedAim[NUM_DUMMIES] = {vec2(0.0f, 0.0f), vec2(0.0f, 0.0f)};
+			static int s_aAutoTripleflyLockedTarget[NUM_DUMMIES] = {-1, -1};
+			static int s_aAutoTripleflyAimTicks[NUM_DUMMIES] = {0, 0};
 
 			// Don't copy any input to dummy when spectating others
 			if(!GameClient()->m_Snap.m_SpecInfo.m_Active || GameClient()->m_Snap.m_SpecInfo.m_SpectatorId < 0)
@@ -1647,9 +1855,103 @@ int CControls::SnapInput(int *pData)
 
 				pDummyInput->m_NextWeapon += m_aInputData[g_Config.m_ClDummy].m_NextWeapon - m_aLastData[g_Config.m_ClDummy].m_NextWeapon;
 				pDummyInput->m_PrevWeapon += m_aInputData[g_Config.m_ClDummy].m_PrevWeapon - m_aLastData[g_Config.m_ClDummy].m_PrevWeapon;
+
+				if(g_Config.m_ClZzFlyAutoTriplefly)
+				{
+					const int DummyConn = CopiedDummy;
+					const int DummyCid = GameClient()->m_aLocalIds[DummyConn];
+					const bool UserHoldingHook = m_aInputData[g_Config.m_ClDummy].m_Hook != 0;
+					const bool UserPressedHook = UserHoldingHook && m_aLastData[g_Config.m_ClDummy].m_Hook == 0;
+					bool HookAllowed = true;
+					if(UserHoldingHook && DummyCid >= 0 && DummyCid < MAX_CLIENTS && GameClient()->m_Snap.m_aCharacters[DummyCid].m_Active)
+					{
+						if(GameClient()->m_aClients[DummyCid].m_Solo)
+						{
+							pDummyInput->m_Hook = 0;
+							HookAllowed = false;
+							s_aAutoTripleflyAimTicks[CopiedDummy] = 0;
+							s_aAutoTripleflyLockedTarget[CopiedDummy] = -1;
+						}
+						else
+						{
+						const vec2 DummyPos((float)GameClient()->m_Snap.m_aCharacters[DummyCid].m_Cur.m_X, (float)GameClient()->m_Snap.m_aCharacters[DummyCid].m_Cur.m_Y);
+						vec2 Aim((float)pDummyInput->m_TargetX, (float)pDummyInput->m_TargetY);
+						if(length(Aim) < 0.001f)
+							Aim = vec2(0.0f, 1.0f);
+						float HookLength = 380.0f;
+						if(CCharacter *pDummyPredChar = GameClient()->m_RegularPredictedWorld.GetCharacterById(DummyCid))
+							HookLength = pDummyPredChar->GetTuning(pDummyPredChar->GetOverriddenTuneZone())->m_HookLength;
+						const bool SmartHook = g_Config.m_ClZzFlyAutoTripleflySmartHook != 0;
+						const int AimLockTicks = 2; // keep same short camera lock feel as aimbot
+
+						vec2 TargetDelta(0.0f, 0.0f);
+						int TargetCid = -1;
+						bool CanCollideAnyone = false;
+						if(CCharacter *pDummyPredChar = GameClient()->m_RegularPredictedWorld.GetCharacterById(DummyCid))
+						{
+							for(int Cid = 0; Cid < MAX_CLIENTS; ++Cid)
+							{
+								if(Cid == DummyCid || !GameClient()->m_Snap.m_aCharacters[Cid].m_Active)
+									continue;
+								if(GameClient()->m_aClients[Cid].m_Team == TEAM_SPECTATORS)
+									continue;
+								if(GameClient()->m_RegularPredictedWorld.m_Teams.CanCollide(DummyCid, Cid))
+								{
+									CanCollideAnyone = true;
+									break;
+								}
+							}
+						}
+						if(!CanCollideAnyone)
+						{
+							pDummyInput->m_Hook = 0;
+							HookAllowed = false;
+							s_aAutoTripleflyAimTicks[CopiedDummy] = 0;
+							s_aAutoTripleflyLockedTarget[CopiedDummy] = -1;
+						}
+						else if(FindNearestHookTargetInFov(GameClient(), DummyCid, g_Config.m_ClDummy, DummyPos, Aim, (float)g_Config.m_ClZzFlyAutoTripleflyFov, false, SmartHook, SmartHook, HookLength, TargetDelta, &TargetCid))
+						{
+							if(UserPressedHook || s_aAutoTripleflyLockedTarget[CopiedDummy] != TargetCid || s_aAutoTripleflyAimTicks[CopiedDummy] <= 0)
+							{
+								s_aAutoTripleflyLockedTarget[CopiedDummy] = TargetCid;
+								s_aAutoTripleflyLockedAim[CopiedDummy] = TargetDelta;
+								s_aAutoTripleflyAimTicks[CopiedDummy] = AimLockTicks;
+							}
+							if(s_aAutoTripleflyAimTicks[CopiedDummy] > 0)
+							{
+								pDummyInput->m_TargetX = (int)round_to_int(s_aAutoTripleflyLockedAim[CopiedDummy].x);
+								pDummyInput->m_TargetY = (int)round_to_int(s_aAutoTripleflyLockedAim[CopiedDummy].y);
+								s_aAutoTripleflyAimTicks[CopiedDummy]--;
+							}
+							if(!pDummyInput->m_TargetX && !pDummyInput->m_TargetY)
+								pDummyInput->m_TargetY = 1;
+						}
+						else if(SmartHook || g_Config.m_ClZzFlyAutoTripleflyNoTargetNoHook)
+						{
+							pDummyInput->m_Hook = 0;
+							HookAllowed = false;
+							s_aAutoTripleflyAimTicks[CopiedDummy] = 0;
+							s_aAutoTripleflyLockedTarget[CopiedDummy] = -1;
+						}
+						}
+					}
+					else if(UserHoldingHook && (g_Config.m_ClZzFlyAutoTripleflySmartHook || g_Config.m_ClZzFlyAutoTripleflyNoTargetNoHook))
+					{
+						pDummyInput->m_Hook = 0;
+						HookAllowed = false;
+						s_aAutoTripleflyAimTicks[CopiedDummy] = 0;
+						s_aAutoTripleflyLockedTarget[CopiedDummy] = -1;
+					}
+					else if(!UserHoldingHook)
+					{
+						s_aAutoTripleflyAimTicks[CopiedDummy] = 0;
+						s_aAutoTripleflyLockedTarget[CopiedDummy] = -1;
+					}
+					m_aAutoTripleflyHookAllowed[CopiedDummy] = HookAllowed;
+				}
 			}
 
-			m_aInputData[!g_Config.m_ClDummy] = *pDummyInput;
+			m_aInputData[CopiedDummy] = *pDummyInput;
 		}
 
 		if(g_Config.m_ClDummyControl)
@@ -1682,6 +1984,20 @@ int CControls::SnapInput(int *pData)
 			m_aInputData[g_Config.m_ClDummy].m_TargetY = (int)(std::cos(t * 3) * 100.0f);
 		}
 
+		for(int Dummy = 0; Dummy < NUM_DUMMIES; ++Dummy)
+		{
+			const int LocalId = GameClient()->m_aLocalIds[Dummy];
+			if(LocalId < 0)
+				continue;
+
+			const CCharacter *pLocalCharacter = GameClient()->m_RegularPredictedWorld.GetCharacterById(LocalId);
+			vec2 Pos = pLocalCharacter != nullptr ? pLocalCharacter->GetPos() : GameClient()->m_aClients[LocalId].m_RegularPredicted.m_Pos;
+			if(pLocalCharacter == nullptr && Dummy == g_Config.m_ClDummy)
+				Pos = GameClient()->m_LocalCharacterPos;
+
+			GameClient()->m_ZzTas.ObserveInput(m_aInputData[Dummy], Pos, Dummy != 0);
+		}
+
 		InputToSend = m_aInputData[g_Config.m_ClDummy];
 		if(g_Config.m_ClZzAvoidEnabled && g_Config.m_ClZzAvoidMode == 1)
 		{
@@ -1698,6 +2014,8 @@ int CControls::SnapInput(int *pData)
 		Send = Send || InputToSend.m_WantedWeapon != m_aLastData[g_Config.m_ClDummy].m_WantedWeapon;
 		Send = Send || InputToSend.m_NextWeapon != m_aLastData[g_Config.m_ClDummy].m_NextWeapon;
 		Send = Send || InputToSend.m_PrevWeapon != m_aLastData[g_Config.m_ClDummy].m_PrevWeapon;
+		if(g_Config.m_ClZzFakeAimEnabled && g_Config.m_ClZzFakeAimMode > 0)
+			Send = Send || InputToSend.m_TargetX != m_aLastData[g_Config.m_ClDummy].m_TargetX || InputToSend.m_TargetY != m_aLastData[g_Config.m_ClDummy].m_TargetY;
 		Send = Send || time_get() > m_LastSendTime + time_freq() / 25; // send at least 25 Hz
 
 		// ZZetClient: while hammer assist is actively trying to hit (hammer + fire held), send at tickrate.
@@ -1761,6 +2079,7 @@ int CControls::SnapInput(int *pData)
 		}
 	}
 
+	GameClient()->m_ZzTas.ProcessFinalSnapInput(InputToSend, g_Config.m_ClDummy != 0);
 	m_LastSendTime = time_get();
 	mem_copy(pData, &InputToSend, sizeof(m_aInputData[0]));
 	return sizeof(m_aInputData[0]);
@@ -1805,7 +2124,11 @@ void CControls::OnRender()
 		// make sure to compensate for smooth dyncam to ensure the cursor stays still in world space if zoomed
 		vec2 DyncamOffsetDelta = GameClient()->m_Camera.m_DyncamTargetCameraOffset - GameClient()->m_Camera.m_aDyncamCurrentCameraOffset[g_Config.m_ClDummy];
 		float Zoom = GameClient()->m_Camera.m_Zoom;
-		m_aTargetPos[g_Config.m_ClDummy] = GameClient()->m_LocalCharacterPos + m_aMousePos[g_Config.m_ClDummy] - DyncamOffsetDelta + DyncamOffsetDelta / Zoom;
+		const vec2 BasePos = (GameClient()->m_ZzTas.IsWorldActive() && GameClient()->m_ZzTas.IsWorldInitialized()) ? GameClient()->m_ZzTas.GetInterpolatedPlayerPos() : GameClient()->m_LocalCharacterPos;
+		vec2 RenderMousePos = m_aMousePos[g_Config.m_ClDummy];
+		if(GameClient()->m_ZzTas.HasRenderMouseOverride())
+			RenderMousePos = GameClient()->m_ZzTas.GetRenderMousePos();
+		m_aTargetPos[g_Config.m_ClDummy] = BasePos + RenderMousePos - DyncamOffsetDelta + DyncamOffsetDelta / Zoom;
 	}
 	else if(GameClient()->m_Snap.m_SpecInfo.m_Active && GameClient()->m_Snap.m_SpecInfo.m_UsePosition)
 	{
@@ -2001,6 +2324,8 @@ bool CControls::CheckNewInput()
 	for(int Dummy = 0; Dummy < NUM_DUMMIES; Dummy++)
 	{
 		CNetObj_PlayerInput TestInput = m_aInputData[Dummy];
+		if(!m_aAutoTripleflyHookAllowed[Dummy])
+			TestInput.m_Hook = 0;
 		if(Dummy == g_Config.m_ClDummy)
 		{
 			TestInput.m_Direction = 0;
