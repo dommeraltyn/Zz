@@ -189,12 +189,18 @@ static const char *FoxSkipDecor(const char *pVote)
 		return "";
 	while(*pVote == ' ')
 		pVote++;
-	if(str_startswith(pVote, "│ "))
-		pVote += 3;
-	else if(*pVote == '│')
-		pVote++;
-	while(*pVote == ' ')
-		pVote++;
+	/* символ │ в UTF-8 занимает 3 байта и не помещается в char:
+	 * сравнение '*pVote == '│'' ломало компиляцию NDK clang
+	 * (character too large for enclosing character literal type),
+	 * поэтому сравниваем со строковым литералом через str_startswith,
+	 * который возвращает указатель ровно за префиксом */
+	const char *pAfterDecor = str_startswith(pVote, "│");
+	if(pAfterDecor)
+	{
+		pVote = pAfterDecor;
+		while(*pVote == ' ')
+			pVote++;
+	}
 	return pVote;
 }
 
