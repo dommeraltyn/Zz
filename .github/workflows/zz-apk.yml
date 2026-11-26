@@ -40,6 +40,37 @@ jobs:
           find scripts -type f \( -name '*.sh' -o -name 'gradlew' \) -exec chmod +x {} +
           sed -i 's/\r$//' src/game/version.h
 
+      - name: Ensure cmake/checksummed_extra.txt
+        run: |
+          if [ ! -f cmake/checksummed_extra.txt ]; then
+            mkdir -p cmake
+            cat > cmake/checksummed_extra.txt <<'EOT'
+          ${CMAKE_VERSION}
+          ${PROJECT_VERSION}
+          ${TARGET_BITS}
+          ${TARGET_CPU_ARCHITECTURE}
+          ${CMAKE_SYSTEM_NAME}
+          ${WEBSOCKETS}
+          ${MYSQL}
+          ${AUTOUPDATE}
+          ${INFORM_UPDATE}
+          ${VIDEORECORDER}
+          ${UPNP}
+          ${ANTIBOT}
+          ${HEADLESS_CLIENT}
+          ${CLIENT}
+          ${SERVER}
+          ${TOOLS}
+          ${STEAM}
+          ${DISCORD}
+          ${DISCORD_DYNAMIC}
+          ${DEV}
+          ${CMAKE_BUILD_TYPE}
+          ${CMAKE_CXX_COMPILER_ID}
+          EOT
+            echo 'восстановлен cmake/checksummed_extra.txt (теряется при передаче сурса)'
+          fi
+
       - name: Add prebuilt Android libraries
         run: |
           if [ ! -d ddnet-libs/sdl ]; then
