@@ -91,7 +91,6 @@
 #include "components/tclient/translate.h"
 #include "components/tclient/warlist.h"
 #include "components/tclient/zz_bestclient_presence.h"
-#include "components/bestclient/voice/voice.h"
 #include "components/tooltips.h"
 #include "components/touch_controls.h"
 #include "components/voting.h"
@@ -240,7 +239,6 @@ public:
 	CBgDraw m_BgDraw;
 	CTClient m_TClient;
 	CZzBestClientPresence m_ZzBestClientPresence;
-	CVoiceChat m_VoiceChat;
 	CTrails m_Trails;
 	CTranslate m_Translate;
 	CPet m_Pet;

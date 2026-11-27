@@ -1384,20 +1384,19 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 	{
 		const float LineSize = 20.0f;
 		static int s_BestClientSubTab = 0;
-		static CButtonContainer s_aBestClientSubTabs[4] = {};
+		static CButtonContainer s_aBestClientSubTabs[3] = {};
 
 		CUIRect InnerTabBar, InnerTabButton;
 		MainView.HSplitTop(22.0f, &InnerTabBar, &MainView);
-		const float InnerTabWidth = InnerTabBar.w / 4.0f;
+		const float InnerTabWidth = InnerTabBar.w / 3.0f;
 		const char *apInnerTabNames[] = {
 			Localize("BestClient"),
-			Localize("Voice Chat"),
 			Localize("Network"),
 			Localize("Bots")};
-		for(int i = 0; i < 4; i++)
+		for(int i = 0; i < 3; i++)
 		{
 			InnerTabBar.VSplitLeft(InnerTabWidth, &InnerTabButton, &InnerTabBar);
-			const int Corners = i == 0 ? IGraphics::CORNER_L : i == 3 ? IGraphics::CORNER_R : IGraphics::CORNER_NONE;
+			const int Corners = i == 0 ? IGraphics::CORNER_L : i == 2 ? IGraphics::CORNER_R : IGraphics::CORNER_NONE;
 			if(DoButton_MenuTab(&s_aBestClientSubTabs[i], apInnerTabNames[i], s_BestClientSubTab == i, &InnerTabButton, Corners, nullptr, nullptr, nullptr, nullptr, 4.0f))
 				s_BestClientSubTab = i;
 		}
@@ -1464,24 +1463,6 @@ void CMenus::RenderSettingsZZetClient(CUIRect MainView)
 			Ui()->DoLabel(&Label, g_Config.m_ClZzBestclientTokenUrl, 14.0f, TEXTALIGN_ML);
 		}
 		else if(s_BestClientSubTab == 1)
-		{
-			CUIRect Inner;
-			BeginCard(MainView, maximum(140.0f, MainView.h - 4.0f), Inner);
-			DoPanelHeader(Inner, Localize("Voice Chat"));
-
-			CUIRect Row;
-			Inner.HSplitTop(20.0f, &Row, &Inner);
-			Ui()->DoLabel(&Row, Localize("Voice chat panel and settings"), 14.0f, TEXTALIGN_ML);
-
-			Inner.HSplitTop(6.0f, nullptr, &Inner);
-			Inner.HSplitTop(18.0f, &Row, &Inner);
-			Ui()->DoLabel(&Row, Localize("Open voice panel using bind below (toggle_voice_panel)."), 12.0f, TEXTALIGN_ML);
-
-			Inner.HSplitTop(8.0f, nullptr, &Inner);
-			Inner.HSplitTop(120.0f, &Row, &Inner);
-			GameClient()->m_VoiceChat.RenderMenuControlBinds(Row);
-		}
-		else if(s_BestClientSubTab == 2)
 		{
 			CUIRect Inner;
 			BeginCard(MainView, 520.0f, Inner);

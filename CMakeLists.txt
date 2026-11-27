@@ -2668,9 +2668,6 @@ if(CLIENT)
     components/bestclient/orbit_aura.h
     components/bestclient/r_jelly.cpp
     components/bestclient/r_jelly.h
-    components/bestclient/voice/voice.cpp
-    components/bestclient/voice/voice.h
-    components/bestclient/voice/protocol.h
     components/bestclient/subsystem_runtime.h
     components/tooltips.cpp
     components/tooltips.h

@@ -1158,32 +1158,6 @@ MACRO_CONFIG_INT(GfxDriverIsBlocked, gfx_driver_is_blocked, 0, 0, 1, CFGFLAG_SAV
 
 MACRO_CONFIG_INT(ClVideoRecorderFPS, cl_video_recorder_fps, 60, 1, 1000, CFGFLAG_SAVE | CFGFLAG_CLIENT, "At which FPS the videorecorder should record demos.")
 
-// BestClient Voice Chat
-MACRO_CONFIG_INT(BcVoiceChatEnable, bc_voice_chat_enable, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Enable integrated voice chat")
-MACRO_CONFIG_INT(BcVoiceChatActivationMode, bc_voice_chat_activation_mode, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Voice activation mode (0 = automatic activation, 1 = push-to-talk)")
-MACRO_CONFIG_INT(BcVoiceChatVadThreshold, bc_voice_chat_vad_threshold, 5, 0, 100, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Voice activation threshold in automatic mode (percent)")
-MACRO_CONFIG_INT(BcVoiceChatVadReleaseDelayMs, bc_voice_chat_vad_release_delay_ms, 150, 0, 1000, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Delay before automatic voice activation turns off (ms)")
-MACRO_CONFIG_INT(BcVoiceChatVolume, bc_voice_chat_volume, 100, 0, 200, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Voice playback volume in percent")
-MACRO_CONFIG_INT(BcVoiceChatMicGain, bc_voice_chat_mic_gain, 100, 0, 300, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Microphone gain in percent")
-MACRO_CONFIG_INT(BcVoiceChatBitrate, bc_voice_chat_bitrate, 96, 6, 128, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Voice Opus bitrate in kbps")
-MACRO_CONFIG_INT(BcVoiceChatInputDevice, bc_voice_chat_input_device, -1, -1, 64, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Voice input device index (-1 = system default)")
-MACRO_CONFIG_INT(BcVoiceChatOutputDevice, bc_voice_chat_output_device, -1, -1, 64, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Voice output device index (-1 = system default)")
-MACRO_CONFIG_INT(BcVoiceChatMicMuted, bc_voice_chat_mic_muted, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Mute voice microphone")
-MACRO_CONFIG_INT(BcVoiceChatHeadphonesMuted, bc_voice_chat_headphones_muted, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Mute voice playback")
-MACRO_CONFIG_INT(BcVoiceChatMicCheck, bc_voice_chat_mic_check, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Enable microphone check (local loopback)")
-MACRO_CONFIG_INT(BcVoiceChatInGameOnly, bc_voice_chat_ingame_only, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Only allow voice transmit/playback while the game window is active")
-MACRO_CONFIG_INT(BcVoiceChatUseTeam0, bc_voice_chat_use_team0, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Force voice chat to use team 0 even while you are in a team")
-MACRO_CONFIG_INT(BcVoiceChatEnableYourGroup, bc_voice_chat_enable_your_group, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "In team0 mode, also include your own team for voice transmit/playback")
-MACRO_CONFIG_INT(BcVoiceChatBroadcastEverywhere, bc_voice_chat_broadcast_everywhere, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Broadcast voice to all BestClient relay servers")
-MACRO_CONFIG_INT(BcVoiceChatSpeakerSpoofer, bc_voice_chat_speaker_spoofer, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Use custom speaker client id in voice packets")
-MACRO_CONFIG_INT(BcVoiceChatSpeakerSpooferId, bc_voice_chat_speaker_spoofer_id, 0, -1, 63, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Speaker client id used when speaker spoofer is enabled")
-MACRO_CONFIG_INT(BcVoiceChatRadiusEnabled, bc_voice_chat_radius_enabled, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Enable local voice radius filter")
-MACRO_CONFIG_INT(BcVoiceChatRadiusTiles, bc_voice_chat_radius_tiles, 25, 1, 500, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Voice radius in tiles when local radius filter is enabled")
-MACRO_CONFIG_INT(BcVoiceChatNameplateIcon, bc_voice_chat_nameplate_icon, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Show microphone icon in name plates for talking players")
-MACRO_CONFIG_STR(BcVoiceChatServerAddress, bc_voice_chat_server_address, 128, "150.241.70.188:8777", CFGFLAG_CLIENT | CFGFLAG_SAVE, "Voice server address")
-MACRO_CONFIG_STR(BcVoiceChatMutedNames, bc_voice_chat_muted_names, 512, "", CFGFLAG_CLIENT | CFGFLAG_SAVE, "Comma-separated list of muted voice nicknames (case-insensitive)")
-MACRO_CONFIG_STR(BcVoiceChatNameVolumes, bc_voice_chat_name_volumes, 512, "", CFGFLAG_CLIENT | CFGFLAG_SAVE, "Comma-separated list of voice nickname volumes in percent (name=value, case-insensitive)")
-
 // Fast Hammer and Fast Gun
 MACRO_CONFIG_INT(ClZzFastHammer, cl_zz_fast_hammer, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "ZZetClient fast hammer: auto-spam hammer at server tune rate")
 MACRO_CONFIG_INT(ClZzFastGun, cl_zz_fast_gun, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "ZZetClient fast gun: auto-spam gun at server tune rate")

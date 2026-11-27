@@ -3281,8 +3281,6 @@ void CHud::OnRender()
 		RenderSuddenDeath();
 		if(g_Config.m_ClShowhudScore)
 			RenderScoreHud();
-		GameClient()->m_VoiceChat.RenderHudTalkingIndicator(m_Width, m_Height);
-		GameClient()->m_VoiceChat.RenderHudMuteStatusIndicator(m_Width, m_Height);
 		RenderDummyActions();
 		RenderWarmupTimer();
 		RenderTextInfo();

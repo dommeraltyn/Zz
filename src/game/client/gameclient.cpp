@@ -4877,7 +4877,6 @@ void CGameClient::OnConsoleInit()
 					      &m_Scoreboard,
 					      &m_Statboard,
 					      &m_Motd,
-					      &m_VoiceChat,
 					      &m_Menus,
 					      &m_Tooltips,
 					      &m_Scripting, // TClient
@@ -4896,7 +4895,6 @@ void CGameClient::OnConsoleInit()
 						  &m_BindWheel, // TClient
 						  &m_Emoticon,
 						  &m_ImportantAlert,
-						  &m_VoiceChat,
 						  &m_Menus,
 						  &m_Controls,
 						  &m_TouchControls,
